@@ -1,3 +1,4 @@
+import type { RefObject } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   XRSessionError,
@@ -20,6 +21,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
 const createInitialState = (): ScannerSessionState => ({
   status: 'ready',
   debug: createInitialDebug(),
+  domOverlayStatus: 'unknown',
   error: null,
 })
 
@@ -41,7 +43,9 @@ export interface ScannerSessionController {
   stopScan: () => void
 }
 
-export function useScannerSession(): ScannerSessionController {
+export function useScannerSession(
+  overlayRootRef: RefObject<HTMLDivElement | null>,
+): ScannerSessionController {
   const [service] = useState(() => new XRSessionService())
   const mountedRef = useRef(true)
   const statusRef = useRef<ScanSessionStatus>('ready')
@@ -61,62 +65,91 @@ export function useScannerSession(): ScannerSessionController {
       return
     }
 
+    const overlayRoot = overlayRootRef.current
+    if (!overlayRoot) {
+      statusRef.current = 'error'
+      setSessionState((currentState) => ({
+        ...currentState,
+        status: 'error',
+        error: 'The scanner overlay could not be prepared. Reload and try again.',
+      }))
+      return
+    }
+
     statusRef.current = 'starting'
     setSessionState((currentState) => ({
       ...currentState,
       status: 'starting',
+      domOverlayStatus: 'unknown',
       error: null,
     }))
 
     void service
       .start({
-        onDebugUpdate: (debug) => {
-          if (!mountedRef.current) {
-            return
-          }
-
-          setSessionState((currentState) => {
-            if (currentState.status !== 'scanning') {
-              return currentState
+        callbacks: {
+          onDomOverlayState: (domOverlayStatus) => {
+            if (!mountedRef.current) {
+              return
             }
 
-            return { ...currentState, debug }
-          })
-        },
-        onError: (error) => {
-          if (!mountedRef.current) {
-            return
-          }
+            setSessionState((currentState) => ({
+              ...currentState,
+              domOverlayStatus,
+            }))
+          },
+          onDebugUpdate: (debug) => {
+            if (!mountedRef.current) {
+              return
+            }
 
-          statusRef.current = 'error'
-          setSessionState((currentState) => ({
-            ...currentState,
-            status: 'error',
-            error: error.message,
-          }))
-        },
-        onSessionEnded: (reason) => {
-          if (!mountedRef.current) {
-            return
-          }
+            setSessionState((currentState) => {
+              if (currentState.status !== 'scanning') {
+                return currentState
+              }
 
-          if (reason === 'external') {
-            statusRef.current = 'error'
-            setSessionState({
-              status: 'error',
-              debug: createInitialDebug(),
-              error: 'The XR session ended unexpectedly. Start a new scan to try again.',
+              return { ...currentState, debug }
             })
-            return
-          }
+          },
+          onError: (error) => {
+            if (!mountedRef.current) {
+              return
+            }
 
-          statusRef.current = 'ready'
-          setSessionState({
-            status: 'ready',
-            debug: createInitialDebug(),
-            error: null,
-          })
+            statusRef.current = 'error'
+            setSessionState((currentState) => ({
+              ...currentState,
+              status: 'error',
+              error: error.message,
+            }))
+          },
+          onSessionEnded: (reason) => {
+            if (!mountedRef.current) {
+              return
+            }
+
+            if (reason === 'external') {
+              statusRef.current = 'error'
+              setSessionState((currentState) => ({
+                ...currentState,
+                status: 'error',
+                debug: createInitialDebug(),
+                error:
+                  currentState.error ??
+                  'The XR session ended unexpectedly. Start a new scan to try again.',
+              }))
+              return
+            }
+
+            statusRef.current = 'ready'
+            setSessionState((currentState) => ({
+              ...currentState,
+              status: 'ready',
+              debug: createInitialDebug(),
+              error: null,
+            }))
+          },
         },
+        overlayRoot,
       })
       .then(() => {
         if (!mountedRef.current || statusRef.current !== 'starting') {
@@ -145,10 +178,10 @@ export function useScannerSession(): ScannerSessionController {
           ),
         }))
       })
-  }, [service])
+  }, [overlayRootRef, service])
 
   const stopScan = useCallback(() => {
-    if (statusRef.current !== 'scanning') {
+    if (statusRef.current !== 'scanning' && statusRef.current !== 'starting') {
       return
     }
 
@@ -167,11 +200,12 @@ export function useScannerSession(): ScannerSessionController {
         }
 
         statusRef.current = 'ready'
-        setSessionState({
+        setSessionState((currentState) => ({
+          ...currentState,
           status: 'ready',
           debug: createInitialDebug(),
           error: null,
-        })
+        }))
       })
       .catch((error: unknown) => {
         if (!mountedRef.current) {

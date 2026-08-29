@@ -4,6 +4,8 @@ export type ScanSessionStatus = 'ready' | 'starting' | 'scanning' | 'stopping' |
 
 export type ScannerReferenceSpaceType = 'local-floor' | 'local'
 
+export type DomOverlayStatus = 'unknown' | 'active' | 'unavailable'
+
 export interface ScannerCapabilities {
   webxr: boolean
   immersiveAr: boolean
@@ -31,5 +33,6 @@ export interface ViewerPoseDebug {
 export interface ScannerSessionState {
   status: ScanSessionStatus
   debug: ViewerPoseDebug
+  domOverlayStatus: DomOverlayStatus
   error: string | null
 }

@@ -1,14 +1,17 @@
+import type { RefObject } from 'react'
 import type {
   ScannerCapabilities,
   ScannerCheckStatus,
   ScannerSessionState,
 } from '../types'
 import '../../../App.css'
+import ScannerDomOverlay from './ScannerDomOverlay'
 
 interface ScannerPageProps {
   status: ScannerCheckStatus
   capabilities: ScannerCapabilities | null
   canStartScan: boolean
+  overlayRootRef: RefObject<HTMLDivElement | null>
   sessionState: ScannerSessionState
   onStartScan: () => void
   onStopScan: () => void
@@ -74,6 +77,7 @@ function ScannerPage({
   canStartScan,
   onStartScan,
   onStopScan,
+  overlayRootRef,
   sessionState,
   status,
 }: ScannerPageProps) {
@@ -82,6 +86,10 @@ function ScannerPage({
   const isStarting = sessionState.status === 'starting'
   const isActive = sessionState.status === 'scanning' || sessionState.status === 'stopping'
   const isStopping = sessionState.status === 'stopping'
+  const isDomOverlayActive =
+    sessionState.domOverlayStatus === 'active' &&
+    (sessionState.status === 'starting' || isActive)
+  const isDomOverlayUnavailable = sessionState.domOverlayStatus === 'unavailable'
   const statusLabel = isStarting
     ? 'Starting session'
     : isStopping
@@ -108,6 +116,12 @@ function ScannerPage({
   return (
     <div className="scanner-shell">
       <div className="scanner-noise" aria-hidden="true" />
+      <div
+        ref={overlayRootRef}
+        className={`xr-dom-overlay ${isDomOverlayActive ? 'is-visible' : ''}`}
+      >
+        <ScannerDomOverlay onStopScan={onStopScan} sessionState={sessionState} />
+      </div>
       <div className="scanner-content">
         <header className="scanner-header">
           <span className="brand-lockup">
@@ -176,6 +190,25 @@ function ScannerPage({
                     : 'Immersive AR is not available in this browser.'}
               </span>
             </div>
+
+            <div className={`dom-overlay-summary ${isDomOverlayUnavailable ? 'is-unavailable' : ''}`}>
+              <span>DOM overlay</span>
+              <strong>
+                {sessionState.domOverlayStatus === 'active'
+                  ? 'Active'
+                  : isDomOverlayUnavailable
+                    ? 'Unavailable'
+                    : 'Checked when session starts'}
+              </strong>
+            </div>
+
+            {canStartScan && !isActive ? (
+              <p className="dom-overlay-instructions">
+                {isDomOverlayUnavailable
+                  ? 'DOM overlay was unavailable. Use the Android system Back gesture to exit immersive AR.'
+                  : 'Controls will appear inside XR when DOM overlay is granted. If unavailable, use the Android system Back gesture to exit.'}
+              </p>
+            ) : null}
 
             <div className="scanner-session-controls">
               <div className={`session-status session-status-${sessionState.status}`}>

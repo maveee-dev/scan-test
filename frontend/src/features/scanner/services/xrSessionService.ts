@@ -1,4 +1,5 @@
 import type {
+  DomOverlayStatus,
   ScannerReferenceSpaceType,
   ViewerPoseDebug,
   ViewerPosition,
@@ -28,9 +29,15 @@ export class XRSessionError extends Error {
 }
 
 export interface XRSessionCallbacks {
+  onDomOverlayState: (status: DomOverlayStatus) => void
   onDebugUpdate: (debug: ViewerPoseDebug) => void
   onError: (error: XRSessionError) => void
   onSessionEnded: (reason: XRSessionEndReason) => void
+}
+
+export interface XRSessionStartOptions {
+  callbacks: XRSessionCallbacks
+  overlayRoot: HTMLElement
 }
 
 interface ReferenceSpaceResult {
@@ -100,7 +107,7 @@ export class XRSessionService {
 
   private position: ViewerPosition | null = null
 
-  public start(callbacks: XRSessionCallbacks): Promise<void> {
+  public start(options: XRSessionStartOptions): Promise<void> {
     if (this.startPromise) {
       return this.startPromise
     }
@@ -112,7 +119,7 @@ export class XRSessionService {
     }
 
     this.stopRequested = false
-    const startPromise = this.startInternal(callbacks)
+    const startPromise = this.startInternal(options)
     this.startPromise = startPromise
 
     void startPromise.then(
@@ -149,7 +156,7 @@ export class XRSessionService {
     await this.stop()
   }
 
-  private async startInternal(callbacks: XRSessionCallbacks): Promise<void> {
+  private async startInternal(options: XRSessionStartOptions): Promise<void> {
     const xrSystem = typeof navigator === 'undefined' ? undefined : navigator.xr
 
     if (!xrSystem) {
@@ -160,7 +167,8 @@ export class XRSessionService {
     try {
       // This call is reached directly from the Start Scan click handler.
       session = await xrSystem.requestSession('immersive-ar', {
-        optionalFeatures: ['local-floor'],
+        optionalFeatures: ['local-floor', 'dom-overlay'],
+        domOverlay: { root: options.overlayRoot },
       })
     } catch (error) {
       throw createError(
@@ -176,9 +184,10 @@ export class XRSessionService {
     }
 
     this.activeSession = session
-    this.callbacks = callbacks
+    this.callbacks = options.callbacks
     this.sessionEndListener = () => this.handleSessionEnded(session)
     session.addEventListener('end', this.sessionEndListener)
+    this.callbacks.onDomOverlayState(session.domOverlayState ? 'active' : 'unavailable')
 
     try {
       const referenceSpaceResult = await this.requestReferenceSpace(session)
