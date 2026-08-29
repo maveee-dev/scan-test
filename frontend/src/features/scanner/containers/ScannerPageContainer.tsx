@@ -5,8 +5,9 @@ import { useWebXRSupport } from '../hooks/useWebXRSupport'
 
 function ScannerPageContainer() {
   const overlayRootRef = useRef<HTMLDivElement>(null)
+  const pointPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const checkState = useWebXRSupport()
-  const sessionController = useScannerSession(overlayRootRef)
+  const sessionController = useScannerSession(overlayRootRef, pointPreviewCanvasRef)
   const canStartScan = checkState.capabilities?.immersiveAr === true
 
   return (
@@ -14,6 +15,7 @@ function ScannerPageContainer() {
       {...checkState}
       canStartScan={canStartScan}
       overlayRootRef={overlayRootRef}
+      pointPreviewCanvasRef={pointPreviewCanvasRef}
       onStartScan={sessionController.startScan}
       onStopScan={sessionController.stopScan}
       sessionState={sessionController.sessionState}

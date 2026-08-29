@@ -1,5 +1,6 @@
 import type {
   DepthDataType,
+  DepthFrameObservation,
   DepthSample,
   DepthSampleLabel,
   DepthUsage,
@@ -10,6 +11,9 @@ import type {
 } from '../types'
 
 const DEPTH_PROBE_FRAME_LIMIT = 30
+export const DEPTH_GRID_COLUMNS = 16
+export const DEPTH_GRID_ROWS = 9
+const DEPTH_GRID_SAMPLE_COUNT = DEPTH_GRID_COLUMNS * DEPTH_GRID_ROWS
 
 interface DepthSamplePoint {
   label: DepthSampleLabel
@@ -21,6 +25,8 @@ interface PropertyReadResult<T> {
   value: T | undefined
   error: XRDepthException | null
 }
+
+type DepthSampler = (x: number, y: number) => number
 
 const DEPTH_SAMPLE_POINTS: DepthSamplePoint[] = [
   { label: 'center', xRatio: 0.5, yRatio: 0.5 },
@@ -55,6 +61,21 @@ function createEmptyAcquisitionDiagnostics(): XRDepthAcquisitionDiagnostics {
   }
 }
 
+function createEmptyFrameObservation(): DepthFrameObservation {
+  return {
+    sampleCount: 0,
+    requestedSampleCount: DEPTH_GRID_SAMPLE_COUNT,
+    rejectedSampleCount: DEPTH_GRID_SAMPLE_COUNT,
+    normalizedX: new Float32Array(DEPTH_GRID_SAMPLE_COUNT),
+    normalizedY: new Float32Array(DEPTH_GRID_SAMPLE_COUNT),
+    distancesMeters: new Float32Array(DEPTH_GRID_SAMPLE_COUNT),
+    depthProjectionMatrix: null,
+    depthTransformMatrix: null,
+    viewProjectionMatrix: null,
+    viewTransformMatrix: null,
+  }
+}
+
 export function createInitialDepthDebug(): XRDepthDebug {
   return {
     status: 'idle',
@@ -69,6 +90,9 @@ export function createInitialDepthDebug(): XRDepthDebug {
     metadataError: null,
     rawValueToMetersError: null,
     sampleError: null,
+    samplingError: null,
+    gridSampleError: null,
+    geometryError: null,
     error: null,
   }
 }
@@ -143,6 +167,18 @@ function isValidScale(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value > 0
 }
 
+function copyMatrix(matrix: Float32Array | undefined): Float32Array | null {
+  if (!matrix) {
+    return null
+  }
+
+  try {
+    return new Float32Array(matrix)
+  } catch {
+    return null
+  }
+}
+
 function formatSampleCoordinateError(samplePoint: DepthSamplePoint): XRDepthException {
   return {
     name: 'InvalidCoordinateError',
@@ -168,10 +204,10 @@ export class XRDepthService {
     this.readSessionDiagnostics(session)
   }
 
-  public inspectFrame(frame: XRFrame, view: XRView): void {
+  public inspectFrame(frame: XRFrame, view: XRView): DepthFrameObservation | null {
     const session = this.session
     if (!session || this.diagnostics.status === 'idle' || this.diagnostics.status === 'unavailable') {
-      return
+      return null
     }
 
     if (this.diagnostics.session.usage === 'gpu-optimized') {
@@ -180,7 +216,7 @@ export class XRDepthService {
         status: 'not-attempted',
         error: null,
       }
-      return
+      return null
     }
 
     this.probeFrameCount += 1
@@ -191,7 +227,7 @@ export class XRDepthService {
         status: 'unsupported',
         error: null,
       }
-      return
+      return null
     }
 
     let depthInformation: XRCPUDepthInformation | null | undefined
@@ -208,7 +244,7 @@ export class XRDepthService {
         ),
       }
       this.diagnostics.error = 'Depth information acquisition failed.'
-      return
+      return null
     }
 
     if (!depthInformation) {
@@ -217,7 +253,7 @@ export class XRDepthService {
         error: null,
       }
       this.markUnavailableIfNotGranted()
-      return
+      return null
     }
 
     this.diagnostics.acquisition = {
@@ -238,7 +274,7 @@ export class XRDepthService {
       this.diagnostics.metadataError = widthResult.error ?? heightResult.error
       this.diagnostics.status = 'error'
       this.diagnostics.error = 'XR depth metadata could not be read.'
-      return
+      return null
     }
 
     if (!isValidResolution(widthResult.value) || !isValidResolution(heightResult.value)) {
@@ -248,7 +284,7 @@ export class XRDepthService {
       }
       this.diagnostics.status = 'error'
       this.diagnostics.error = 'XR depth metadata was invalid.'
-      return
+      return null
     }
 
     this.diagnostics.width = widthResult.value
@@ -258,7 +294,24 @@ export class XRDepthService {
     this.diagnostics.error = null
     this.diagnostics.status = 'active'
 
-    this.readDepthSamples(depthInformation)
+    const depthSamplerResult = readProperty(() => depthInformation.getDepthInMeters)
+    if (depthSamplerResult.error || typeof depthSamplerResult.value !== 'function') {
+      this.diagnostics.samplingError = depthSamplerResult.error ?? {
+        name: 'DepthSamplingUnsupported',
+        message: 'XR depth information did not expose getDepthInMeters().',
+      }
+      this.diagnostics.error = 'XR depth samples could not be read.'
+      return this.createFrameObservation(depthInformation, view)
+    }
+
+    this.diagnostics.samplingError = null
+    const depthSampler = depthSamplerResult.value.bind(depthInformation)
+    this.readDepthSamples(depthSampler)
+    return this.createFrameObservation(
+      depthInformation,
+      view,
+      depthSampler,
+    )
   }
 
   public getDiagnostics(): XRDepthDebug {
@@ -311,7 +364,7 @@ export class XRDepthService {
     }
   }
 
-  private readDepthSamples(depthInformation: XRCPUDepthInformation): void {
+  private readDepthSamples(depthSampler: DepthSampler): void {
     this.diagnostics.samples = createEmptySamples()
     this.diagnostics.sampleError = null
 
@@ -328,10 +381,7 @@ export class XRDepthService {
       }
 
       try {
-        const distance = depthInformation.getDepthInMeters(
-          samplePoint.xRatio,
-          samplePoint.yRatio,
-        )
+        const distance = depthSampler(samplePoint.xRatio, samplePoint.yRatio)
         this.diagnostics.samples[index].distanceMeters = isValidDistance(distance) ? distance : null
       } catch (error) {
         this.diagnostics.sampleError = {
@@ -344,6 +394,68 @@ export class XRDepthService {
         }
       }
     }
+  }
+
+  private createFrameObservation(
+    depthInformation: XRCPUDepthInformation,
+    view: XRView,
+    depthSampler?: DepthSampler,
+  ): DepthFrameObservation {
+    const observation = createEmptyFrameObservation()
+    const depthProjectionResult = readProperty(() => depthInformation.projectionMatrix)
+    const depthTransformResult = readProperty(() => depthInformation.transform?.matrix)
+    const viewProjectionResult = readProperty(() => view.projectionMatrix)
+    const viewTransformResult = readProperty(() => view.transform.matrix)
+
+    observation.depthProjectionMatrix = copyMatrix(depthProjectionResult.value)
+    observation.depthTransformMatrix = copyMatrix(depthTransformResult.value)
+    observation.viewProjectionMatrix = copyMatrix(viewProjectionResult.value)
+    observation.viewTransformMatrix = copyMatrix(viewTransformResult.value)
+
+    this.diagnostics.geometryError =
+      depthProjectionResult.error ??
+      depthTransformResult.error ??
+      viewProjectionResult.error ??
+      viewTransformResult.error
+
+    if (!depthSampler) {
+      this.diagnostics.gridSampleError = null
+      return observation
+    }
+
+    this.diagnostics.gridSampleError = null
+    let sampleIndex = 0
+    let rejectedSampleCount = 0
+
+    for (let row = 0; row < DEPTH_GRID_ROWS; row += 1) {
+      const y = row / (DEPTH_GRID_ROWS - 1)
+      for (let column = 0; column < DEPTH_GRID_COLUMNS; column += 1) {
+        const x = column / (DEPTH_GRID_COLUMNS - 1)
+
+        try {
+          const distance = depthSampler(x, y)
+          if (isValidDistance(distance)) {
+            observation.normalizedX[sampleIndex] = x
+            observation.normalizedY[sampleIndex] = y
+            observation.distancesMeters[sampleIndex] = distance
+            observation.sampleCount += 1
+            sampleIndex += 1
+          } else {
+            rejectedSampleCount += 1
+          }
+        } catch (error) {
+          rejectedSampleCount += 1
+          this.diagnostics.gridSampleError = createException(
+            error,
+            'DepthGridSampleError',
+            'A spatial depth-grid sample could not be read.',
+          )
+        }
+      }
+    }
+
+    observation.rejectedSampleCount = rejectedSampleCount
+    return observation
   }
 
   private markUnavailableIfNotGranted(): void {

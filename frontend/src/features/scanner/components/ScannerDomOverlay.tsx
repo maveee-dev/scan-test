@@ -1,14 +1,20 @@
+import type { RefObject } from 'react'
 import type {
   DepthAcquisitionStatus,
   DepthSensingStatus,
   ReferenceSpaceStatus,
   ScannerSessionState,
+  SpatialGeometrySource,
+  SpatialPoint,
+  SpatialPreviewStatus,
+  SpatialBounds,
   XRDepthException,
   XRPresentationStatus,
 } from '../types'
 
 interface ScannerDomOverlayProps {
   onStopScan: () => void
+  pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
 }
 
@@ -84,6 +90,39 @@ function formatDepthException(label: string, error: XRDepthException): string {
   return `${label}: ${error.name} — ${error.message}`
 }
 
+function formatSpatialPreviewStatus(status: SpatialPreviewStatus): string {
+  switch (status) {
+    case 'ready':
+      return 'Ready'
+    case 'failed':
+      return 'Failed'
+    default:
+      return 'Idle'
+  }
+}
+
+function formatSpatialSource(source: SpatialGeometrySource): string {
+  switch (source) {
+    case 'depth':
+      return 'Depth geometry'
+    case 'view':
+      return 'XR view fallback'
+    default:
+      return 'Unavailable'
+  }
+}
+
+function formatSpatialRange(
+  bounds: SpatialBounds | null,
+  axis: keyof SpatialPoint,
+): string {
+  if (!bounds) {
+    return 'N/A'
+  }
+
+  return `${bounds.min[axis].toFixed(2)} / ${bounds.max[axis].toFixed(2)}`
+}
+
 function formatDepthResolution(width: number | null, height: number | null): string {
   return width !== null && height !== null ? `${width} × ${height}` : 'N/A'
 }
@@ -94,7 +133,7 @@ function formatDepthDistance(distanceMeters: number | null): string {
     : 'N/A'
 }
 
-function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps) {
+function ScannerDomOverlay({ onStopScan, pointPreviewCanvasRef, sessionState }: ScannerDomOverlayProps) {
   const isStarting = sessionState.status === 'starting'
   const isStopping = sessionState.status === 'stopping'
 
@@ -248,9 +287,79 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
               )}
             </p>
           ) : null}
+          {sessionState.debug.depth.samplingError ? (
+            <p>
+              {formatDepthException('depth sampling', sessionState.debug.depth.samplingError)}
+            </p>
+          ) : null}
+          {sessionState.debug.depth.gridSampleError ? (
+            <p>
+              {formatDepthException('depth grid sample', sessionState.debug.depth.gridSampleError)}
+            </p>
+          ) : null}
+          {sessionState.debug.depth.geometryError ? (
+            <p>
+              {formatDepthException('depth geometry', sessionState.debug.depth.geometryError)}
+            </p>
+          ) : null}
         </div>
         {sessionState.debug.depth.error ? (
           <p className="xr-dom-overlay-depth-error">{sessionState.debug.depth.error}</p>
+        ) : null}
+      </div>
+
+      <div className="xr-dom-overlay-spatial" aria-label="Current world-space point diagnostics">
+        <div className="xr-dom-overlay-spatial-header">
+          <span>World points / current frame</span>
+          <strong>{formatSpatialPreviewStatus(sessionState.debug.spatial.previewStatus)}</strong>
+        </div>
+        <canvas
+          ref={pointPreviewCanvasRef}
+          className="xr-dom-overlay-point-preview"
+          aria-label="Current world-space depth point preview"
+        />
+        <div className="xr-dom-overlay-spatial-meta">
+          <div>
+            <span>Current valid points</span>
+            <strong>{sessionState.debug.spatial.currentValidPoints}</strong>
+          </div>
+          <div>
+            <span>Rejected depth samples</span>
+            <strong>{sessionState.debug.spatial.rejectedDepthSamples}</strong>
+          </div>
+          <div>
+            <span>Projection source</span>
+            <strong>{formatSpatialSource(sessionState.debug.spatial.projectionSource)}</strong>
+          </div>
+          <div>
+            <span>Transform source</span>
+            <strong>{formatSpatialSource(sessionState.debug.spatial.transformSource)}</strong>
+          </div>
+        </div>
+        <div className="xr-dom-overlay-spatial-ranges">
+          <div>
+            <span>X min / max</span>
+            <strong>{formatSpatialRange(sessionState.debug.spatial.bounds, 'x')}</strong>
+          </div>
+          <div>
+            <span>Y min / max</span>
+            <strong>{formatSpatialRange(sessionState.debug.spatial.bounds, 'y')}</strong>
+          </div>
+          <div>
+            <span>Z min / max</span>
+            <strong>{formatSpatialRange(sessionState.debug.spatial.bounds, 'z')}</strong>
+          </div>
+        </div>
+        <div className="xr-dom-overlay-spatial-center">
+          <span>Center reconstructed point</span>
+          <strong>
+            {sessionState.debug.spatial.centerPoint
+              ? `X ${sessionState.debug.spatial.centerPoint.x.toFixed(2)} / Y ${sessionState.debug.spatial.centerPoint.y.toFixed(2)} / Z ${sessionState.debug.spatial.centerPoint.z.toFixed(2)}`
+              : 'N/A'}
+          </strong>
+        </div>
+        {sessionState.debug.spatial.error ? (
+          <p className="xr-dom-overlay-spatial-error">{sessionState.debug.spatial.error}</p>
         ) : null}
       </div>
 

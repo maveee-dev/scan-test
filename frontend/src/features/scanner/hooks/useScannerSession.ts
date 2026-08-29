@@ -5,6 +5,7 @@ import {
   XRSessionService,
 } from '../services/xrSessionService'
 import { createInitialDepthDebug } from '../services/xrDepthService'
+import { createInitialSpatialPointDebug } from '../services/spatialPointService'
 import type {
   ScanSessionStatus,
   ScannerSessionState,
@@ -24,6 +25,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   referenceSpaceType: null,
   lastSampledAt: null,
   depth: createInitialDepthDebug(),
+  spatial: createInitialSpatialPointDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -53,6 +55,7 @@ export interface ScannerSessionController {
 
 export function useScannerSession(
   overlayRootRef: RefObject<HTMLDivElement | null>,
+  pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>,
 ): ScannerSessionController {
   const [service] = useState(() => new XRSessionService())
   const mountedRef = useRef(true)
@@ -141,6 +144,7 @@ export function useScannerSession(
                   trackingStatus: 'waiting',
                   position: null,
                   depth: createInitialDepthDebug(),
+                  spatial: createInitialSpatialPointDebug(),
                 },
                 error:
                   currentState.error ??
@@ -159,6 +163,7 @@ export function useScannerSession(
           },
         },
         overlayRoot,
+        pointPreviewCanvas: pointPreviewCanvasRef.current ?? undefined,
       })
       .then(() => {
         if (!mountedRef.current || statusRef.current !== 'starting') {
@@ -187,7 +192,7 @@ export function useScannerSession(
           ),
         }))
       })
-  }, [overlayRootRef, service])
+  }, [overlayRootRef, pointPreviewCanvasRef, service])
 
   const stopScan = useCallback(() => {
     if (statusRef.current !== 'scanning' && statusRef.current !== 'starting') {

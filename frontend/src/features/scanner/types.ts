@@ -35,6 +35,10 @@ export type DepthUsage = 'cpu-optimized' | 'gpu-optimized'
 
 export type DepthSampleLabel = 'center' | 'upper' | 'lower' | 'left' | 'right'
 
+export type SpatialPreviewStatus = 'idle' | 'ready' | 'failed'
+
+export type SpatialGeometrySource = 'depth' | 'view' | 'unavailable'
+
 export interface ScannerCapabilities {
   webxr: boolean
   immersiveAr: boolean
@@ -87,6 +91,19 @@ export interface XRDepthSampleError {
   error: XRDepthException
 }
 
+export interface DepthFrameObservation {
+  sampleCount: number
+  requestedSampleCount: number
+  rejectedSampleCount: number
+  normalizedX: Float32Array
+  normalizedY: Float32Array
+  distancesMeters: Float32Array
+  depthProjectionMatrix: Float32Array | null
+  depthTransformMatrix: Float32Array | null
+  viewProjectionMatrix: Float32Array | null
+  viewTransformMatrix: Float32Array | null
+}
+
 export interface XRDepthDebug {
   status: DepthSensingStatus
   dataType: DepthDataType
@@ -100,6 +117,31 @@ export interface XRDepthDebug {
   metadataError: XRDepthException | null
   rawValueToMetersError: XRDepthException | null
   sampleError: XRDepthSampleError | null
+  samplingError: XRDepthException | null
+  gridSampleError: XRDepthException | null
+  geometryError: XRDepthException | null
+  error: string | null
+}
+
+export interface SpatialPoint {
+  x: number
+  y: number
+  z: number
+}
+
+export interface SpatialBounds {
+  min: SpatialPoint
+  max: SpatialPoint
+}
+
+export interface SpatialPointDebug {
+  previewStatus: SpatialPreviewStatus
+  projectionSource: SpatialGeometrySource
+  transformSource: SpatialGeometrySource
+  currentValidPoints: number
+  rejectedDepthSamples: number
+  bounds: SpatialBounds | null
+  centerPoint: SpatialPoint | null
   error: string | null
 }
 
@@ -116,6 +158,7 @@ export interface ViewerPoseDebug {
   referenceSpaceType: ScannerReferenceSpaceType | null
   lastSampledAt: number | null
   depth: XRDepthDebug
+  spatial: SpatialPointDebug
 }
 
 export interface ScannerSessionState {

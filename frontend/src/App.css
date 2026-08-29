@@ -427,6 +427,7 @@
   padding: 16px;
   visibility: hidden;
   pointer-events: none;
+  overflow-y: auto;
 }
 
 .xr-dom-overlay.is-visible {
@@ -435,6 +436,8 @@
 
 .xr-dom-overlay-panel {
   width: min(100%, 380px);
+  max-height: calc(100svh - 32px);
+  overflow-y: auto;
   padding: 16px;
   border: 1px solid rgba(212, 239, 105, 0.35);
   border-radius: 14px;
@@ -662,6 +665,105 @@
 }
 
 .xr-dom-overlay-depth-error {
+  margin: 9px 0 0;
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.xr-dom-overlay-spatial {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.xr-dom-overlay-spatial-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.xr-dom-overlay-spatial-header strong {
+  color: var(--acid);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.xr-dom-overlay-point-preview {
+  display: block;
+  width: 100%;
+  height: 142px;
+  margin-top: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.xr-dom-overlay-spatial-meta,
+.xr-dom-overlay-spatial-ranges {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.xr-dom-overlay-spatial-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.xr-dom-overlay-spatial-ranges {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.xr-dom-overlay-spatial-meta > div,
+.xr-dom-overlay-spatial-ranges > div,
+.xr-dom-overlay-spatial-center {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.xr-dom-overlay-spatial-meta span,
+.xr-dom-overlay-spatial-ranges span,
+.xr-dom-overlay-spatial-center span {
+  display: block;
+  overflow: hidden;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-spatial-meta strong,
+.xr-dom-overlay-spatial-ranges strong,
+.xr-dom-overlay-spatial-center strong {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-spatial-center {
+  margin-top: 8px;
+}
+
+.xr-dom-overlay-spatial-error {
   margin: 9px 0 0;
   color: var(--coral);
   font-family: var(--mono);
@@ -1004,6 +1106,40 @@
 }
 
 .depth-page-diagnostics strong {
+  margin-top: 7px;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.spatial-page-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.spatial-page-diagnostics > div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.spatial-page-diagnostics span,
+.spatial-page-diagnostics strong {
+  display: block;
+  font-family: var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.spatial-page-diagnostics span {
+  color: var(--dim);
+  font-size: 8px;
+}
+
+.spatial-page-diagnostics strong {
   margin-top: 7px;
   color: var(--ink);
   font-size: 10px;

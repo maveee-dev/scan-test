@@ -4,6 +4,7 @@ import type {
   ScannerCapabilities,
   ScannerCheckStatus,
   ScannerSessionState,
+  SpatialGeometrySource,
 } from '../types'
 import '../../../App.css'
 import ScannerDomOverlay from './ScannerDomOverlay'
@@ -13,6 +14,7 @@ interface ScannerPageProps {
   capabilities: ScannerCapabilities | null
   canStartScan: boolean
   overlayRootRef: RefObject<HTMLDivElement | null>
+  pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
   onStartScan: () => void
   onStopScan: () => void
@@ -90,12 +92,24 @@ function formatDepthStatus(status: DepthSensingStatus): string {
   }
 }
 
+function formatSpatialSource(source: SpatialGeometrySource): string {
+  switch (source) {
+    case 'depth':
+      return 'Depth geometry'
+    case 'view':
+      return 'XR view fallback'
+    default:
+      return 'Unavailable'
+  }
+}
+
 function ScannerPage({
   capabilities,
   canStartScan,
   onStartScan,
   onStopScan,
   overlayRootRef,
+  pointPreviewCanvasRef,
   sessionState,
   status,
 }: ScannerPageProps) {
@@ -122,7 +136,7 @@ function ScannerPage({
     : isStopping
       ? 'Ending XR frame processing safely.'
       : isActive
-        ? 'Reading viewer pose from the XR device.'
+        ? 'Converting live depth into current-frame world points.'
         : 'Start a session to verify device pose tracking.'
   const sessionTag = isStarting
     ? 'Creating session'
@@ -138,7 +152,11 @@ function ScannerPage({
         ref={overlayRootRef}
         className={`xr-dom-overlay ${isDomOverlayActive ? 'is-visible' : ''}`}
       >
-        <ScannerDomOverlay onStopScan={onStopScan} sessionState={sessionState} />
+        <ScannerDomOverlay
+          onStopScan={onStopScan}
+          pointPreviewCanvasRef={pointPreviewCanvasRef}
+          sessionState={sessionState}
+        />
       </div>
       <div className="scanner-content">
         <header className="scanner-header">
@@ -151,12 +169,12 @@ function ScannerPage({
 
         <main className="scanner-main" aria-labelledby="scanner-title">
           <section className="scanner-intro">
-            <span className="scanner-eyebrow">Milestone 03 / Depth sensing</span>
+            <span className="scanner-eyebrow">Milestone 04 / World-space points</span>
             <h1 className="scanner-title" id="scanner-title">
               Scan the <em>space</em> around you.
             </h1>
             <p className="scanner-description">
-              Start an immersive AR session to verify your browser can track the device as you move through a room.
+              Start an immersive AR session to turn live depth observations into current-frame world-space points.
             </p>
           </section>
 
@@ -175,7 +193,7 @@ function ScannerPage({
                   Device readiness
                 </h2>
                 <p className="capability-card-copy">
-                  Confirm support, then test live device pose tracking.
+                  Confirm support, then inspect live pose, depth, and world-point geometry.
                 </p>
               </div>
               <span className="capability-tag">{sessionTag}</span>
@@ -351,6 +369,24 @@ function ScannerPage({
                     <strong>{sessionState.debug.depth.validFrameCount}</strong>
                   </div>
                 </div>
+                <div className="spatial-page-diagnostics">
+                  <div>
+                    <span>Current world points</span>
+                    <strong>{sessionState.debug.spatial.currentValidPoints}</strong>
+                  </div>
+                  <div>
+                    <span>Rejected samples</span>
+                    <strong>{sessionState.debug.spatial.rejectedDepthSamples}</strong>
+                  </div>
+                  <div>
+                    <span>Projection</span>
+                    <strong>{formatSpatialSource(sessionState.debug.spatial.projectionSource)}</strong>
+                  </div>
+                  <div>
+                    <span>Transform</span>
+                    <strong>{formatSpatialSource(sessionState.debug.spatial.transformSource)}</strong>
+                  </div>
+                </div>
               </section>
             ) : null}
           </section>
@@ -358,7 +394,7 @@ function ScannerPage({
 
         <footer className="scanner-footer">
           <span>Spatial Scanner / V1.0</span>
-          <span>{isActive ? 'Pose + depth sensing test' : 'Capability check + session test'}</span>
+          <span>{isActive ? 'Pose + current-frame points' : 'Capability check + session test'}</span>
         </footer>
       </div>
     </div>

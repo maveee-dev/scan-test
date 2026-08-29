@@ -2,6 +2,7 @@ import type {
   DomOverlayStatus,
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
+  SpatialPointDebug,
   XRPresentationStatus,
   ViewerPoseDebug,
   ViewerPosition,
@@ -12,6 +13,8 @@ import {
   type XRPresentationDiagnostics,
 } from './xrPresentationService'
 import { XRDepthService } from './xrDepthService'
+import { SpatialPointService } from './spatialPointService'
+import { SpatialPointPreviewService } from './spatialPointPreviewService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 
@@ -47,6 +50,7 @@ export interface XRSessionCallbacks {
 export interface XRSessionStartOptions {
   callbacks: XRSessionCallbacks
   overlayRoot: HTMLElement
+  pointPreviewCanvas?: HTMLCanvasElement
 }
 
 interface ReferenceSpaceResult {
@@ -95,6 +99,10 @@ export class XRSessionService {
   private readonly presentationService = new XRPresentationService()
 
   private readonly depthService = new XRDepthService()
+
+  private readonly spatialPointService = new SpatialPointService()
+
+  private readonly spatialPointPreviewService = new SpatialPointPreviewService()
 
   private referenceSpace: XRReferenceSpace | null = null
 
@@ -177,6 +185,8 @@ export class XRSessionService {
     await this.stop()
     this.presentationService.dispose()
     this.depthService.dispose()
+    this.spatialPointService.reset()
+    this.spatialPointPreviewService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -216,6 +226,7 @@ export class XRSessionService {
     this.callbacks = options.callbacks
     this.resetSessionDiagnostics()
     this.depthService.initialize(session)
+    this.spatialPointPreviewService.initialize(options.pointPreviewCanvas)
     this.sessionEndListener = () => this.handleSessionEnded(session)
     session.addEventListener('end', this.sessionEndListener)
     this.callbacks.onDomOverlayState(session.domOverlayState ? 'active' : 'unavailable')
@@ -342,12 +353,14 @@ export class XRSessionService {
       }
       this.position = pose ? createPosition(pose.transform.position) : null
 
-      if (pose?.views[0]) {
-        this.depthService.inspectFrame(frame, pose.views[0])
-      }
+      const depthObservation = pose?.views[0]
+        ? this.depthService.inspectFrame(frame, pose.views[0])
+        : null
+      const spatialPoints = this.spatialPointService.processFrame(depthObservation)
 
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
         this.lastPublishedAt = time
+        this.spatialPointPreviewService.render(spatialPoints)
         this.publishDiagnostics(time)
       }
 
@@ -392,6 +405,7 @@ export class XRSessionService {
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: time,
       depth: this.depthService.getDiagnostics(),
+      spatial: this.getSpatialPointDiagnostics(),
     })
   }
 
@@ -413,6 +427,8 @@ export class XRSessionService {
     this.referenceSpaceType = null
     this.presentationService.dispose()
     this.depthService.dispose()
+    this.spatialPointService.reset()
+    this.spatialPointPreviewService.dispose()
     this.frameRequestId = null
     this.isEnding = false
 
@@ -482,6 +498,8 @@ export class XRSessionService {
     this.trackingActive = false
     this.position = null
     this.depthService.dispose()
+    this.spatialPointService.reset()
+    this.spatialPointPreviewService.dispose()
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -503,7 +521,12 @@ export class XRSessionService {
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : null,
       depth: this.depthService.getDiagnostics(),
+      spatial: this.getSpatialPointDiagnostics(),
     })
+  }
+
+  private getSpatialPointDiagnostics(): SpatialPointDebug {
+    return this.spatialPointService.getDiagnostics(this.spatialPointPreviewService.status)
   }
 
   private isActiveSession(session: XRSession): boolean {
