@@ -1,5 +1,6 @@
 import type { RefObject } from 'react'
 import type {
+  DepthSensingStatus,
   ScannerCapabilities,
   ScannerCheckStatus,
   ScannerSessionState,
@@ -72,6 +73,21 @@ function formatCoordinate(value: number | undefined): string {
   return value === undefined ? 'N/A' : value.toFixed(2)
 }
 
+function formatDepthStatus(status: DepthSensingStatus): string {
+  switch (status) {
+    case 'requesting':
+      return 'Requesting'
+    case 'active':
+      return 'Active'
+    case 'unavailable':
+      return 'Unavailable'
+    case 'error':
+      return 'Error'
+    default:
+      return 'Idle'
+  }
+}
+
 function ScannerPage({
   capabilities,
   canStartScan,
@@ -133,7 +149,7 @@ function ScannerPage({
 
         <main className="scanner-main" aria-labelledby="scanner-title">
           <section className="scanner-intro">
-            <span className="scanner-eyebrow">Milestone 02 / Pose tracking</span>
+            <span className="scanner-eyebrow">Milestone 03 / Depth sensing</span>
             <h1 className="scanner-title" id="scanner-title">
               Scan the <em>space</em> around you.
             </h1>
@@ -202,12 +218,23 @@ function ScannerPage({
               </strong>
             </div>
 
+            <div
+              className={`dom-overlay-summary depth-summary ${sessionState.debug.depth.status === 'unavailable' ? 'is-unavailable' : ''}`}
+            >
+              <span>Depth sensing</span>
+              <strong>{formatDepthStatus(sessionState.debug.depth.status)}</strong>
+            </div>
+
             {canStartScan && !isActive ? (
               <p className="dom-overlay-instructions">
                 {isDomOverlayUnavailable
                   ? 'DOM overlay was unavailable. Use the Android system Back gesture to exit immersive AR.'
                   : 'Controls will appear inside XR when DOM overlay is granted. If unavailable, use the Android system Back gesture to exit.'}
               </p>
+            ) : null}
+
+            {isActive && sessionState.debug.depth.status === 'unavailable' ? (
+              <p className="dom-overlay-instructions">Depth sensing unavailable. Pose tracking continues.</p>
             ) : null}
 
             <div className="scanner-session-controls">
@@ -304,6 +331,24 @@ function ScannerPage({
                     <strong>{formatCoordinate(sessionState.debug.position?.z)}</strong>
                   </div>
                 </div>
+                <div className="depth-page-diagnostics">
+                  <div>
+                    <span>Depth sensing</span>
+                    <strong>{formatDepthStatus(sessionState.debug.depth.status)}</strong>
+                  </div>
+                  <div>
+                    <span>Depth resolution</span>
+                    <strong>
+                      {sessionState.debug.depth.width !== null && sessionState.debug.depth.height !== null
+                        ? `${sessionState.debug.depth.width} × ${sessionState.debug.depth.height}`
+                        : 'N/A'}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Valid depth frames</span>
+                    <strong>{sessionState.debug.depth.validFrameCount}</strong>
+                  </div>
+                </div>
               </section>
             ) : null}
           </section>
@@ -311,7 +356,7 @@ function ScannerPage({
 
         <footer className="scanner-footer">
           <span>Spatial Scanner / V1.0</span>
-          <span>{isActive ? 'Pose tracking test / no depth' : 'Capability check + session test'}</span>
+          <span>{isActive ? 'Pose + depth sensing test' : 'Capability check + session test'}</span>
         </footer>
       </div>
     </div>

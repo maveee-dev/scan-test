@@ -548,6 +548,88 @@
   margin-top: 8px;
 }
 
+.xr-dom-overlay-depth {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.xr-dom-overlay-depth-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.xr-dom-overlay-depth-header strong {
+  color: var(--acid);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.xr-dom-overlay-depth-meta,
+.xr-dom-overlay-depth-samples {
+  display: grid;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.xr-dom-overlay-depth-meta {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.xr-dom-overlay-depth-samples {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.xr-dom-overlay-depth-meta > div,
+.xr-dom-overlay-depth-samples > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.xr-dom-overlay-depth-meta span,
+.xr-dom-overlay-depth-samples span {
+  display: block;
+  overflow: hidden;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-depth-meta strong,
+.xr-dom-overlay-depth-samples strong {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-depth-error {
+  margin: 9px 0 0;
+  color: var(--coral);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
 .xr-dom-overlay-stop {
   width: 100%;
   min-height: 48px;
@@ -601,6 +683,19 @@
 }
 
 .dom-overlay-summary.is-unavailable strong {
+  color: var(--coral);
+}
+
+.depth-summary {
+  margin-top: 0;
+  border-top: 0;
+}
+
+.depth-summary strong {
+  color: var(--acid);
+}
+
+.depth-summary.is-unavailable strong {
   color: var(--coral);
 }
 
@@ -839,6 +934,40 @@
   color: var(--ink);
   font-family: var(--mono);
   font-size: 13px;
+  font-weight: 400;
+}
+
+.depth-page-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.depth-page-diagnostics > div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.depth-page-diagnostics span,
+.depth-page-diagnostics strong {
+  display: block;
+  font-family: var(--mono);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.depth-page-diagnostics span {
+  color: var(--dim);
+  font-size: 8px;
+}
+
+.depth-page-diagnostics strong {
+  margin-top: 7px;
+  color: var(--ink);
+  font-size: 10px;
   font-weight: 400;
 }
 

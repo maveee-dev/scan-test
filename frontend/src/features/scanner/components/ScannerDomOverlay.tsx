@@ -1,4 +1,5 @@
 import type {
+  DepthSensingStatus,
   ReferenceSpaceStatus,
   ScannerSessionState,
   XRPresentationStatus,
@@ -39,6 +40,31 @@ function formatReferenceSpaceStatus(status: ReferenceSpaceStatus): string {
   }
 
   return 'Idle'
+}
+
+function formatDepthStatus(status: DepthSensingStatus): string {
+  switch (status) {
+    case 'requesting':
+      return 'Requesting'
+    case 'active':
+      return 'Active'
+    case 'unavailable':
+      return 'Unavailable'
+    case 'error':
+      return 'Error'
+    default:
+      return 'Idle'
+  }
+}
+
+function formatDepthResolution(width: number | null, height: number | null): string {
+  return width !== null && height !== null ? `${width} × ${height}` : 'N/A'
+}
+
+function formatDepthDistance(distanceMeters: number | null): string {
+  return distanceMeters !== null && Number.isFinite(distanceMeters) && distanceMeters > 0
+    ? `${distanceMeters.toFixed(2)} m`
+    : 'N/A'
 }
 
 function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps) {
@@ -112,6 +138,40 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
           <span>Z</span>
           <strong>{formatCoordinate(sessionState.debug.position?.z)}</strong>
         </div>
+      </div>
+
+      <div className="xr-dom-overlay-depth" aria-label="Depth sensing diagnostics">
+        <div className="xr-dom-overlay-depth-header">
+          <span>Depth sensing</span>
+          <strong>{formatDepthStatus(sessionState.debug.depth.status)}</strong>
+        </div>
+        <div className="xr-dom-overlay-depth-meta">
+          <div>
+            <span>Data type</span>
+            <strong>{sessionState.debug.depth.dataType}</strong>
+          </div>
+          <div>
+            <span>Resolution</span>
+            <strong>
+              {formatDepthResolution(sessionState.debug.depth.width, sessionState.debug.depth.height)}
+            </strong>
+          </div>
+          <div>
+            <span>Valid depth frames</span>
+            <strong>{sessionState.debug.depth.validFrameCount}</strong>
+          </div>
+        </div>
+        <div className="xr-dom-overlay-depth-samples">
+          {sessionState.debug.depth.samples.map((sample) => (
+            <div key={sample.label}>
+              <span>{sample.label}</span>
+              <strong>{formatDepthDistance(sample.distanceMeters)}</strong>
+            </div>
+          ))}
+        </div>
+        {sessionState.debug.depth.error ? (
+          <p className="xr-dom-overlay-depth-error">{sessionState.debug.depth.error}</p>
+        ) : null}
       </div>
 
       <button

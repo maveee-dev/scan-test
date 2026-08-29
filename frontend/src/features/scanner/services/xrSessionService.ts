@@ -11,6 +11,7 @@ import {
   XRPresentationService,
   type XRPresentationDiagnostics,
 } from './xrPresentationService'
+import { XRDepthService } from './xrDepthService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 
@@ -93,6 +94,8 @@ export class XRSessionService {
 
   private readonly presentationService = new XRPresentationService()
 
+  private readonly depthService = new XRDepthService()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -173,6 +176,7 @@ export class XRSessionService {
     this.callbacks = null
     await this.stop()
     this.presentationService.dispose()
+    this.depthService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -186,8 +190,14 @@ export class XRSessionService {
     try {
       // This call is reached directly from the Start Scan click handler.
       session = await xrSystem.requestSession('immersive-ar', {
-        optionalFeatures: ['local-floor', 'dom-overlay'],
+        optionalFeatures: ['local-floor', 'dom-overlay', 'depth-sensing'],
         domOverlay: { root: options.overlayRoot },
+        depthSensing: {
+          usagePreference: ['cpu-optimized'],
+          dataFormatPreference: ['float32', 'luminance-alpha', 'unsigned-short'],
+          depthTypeRequest: ['raw', 'smooth'],
+          matchDepthView: true,
+        },
       })
     } catch (error) {
       throw createError(
@@ -205,6 +215,7 @@ export class XRSessionService {
     this.activeSession = session
     this.callbacks = options.callbacks
     this.resetSessionDiagnostics()
+    this.depthService.initialize(session)
     this.sessionEndListener = () => this.handleSessionEnded(session)
     session.addEventListener('end', this.sessionEndListener)
     this.callbacks.onDomOverlayState(session.domOverlayState ? 'active' : 'unavailable')
@@ -331,6 +342,10 @@ export class XRSessionService {
       }
       this.position = pose ? createPosition(pose.transform.position) : null
 
+      if (pose?.views[0]) {
+        this.depthService.inspectFrame(frame, pose.views[0])
+      }
+
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
         this.lastPublishedAt = time
         this.publishDiagnostics(time)
@@ -376,6 +391,7 @@ export class XRSessionService {
       position: this.position,
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: time,
+      depth: this.depthService.getDiagnostics(),
     })
   }
 
@@ -396,6 +412,7 @@ export class XRSessionService {
     this.referenceSpace = null
     this.referenceSpaceType = null
     this.presentationService.dispose()
+    this.depthService.dispose()
     this.frameRequestId = null
     this.isEnding = false
 
@@ -426,7 +443,6 @@ export class XRSessionService {
         this.handleSessionEnded(session)
       }
     }
-
   }
 
   private async endSessionSafely(session: XRSession): Promise<void> {
@@ -465,6 +481,7 @@ export class XRSessionService {
     this.lastPublishedAt = Number.NEGATIVE_INFINITY
     this.trackingActive = false
     this.position = null
+    this.depthService.dispose()
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -485,6 +502,7 @@ export class XRSessionService {
       position: this.position,
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : null,
+      depth: this.depthService.getDiagnostics(),
     })
   }
 

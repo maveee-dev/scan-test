@@ -4,6 +4,7 @@ import {
   XRSessionError,
   XRSessionService,
 } from '../services/xrSessionService'
+import { createInitialDepthDebug } from '../services/xrDepthService'
 import type {
   ScanSessionStatus,
   ScannerSessionState,
@@ -22,6 +23,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   position: null,
   referenceSpaceType: null,
   lastSampledAt: null,
+  depth: createInitialDepthDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -138,6 +140,7 @@ export function useScannerSession(
                   trackingActive: false,
                   trackingStatus: 'waiting',
                   position: null,
+                  depth: createInitialDepthDebug(),
                 },
                 error:
                   currentState.error ??

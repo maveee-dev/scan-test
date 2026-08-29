@@ -17,6 +17,21 @@ export type ReferenceSpaceStatus =
 
 export type XRTrackingStatus = 'waiting' | 'active'
 
+export type DepthSensingStatus =
+  | 'idle'
+  | 'requesting'
+  | 'active'
+  | 'unavailable'
+  | 'error'
+
+export type DepthDataType =
+  | 'float32'
+  | 'luminance-alpha'
+  | 'unsigned-short'
+  | 'unknown'
+
+export type DepthSampleLabel = 'center' | 'upper' | 'lower' | 'left' | 'right'
+
 export interface ScannerCapabilities {
   webxr: boolean
   immersiveAr: boolean
@@ -33,6 +48,21 @@ export interface ViewerPosition {
   z: number
 }
 
+export interface DepthSample {
+  label: DepthSampleLabel
+  distanceMeters: number | null
+}
+
+export interface XRDepthDebug {
+  status: DepthSensingStatus
+  dataType: DepthDataType
+  width: number | null
+  height: number | null
+  validFrameCount: number
+  samples: DepthSample[]
+  error: string | null
+}
+
 export interface ViewerPoseDebug {
   sessionActive: boolean
   glContextStatus: XRPresentationStatus
@@ -45,6 +75,7 @@ export interface ViewerPoseDebug {
   position: ViewerPosition | null
   referenceSpaceType: ScannerReferenceSpaceType | null
   lastSampledAt: number | null
+  depth: XRDepthDebug
 }
 
 export interface ScannerSessionState {
