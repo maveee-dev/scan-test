@@ -4,9 +4,10 @@ import type { CoverageCellState } from '../types'
 export const COVERAGE_VISUAL_PATCH_SIZE_METERS = 0.085
 
 export const COVERAGE_VISUAL_OPACITY = {
-  observed: 0.08,
+  candidate: 0.4,
+  observed: 0.28,
   partial: 0.14,
-  captured: 0.24,
+  captured: 0,
 } as const
 
 export const COVERAGE_VISUAL_COLORS: Record<CoverageCellState, readonly [number, number, number]> = {

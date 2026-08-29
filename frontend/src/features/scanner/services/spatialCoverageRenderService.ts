@@ -101,7 +101,17 @@ function subtractVectors(first: Vector3, second: Vector3): Vector3 {
   }
 }
 
-function getColor(state: CoverageCellState): [number, number, number, number] {
+function getColor(
+  state: CoverageCellState,
+  isCandidate: boolean,
+): [number, number, number, number] {
+  if (isCandidate) {
+    return [
+      ...COVERAGE_VISUAL_COLORS.observed,
+      COVERAGE_VISUAL_OPACITY.candidate,
+    ]
+  }
+
   switch (state) {
     case 'captured':
       return [
@@ -179,7 +189,7 @@ function appendTile(
     return null
   }
 
-  const color = getColor(tile.coverageState)
+  const color = getColor(tile.coverageState, tile.isCandidate)
   let nextOffset = appendVertex(data, offset, corners[0], color)
   nextOffset = appendVertex(data, nextOffset, corners[1], color)
   nextOffset = appendVertex(data, nextOffset, corners[2], color)
@@ -278,6 +288,7 @@ export class SpatialCoverageRenderService {
     renderCapacity: MAX_RENDER_TILES,
     renderUpdateCount: 0,
     visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+    candidateOpacity: COVERAGE_VISUAL_OPACITY.candidate,
     observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
     partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
     capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
@@ -445,6 +456,7 @@ export class SpatialCoverageRenderService {
       renderCapacity: MAX_RENDER_TILES,
       renderUpdateCount: 0,
       visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+      candidateOpacity: COVERAGE_VISUAL_OPACITY.candidate,
       observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
       partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
       capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,

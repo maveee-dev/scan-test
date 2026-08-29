@@ -50,6 +50,7 @@ function createInitialRenderDebug(): SpatialCoverageRenderDebug {
     renderCapacity: MAX_COVERAGE_CELLS,
     renderUpdateCount: 0,
     visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+    candidateOpacity: COVERAGE_VISUAL_OPACITY.candidate,
     observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
     partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
     capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
@@ -337,7 +338,8 @@ function updateRenderTile(
   renderTiles: Map<string, CoverageRenderTile>,
   cell: CoverageCell,
 ): boolean {
-  if (!cell.representativeNormal) {
+  if (!cell.representativeNormal || cell.state === 'captured') {
+    renderTiles.delete(cell.key)
     return false
   }
 
@@ -345,6 +347,7 @@ function updateRenderTile(
     position: { ...cell.representativePosition },
     normal: { ...cell.representativeNormal },
     coverageState: cell.state,
+    isCandidate: false,
   })
   return true
 }
@@ -358,6 +361,8 @@ export class SpatialCoverageService {
   private readonly cells = new Map<string, CoverageCell>()
 
   private readonly renderTiles = new Map<string, CoverageRenderTile>()
+
+  private readonly candidateRenderTiles = new Map<string, CoverageRenderTile>()
 
   private diagnostics = createInitialCoverageDebug()
 
@@ -386,6 +391,7 @@ export class SpatialCoverageService {
 
     this.lastProcessedAt = timestamp
     this.resetCurrentFrameDiagnostics()
+    this.clearCandidateRenderTiles()
 
     if (!isFinitePosition(cameraPosition)) {
       return
@@ -450,6 +456,9 @@ export class SpatialCoverageService {
         this.cells.set(key, cell)
         this.incrementStateCount(cell.state)
         this.updateRenderTile(cell)
+        if (normalResult.normal) {
+          this.updateCandidateRenderTile(key, observation.point, normalResult.normal)
+        }
         this.diagnostics.acceptedObservationCount += 1
         continue
       }
@@ -475,6 +484,14 @@ export class SpatialCoverageService {
       this.incrementStateCount(existingCell.state)
       this.updateRenderTile(existingCell)
       this.diagnostics.acceptedObservationCount += 1
+
+      if (
+        existingCell.state !== 'captured' &&
+        normalResult.normal &&
+        !this.renderTiles.has(key)
+      ) {
+        this.updateCandidateRenderTile(key, observation.point, normalResult.normal)
+      }
     }
 
     this.diagnostics.currentValidSamples = currentGridKeys.size
@@ -490,10 +507,16 @@ export class SpatialCoverageService {
 
   public getRenderSnapshot(): SpatialCoverageRenderSnapshot {
     if (this.renderSnapshotRevision !== this.renderRevision) {
-      const tiles = Array.from(this.renderTiles.values(), (tile) => ({
+      const tilesByKey = new Map(this.renderTiles)
+      for (const [key, tile] of this.candidateRenderTiles) {
+        tilesByKey.set(key, tile)
+      }
+
+      const tiles = Array.from(tilesByKey.values(), (tile) => ({
         position: { ...tile.position },
         normal: { ...tile.normal },
         coverageState: tile.coverageState,
+        isCandidate: tile.isCandidate,
       }))
       this.renderSnapshot = { revision: this.renderRevision, tiles }
       this.renderSnapshotRevision = this.renderRevision
@@ -533,6 +556,7 @@ export class SpatialCoverageService {
   public reset(): void {
     this.cells.clear()
     this.renderTiles.clear()
+    this.candidateRenderTiles.clear()
     this.lastProcessedAt = Number.NEGATIVE_INFINITY
     this.renderRevision += 1
     this.renderSnapshot = { revision: this.renderRevision, tiles: [] }
@@ -548,20 +572,64 @@ export class SpatialCoverageService {
     const previousTile = this.renderTiles.get(cell.key)
     const hasTile = updateRenderTile(this.renderTiles, cell)
     if (!hasTile) {
+      if (previousTile) {
+        this.renderRevision += 1
+      }
       return
     }
 
     const nextTile = this.renderTiles.get(cell.key)
+    if (!nextTile) {
+      return
+    }
+
     if (
       !previousTile ||
-      previousTile.coverageState !== nextTile?.coverageState ||
-      previousTile.position.x !== nextTile?.position.x ||
-      previousTile.position.y !== nextTile?.position.y ||
-      previousTile.position.z !== nextTile?.position.z ||
-      previousTile.normal.x !== nextTile?.normal.x ||
-      previousTile.normal.y !== nextTile?.normal.y ||
-      previousTile.normal.z !== nextTile?.normal.z
+      previousTile.coverageState !== nextTile.coverageState ||
+      previousTile.isCandidate !== nextTile.isCandidate ||
+      previousTile.position.x !== nextTile.position.x ||
+      previousTile.position.y !== nextTile.position.y ||
+      previousTile.position.z !== nextTile.position.z ||
+      previousTile.normal.x !== nextTile.normal.x ||
+      previousTile.normal.y !== nextTile.normal.y ||
+      previousTile.normal.z !== nextTile.normal.z
     ) {
+      this.renderRevision += 1
+    }
+  }
+
+  private updateCandidateRenderTile(
+    key: string,
+    position: SpatialPoint,
+    normal: SpatialPoint,
+  ): void {
+    const nextTile: CoverageRenderTile = {
+      position: { ...position },
+      normal: { ...normal },
+      coverageState: 'observed',
+      isCandidate: true,
+    }
+    const previousTile = this.candidateRenderTiles.get(key)
+
+    if (
+      previousTile &&
+      previousTile.position.x === nextTile.position.x &&
+      previousTile.position.y === nextTile.position.y &&
+      previousTile.position.z === nextTile.position.z &&
+      previousTile.normal.x === nextTile.normal.x &&
+      previousTile.normal.y === nextTile.normal.y &&
+      previousTile.normal.z === nextTile.normal.z
+    ) {
+      return
+    }
+
+    this.candidateRenderTiles.set(key, nextTile)
+    this.renderRevision += 1
+  }
+
+  private clearCandidateRenderTiles(): void {
+    if (this.candidateRenderTiles.size > 0) {
+      this.candidateRenderTiles.clear()
       this.renderRevision += 1
     }
   }

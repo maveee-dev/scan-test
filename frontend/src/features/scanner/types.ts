@@ -182,6 +182,7 @@ export interface CoverageRenderTile {
   position: SpatialPoint
   normal: SpatialPoint
   coverageState: CoverageCellState
+  isCandidate: boolean
 }
 
 export type CoverageRenderStatus = 'idle' | 'ready' | 'failed'
@@ -192,6 +193,7 @@ export interface SpatialCoverageRenderDebug {
   renderCapacity: number
   renderUpdateCount: number
   visualPatchSizeMeters: number
+  candidateOpacity: number
   observedOpacity: number
   partialOpacity: number
   capturedOpacity: number

@@ -581,6 +581,10 @@ function ScannerDomOverlay({
                 <strong>{coverage.render.visualPatchSizeMeters.toFixed(3)} m</strong>
               </div>
               <div>
+                <span>Candidate opacity</span>
+                <strong>{coverage.render.candidateOpacity.toFixed(2)}</strong>
+              </div>
+              <div>
                 <span>Observed opacity</span>
                 <strong>{coverage.render.observedOpacity.toFixed(2)}</strong>
               </div>
