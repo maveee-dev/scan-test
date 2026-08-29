@@ -1,6 +1,6 @@
 import { useState, type RefObject } from 'react'
 import type {
-  CoverageGridCell,
+  CoverageRenderStatus,
   CoverageGuidance,
   DepthAcquisitionStatus,
   DepthSensingStatus,
@@ -150,22 +150,15 @@ function formatCoverageGuidance(guidance: CoverageGuidance): string {
   }
 }
 
-function CoverageGridOverlay({ grid }: { grid: readonly CoverageGridCell[] }) {
-  return (
-    <div
-      className="xr-coverage-grid"
-      role="img"
-      aria-label="Current view spatial coverage"
-    >
-      {grid.map((cell, index) => (
-        <span
-          key={index}
-          className={`xr-coverage-cell is-${cell.state}${cell.valid ? ' is-valid' : ''}`}
-          aria-hidden="true"
-        />
-      ))}
-    </div>
-  )
+function formatCoverageRenderStatus(status: CoverageRenderStatus): string {
+  switch (status) {
+    case 'ready':
+      return 'Ready'
+    case 'failed':
+      return 'Failed'
+    default:
+      return 'Idle'
+  }
 }
 
 function ScannerDomOverlay({
@@ -187,7 +180,6 @@ function ScannerDomOverlay({
 
   return (
     <>
-      <CoverageGridOverlay grid={coverage.grid} />
       <section className="xr-scanner-hud" aria-label="Spatial Scanner controls">
         <div className="xr-scanner-hud-header">
           <div className="xr-scanner-hud-session">
@@ -539,7 +531,40 @@ function ScannerDomOverlay({
                 <span>Capacity-rejected samples</span>
                 <strong>{coverage.capacityRejectedSampleCount}</strong>
               </div>
+              <div>
+                <span>Coverage renderer</span>
+                <strong>{formatCoverageRenderStatus(coverage.render.status)}</strong>
+              </div>
+              <div>
+                <span>Rendered world tiles</span>
+                <strong>{coverage.render.renderedTiles}</strong>
+              </div>
+              <div>
+                <span>Invalid normals rejected</span>
+                <strong>{coverage.rejectedInvalidNormalCount}</strong>
+              </div>
+              <div>
+                <span>Depth discontinuities rejected</span>
+                <strong>{coverage.rejectedDepthDiscontinuityCount}</strong>
+              </div>
+              <div>
+                <span>Visual patch size</span>
+                <strong>{coverage.render.visualPatchSizeMeters.toFixed(3)} m</strong>
+              </div>
+              <div>
+                <span>Render updates</span>
+                <strong>{coverage.render.renderUpdateCount}</strong>
+              </div>
+              <div>
+                <span>Render capacity</span>
+                <strong>{coverage.render.renderedTiles} / {coverage.render.renderCapacity}</strong>
+              </div>
             </div>
+            {coverage.statisticsInvariantError ? (
+              <p className="xr-dom-overlay-coverage-error">
+                {coverage.statisticsInvariantError}
+              </p>
+            ) : null}
             <p className="xr-dom-overlay-coverage-guidance">
               Guidance: {formatCoverageGuidance(coverage.guidance)}
             </p>

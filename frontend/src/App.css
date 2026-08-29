@@ -810,50 +810,6 @@
   overflow: hidden;
 }
 
-.xr-coverage-grid {
-  position: absolute;
-  z-index: 1;
-  top: 50%;
-  left: 50%;
-  display: grid;
-  grid-template-columns: repeat(16, minmax(0, 1fr));
-  grid-template-rows: repeat(9, minmax(0, 1fr));
-  gap: 2px;
-  width: min(84vw, 480px);
-  aspect-ratio: 16 / 9;
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-
-.xr-coverage-cell {
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid transparent;
-  border-radius: 2px;
-  background: transparent;
-}
-
-.xr-coverage-cell.is-unobserved.is-valid {
-  border-color: rgba(243, 241, 233, 0.16);
-  background: rgba(243, 241, 233, 0.025);
-}
-
-.xr-coverage-cell.is-observed {
-  border-color: rgba(212, 239, 105, 0.32);
-  background: rgba(212, 239, 105, 0.1);
-}
-
-.xr-coverage-cell.is-partial {
-  border-color: rgba(212, 239, 105, 0.54);
-  background: rgba(212, 239, 105, 0.2);
-}
-
-.xr-coverage-cell.is-captured {
-  border-color: rgba(212, 239, 105, 0.78);
-  background: rgba(212, 239, 105, 0.34);
-  box-shadow: 0 0 8px rgba(212, 239, 105, 0.18);
-}
-
 .xr-scanner-hud {
   position: absolute;
   z-index: 2;
@@ -1147,6 +1103,14 @@
 .xr-dom-overlay-coverage-guidance {
   margin: 9px 0 0;
   color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.xr-dom-overlay-coverage-error {
+  margin: 9px 0 0;
+  color: var(--coral);
   font-family: var(--mono);
   font-size: 8px;
   line-height: 1.4;

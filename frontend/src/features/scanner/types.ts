@@ -132,6 +132,7 @@ export interface SpatialPoint {
 export interface SpatialPointObservation {
   normalizedX: number
   normalizedY: number
+  depthMeters: number
   point: SpatialPoint
 }
 
@@ -153,8 +154,6 @@ export interface SpatialPointDebug {
 
 export type CoverageCellState = 'observed' | 'partial' | 'captured'
 
-export type CoverageGridState = CoverageCellState | 'unobserved'
-
 export type CoverageGuidance =
   | 'move-slowly-across-unscanned-areas'
   | 'continue-scanning-from-another-angle'
@@ -163,6 +162,8 @@ export type CoverageGuidance =
 export interface CoverageCell {
   key: string
   center: SpatialPoint
+  representativePosition: SpatialPoint
+  representativeNormal: SpatialPoint | null
   observationCount: number
   state: CoverageCellState
   firstObservedAt: number
@@ -170,11 +171,20 @@ export interface CoverageCell {
   lastAcceptedCameraPosition: ViewerPosition
 }
 
-export interface CoverageGridCell {
-  normalizedX: number
-  normalizedY: number
-  state: CoverageGridState
-  valid: boolean
+export interface CoverageRenderTile {
+  position: SpatialPoint
+  normal: SpatialPoint
+  coverageState: CoverageCellState
+}
+
+export type CoverageRenderStatus = 'idle' | 'ready' | 'failed'
+
+export interface SpatialCoverageRenderDebug {
+  status: CoverageRenderStatus
+  renderedTiles: number
+  renderCapacity: number
+  renderUpdateCount: number
+  visualPatchSizeMeters: number
 }
 
 export interface SpatialCoverageDebug {
@@ -191,8 +201,11 @@ export interface SpatialCoverageDebug {
   capacityRejectedSampleCount: number
   maxCells: number
   capacityReached: boolean
+  rejectedInvalidNormalCount: number
+  rejectedDepthDiscontinuityCount: number
+  statisticsInvariantError: string | null
   guidance: CoverageGuidance
-  grid: CoverageGridCell[]
+  render: SpatialCoverageRenderDebug
 }
 
 export interface ViewerPoseDebug {

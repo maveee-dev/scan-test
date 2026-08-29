@@ -12,7 +12,12 @@ export class XRPresentationError extends Error {
   }
 }
 
-type XRWebGLContext = WebGL2RenderingContext | WebGLRenderingContext
+export type XRWebGLContext = WebGL2RenderingContext | WebGLRenderingContext
+
+export interface XRPresentationRenderTarget {
+  gl: XRWebGLContext
+  baseLayer: XRWebGLLayer
+}
 
 /**
  * Prepares the transparent WebGL presentation layer required by immersive AR.
@@ -76,6 +81,17 @@ export class XRPresentationService {
     }
   }
 
+  public getRenderTarget(): XRPresentationRenderTarget | null {
+    if (!this.gl || !this.baseLayer) {
+      return null
+    }
+
+    return {
+      gl: this.gl,
+      baseLayer: this.baseLayer,
+    }
+  }
+
   public clearTransparentFrame(): void {
     if (!this.gl || !this.baseLayer) {
       throw new XRPresentationError('The XR presentation layer is not ready for a frame.')
@@ -85,6 +101,7 @@ export class XRPresentationService {
       const { gl, baseLayer } = this
       gl.bindFramebuffer(gl.FRAMEBUFFER, baseLayer.framebuffer)
       gl.viewport(0, 0, baseLayer.framebufferWidth, baseLayer.framebufferHeight)
+      gl.depthMask(true)
       gl.clearColor(0, 0, 0, 0)
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
     } catch {

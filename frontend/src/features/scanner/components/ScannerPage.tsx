@@ -136,7 +136,7 @@ function ScannerPage({
     : isStopping
       ? 'Ending XR frame processing safely.'
       : isActive
-        ? 'Converting live depth into current-frame world points.'
+        ? 'Marking observed physical surfaces in world-anchored coverage.'
         : 'Start a session to verify device pose tracking.'
   const sessionTag = isStarting
     ? 'Creating session'
@@ -169,12 +169,12 @@ function ScannerPage({
 
         <main className="scanner-main" aria-labelledby="scanner-title">
           <section className="scanner-intro">
-            <span className="scanner-eyebrow">Milestone 04 / World-space points</span>
+            <span className="scanner-eyebrow">Milestone 05.1 / World-anchored coverage</span>
             <h1 className="scanner-title" id="scanner-title">
               Scan the <em>space</em> around you.
             </h1>
             <p className="scanner-description">
-              Start an immersive AR session to turn live depth observations into current-frame world-space points.
+              Start an immersive AR session to mark observed physical surfaces in stable world-space coverage.
             </p>
           </section>
 
@@ -193,7 +193,7 @@ function ScannerPage({
                   Device readiness
                 </h2>
                 <p className="capability-card-copy">
-                  Confirm support, then inspect live pose, depth, and world-point geometry.
+                  Confirm support, then inspect live pose, depth, and world-anchored coverage.
                 </p>
               </div>
               <span className="capability-tag">{sessionTag}</span>
@@ -394,7 +394,7 @@ function ScannerPage({
 
         <footer className="scanner-footer">
           <span>Spatial Scanner / V1.0</span>
-          <span>{isActive ? 'Pose + current-frame points' : 'Capability check + session test'}</span>
+          <span>{isActive ? 'Pose + world coverage' : 'Capability check + session test'}</span>
         </footer>
       </div>
     </div>

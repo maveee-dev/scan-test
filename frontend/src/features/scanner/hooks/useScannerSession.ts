@@ -93,6 +93,7 @@ export function useScannerSession(
     setSessionState((currentState) => ({
       ...currentState,
       status: 'starting',
+      debug: createInitialDebug(),
       domOverlayStatus: 'unknown',
       error: null,
     }))

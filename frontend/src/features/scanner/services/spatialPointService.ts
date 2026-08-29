@@ -320,6 +320,7 @@ export class SpatialPointService {
       points.push({
         normalizedX,
         normalizedY,
+        depthMeters,
         point: pointReference,
       })
       bounds = updateBounds(bounds, pointReference)
