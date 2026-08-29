@@ -1,5 +1,6 @@
 import type {
   DomOverlayStatus,
+  FinalizedSpatialScan,
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
   SpatialPointDebug,
@@ -17,10 +18,11 @@ import { SpatialPointService } from './spatialPointService'
 import { SpatialPointPreviewService } from './spatialPointPreviewService'
 import { SpatialCoverageService } from './spatialCoverageService'
 import { SpatialCoverageRenderService } from './spatialCoverageRenderService'
+import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 
-export type XRSessionEndReason = 'stopped' | 'external'
+export type XRSessionEndReason = 'stopped' | 'finished' | 'external'
 
 export type XRSessionErrorCode =
   | 'webxr-unavailable'
@@ -110,6 +112,8 @@ export class XRSessionService {
 
   private readonly spatialCoverageRenderService = new SpatialCoverageRenderService()
 
+  private readonly finalizedSpatialScanService = new FinalizedSpatialScanService()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -124,7 +128,11 @@ export class XRSessionService {
 
   private stopRequested = false
 
+  private requestedEndReason: XRSessionEndReason | null = null
+
   private isEnding = false
+
+  private scanStartedAt: number | null = null
 
   private lastPublishedAt = Number.NEGATIVE_INFINITY
 
@@ -166,7 +174,12 @@ export class XRSessionService {
   }
 
   public async stop(): Promise<void> {
+    if (this.isEnding) {
+      return
+    }
+
     this.stopRequested = true
+    this.requestedEndReason = 'stopped'
 
     const startPromise = this.startPromise
     if (startPromise) {
@@ -176,6 +189,7 @@ export class XRSessionService {
     const session = this.activeSession
     if (!session) {
       this.stopRequested = false
+      this.requestedEndReason = null
       return
     }
 
@@ -183,6 +197,52 @@ export class XRSessionService {
       await this.endActiveSession(session)
     } finally {
       this.stopRequested = false
+    }
+  }
+
+  public async finish(): Promise<FinalizedSpatialScan> {
+    if (this.startPromise) {
+      throw new XRSessionError(
+        'The scan session is still starting and cannot be finalized yet.',
+        'session-ended',
+      )
+    }
+
+    const session = this.activeSession
+    if (!session || this.isEnding || this.scanStartedAt === null) {
+      throw new XRSessionError(
+        'There is no active scan session to finish.',
+        'session-ended',
+      )
+    }
+
+    if (!this.referenceSpaceType) {
+      throw new XRSessionError(
+        'The scan reference space is not ready to finalize.',
+        'reference-space-failed',
+      )
+    }
+
+    this.requestedEndReason = 'finished'
+    this.isEnding = true
+    this.stopFrameProcessing(session)
+
+    try {
+      const finishedAt = Date.now()
+      const finalizedScan = this.finalizedSpatialScanService.createSnapshot({
+        startedAtMs: this.scanStartedAt,
+        finishedAtMs: finishedAt,
+        referenceSpaceType: this.referenceSpaceType,
+        coverageCells: this.spatialCoverageService.getFinalizationCells(),
+      })
+
+      await this.endActiveSession(session)
+      return finalizedScan
+    } catch (error) {
+      if (this.isActiveSession(session)) {
+        await this.endActiveSession(session).catch(() => undefined)
+      }
+      throw error
     }
   }
 
@@ -233,6 +293,7 @@ export class XRSessionService {
     this.activeSession = session
     this.callbacks = options.callbacks
     this.resetSessionDiagnostics()
+    this.scanStartedAt = Date.now()
     this.depthService.initialize(session)
     this.spatialPointPreviewService.initialize(options.pointPreviewCanvas)
     this.sessionEndListener = () => this.handleSessionEnded(session)
@@ -447,11 +508,14 @@ export class XRSessionService {
     this.spatialPointPreviewService.dispose()
     this.spatialCoverageService.reset()
     this.frameRequestId = null
+    this.scanStartedAt = null
     this.isEnding = false
 
     const callback = this.callbacks?.onSessionEnded
+    const endReason = this.requestedEndReason ?? 'external'
+    this.requestedEndReason = null
     this.callbacks = null
-    callback?.(this.stopRequested ? 'stopped' : 'external')
+    callback?.(endReason)
   }
 
   private async endActiveSession(session: XRSession): Promise<void> {
@@ -514,6 +578,8 @@ export class XRSessionService {
     this.lastPublishedAt = Number.NEGATIVE_INFINITY
     this.trackingActive = false
     this.position = null
+    this.scanStartedAt = null
+    this.requestedEndReason = null
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()

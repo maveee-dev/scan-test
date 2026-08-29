@@ -1,6 +1,13 @@
 export type ScannerCheckStatus = 'checking' | 'complete' | 'error'
 
-export type ScanSessionStatus = 'ready' | 'starting' | 'scanning' | 'stopping' | 'error'
+export type ScanSessionStatus =
+  | 'ready'
+  | 'starting'
+  | 'scanning'
+  | 'finishing'
+  | 'cancelling'
+  | 'finished'
+  | 'error'
 
 export type ScannerReferenceSpaceType = 'local-floor' | 'local'
 
@@ -211,6 +218,30 @@ export interface SpatialCoverageDebug {
   render: SpatialCoverageRenderDebug
 }
 
+export interface FinalizedCoverageCell {
+  readonly position: SpatialPoint
+  readonly normal: SpatialPoint | null
+  readonly coverageState: CoverageCellState
+  readonly observationCount: number
+}
+
+export interface FinalizedSpatialScanStatistics {
+  readonly uniqueCells: number
+  readonly observedCells: number
+  readonly partialCells: number
+  readonly capturedCells: number
+}
+
+export interface FinalizedSpatialScan {
+  readonly id: string
+  readonly startedAt: string
+  readonly finishedAt: string
+  readonly durationMs: number
+  readonly referenceSpaceType: ScannerReferenceSpaceType
+  readonly coverage: readonly FinalizedCoverageCell[]
+  readonly statistics: FinalizedSpatialScanStatistics
+}
+
 export interface ViewerPoseDebug {
   sessionActive: boolean
   glContextStatus: XRPresentationStatus
@@ -233,4 +264,5 @@ export interface ScannerSessionState {
   debug: ViewerPoseDebug
   domOverlayStatus: DomOverlayStatus
   error: string | null
+  finalizedScan: FinalizedSpatialScan | null
 }

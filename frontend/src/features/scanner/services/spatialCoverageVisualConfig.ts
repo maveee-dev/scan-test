@@ -1,7 +1,7 @@
 import type { CoverageCellState } from '../types'
 
 /** Visual patches are slightly smaller than the logical 10 cm cells. */
-export const COVERAGE_VISUAL_PATCH_SIZE_METERS = 0.09
+export const COVERAGE_VISUAL_PATCH_SIZE_METERS = 0.085
 
 export const COVERAGE_VISUAL_OPACITY = {
   observed: 0.08,

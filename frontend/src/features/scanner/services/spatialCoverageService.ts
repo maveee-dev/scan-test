@@ -502,6 +502,18 @@ export class SpatialCoverageService {
     return this.renderSnapshot
   }
 
+  public getFinalizationCells(): readonly CoverageCell[] {
+    return Array.from(this.cells.values(), (cell) => ({
+      ...cell,
+      center: { ...cell.center },
+      representativePosition: { ...cell.representativePosition },
+      representativeNormal: cell.representativeNormal
+        ? { ...cell.representativeNormal }
+        : null,
+      lastAcceptedCameraPosition: { ...cell.lastAcceptedCameraPosition },
+    }))
+  }
+
   public getDiagnostics(render: SpatialCoverageRenderDebug): SpatialCoverageDebug {
     const totalUniqueCells = this.cells.size
     const statisticsInvariantError =

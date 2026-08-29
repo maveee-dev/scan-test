@@ -17,7 +17,10 @@ function ScannerPageContainer() {
       overlayRootRef={overlayRootRef}
       pointPreviewCanvasRef={pointPreviewCanvasRef}
       onStartScan={sessionController.startScan}
-      onStopScan={sessionController.stopScan}
+      onCancelScan={sessionController.cancelScan}
+      onFinishScan={sessionController.finishScan}
+      onStartNewScan={sessionController.startNewScan}
+      onDiscardScan={sessionController.discardScan}
       sessionState={sessionController.sessionState}
     />
   )

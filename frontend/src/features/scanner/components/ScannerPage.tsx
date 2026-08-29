@@ -8,6 +8,7 @@ import type {
 } from '../types'
 import '../../../App.css'
 import ScannerDomOverlay from './ScannerDomOverlay'
+import ScannerFinishedView from './ScannerFinishedView'
 
 interface ScannerPageProps {
   status: ScannerCheckStatus
@@ -17,7 +18,10 @@ interface ScannerPageProps {
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
   onStartScan: () => void
-  onStopScan: () => void
+  onCancelScan: () => void
+  onFinishScan: () => void
+  onStartNewScan: () => void
+  onDiscardScan: () => void
 }
 
 interface CapabilityRowProps {
@@ -106,8 +110,11 @@ function formatSpatialSource(source: SpatialGeometrySource): string {
 function ScannerPage({
   capabilities,
   canStartScan,
+  onCancelScan,
+  onDiscardScan,
+  onFinishScan,
   onStartScan,
-  onStopScan,
+  onStartNewScan,
   overlayRootRef,
   pointPreviewCanvasRef,
   sessionState,
@@ -116,25 +123,35 @@ function ScannerPage({
   const isChecking = status === 'checking'
   const allSupported = capabilities?.webxr === true && capabilities.immersiveAr === true
   const isStarting = sessionState.status === 'starting'
-  const isActive = sessionState.status === 'scanning' || sessionState.status === 'stopping'
-  const isStopping = sessionState.status === 'stopping'
+  const isScanning = sessionState.status === 'scanning'
+  const isFinishing = sessionState.status === 'finishing'
+  const isCancelling = sessionState.status === 'cancelling'
+  const isActive = isStarting || isScanning || isFinishing || isCancelling
+  const isEnding = isFinishing || isCancelling
+  const isFinished = sessionState.status === 'finished' && sessionState.finalizedScan !== null
   const isDomOverlayActive =
     sessionState.domOverlayStatus === 'active' &&
-    (sessionState.status === 'starting' || isActive)
+    isActive
   const isDomOverlayUnavailable = sessionState.domOverlayStatus === 'unavailable'
   const statusLabel = isStarting
     ? 'Starting session'
-    : isStopping
-      ? 'Stopping session'
+    : isFinishing
+      ? 'Finishing scan'
+      : isCancelling
+        ? 'Cancelling scan'
       : isActive
         ? 'Session active'
         : sessionState.status === 'error'
-          ? 'Session error'
-          : 'Ready to scan'
+            ? 'Session error'
+            : sessionState.status === 'finished'
+              ? 'Scan complete'
+              : 'Ready to scan'
   const statusDescription = isStarting
     ? 'Requesting camera and spatial tracking access.'
-    : isStopping
-      ? 'Ending XR frame processing safely.'
+    : isFinishing
+      ? 'Creating an independent snapshot before cleanup.'
+      : isCancelling
+        ? 'Discarding the active scan and ending XR.'
       : isActive
         ? 'Marking observed physical surfaces in world-anchored coverage.'
         : 'Start a session to verify device pose tracking.'
@@ -142,8 +159,16 @@ function ScannerPage({
     ? 'Creating session'
     : isActive
       ? 'Session active'
+      : isFinished
+        ? 'Finished scan'
       : 'No session started'
-  const visualLabel = isStarting ? 'START' : isActive ? 'LIVE' : sessionState.status === 'error' ? 'RETRY' : 'READY'
+  const visualLabel = isStarting
+    ? 'START'
+    : isActive
+      ? 'LIVE'
+      : sessionState.status === 'error'
+        ? 'RETRY'
+        : 'READY'
 
   return (
     <div className="scanner-shell">
@@ -153,7 +178,8 @@ function ScannerPage({
         className={`xr-dom-overlay ${isDomOverlayActive ? 'is-visible' : ''}`}
       >
         <ScannerDomOverlay
-          onStopScan={onStopScan}
+          onCancelScan={onCancelScan}
+          onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}
           sessionState={sessionState}
         />
@@ -167,7 +193,19 @@ function ScannerPage({
           <span className="header-status">System online</span>
         </header>
 
-        <main className="scanner-main" aria-labelledby="scanner-title">
+        <main
+          className="scanner-main"
+          aria-labelledby={isFinished ? undefined : 'scanner-title'}
+          aria-label={isFinished ? 'Finalized spatial scan' : undefined}
+        >
+          {isFinished && sessionState.finalizedScan ? (
+            <ScannerFinishedView
+              onDiscardScan={onDiscardScan}
+              onStartNewScan={onStartNewScan}
+              scan={sessionState.finalizedScan}
+            />
+          ) : (
+            <>
           <section className="scanner-intro">
             <span className="scanner-eyebrow">Milestone 05.1 / World-anchored coverage</span>
             <h1 className="scanner-title" id="scanner-title">
@@ -267,14 +305,26 @@ function ScannerPage({
               </div>
 
               {isActive ? (
-                <button
-                  type="button"
-                  className="scan-button scan-button-stop"
-                  disabled={isStopping}
-                  onClick={onStopScan}
-                >
-                  {isStopping ? 'Stopping...' : 'Stop Scan'}
-                </button>
+                <div className="scanner-session-actions">
+                  <button
+                    type="button"
+                    className="scan-button scan-button-secondary"
+                    disabled={isEnding}
+                    onClick={onCancelScan}
+                  >
+                    {isCancelling ? 'Cancelling...' : 'Cancel'}
+                  </button>
+                  {!isStarting ? (
+                    <button
+                      type="button"
+                      className="scan-button"
+                      disabled={isEnding}
+                      onClick={onFinishScan}
+                    >
+                      {isFinishing ? 'Finishing...' : 'Finish Scan'}
+                    </button>
+                  ) : null}
+                </div>
               ) : (
                 <button
                   type="button"
@@ -390,11 +440,19 @@ function ScannerPage({
               </section>
             ) : null}
           </section>
+            </>
+          )}
         </main>
 
         <footer className="scanner-footer">
           <span>Spatial Scanner / V1.0</span>
-          <span>{isActive ? 'Pose + world coverage' : 'Capability check + session test'}</span>
+          <span>
+            {isActive
+              ? 'Pose + world coverage'
+              : isFinished
+                ? 'Finalized scan review'
+                : 'Capability check + session test'}
+          </span>
         </footer>
       </div>
     </div>

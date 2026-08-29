@@ -15,7 +15,8 @@ import type {
 } from '../types'
 
 interface ScannerDomOverlayProps {
-  onStopScan: () => void
+  onCancelScan: () => void
+  onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
 }
@@ -162,20 +163,28 @@ function formatCoverageRenderStatus(status: CoverageRenderStatus): string {
 }
 
 function ScannerDomOverlay({
-  onStopScan,
+  onCancelScan,
+  onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const isStarting = sessionState.status === 'starting'
-  const isStopping = sessionState.status === 'stopping'
+  const isFinishing = sessionState.status === 'finishing'
+  const isCancelling = sessionState.status === 'cancelling'
+  const isEnding = isFinishing || isCancelling
   const trackingIsActive = sessionState.debug.trackingStatus === 'active'
   const depthStatus = formatDepthStatus(sessionState.debug.depth.status)
   const coverage = sessionState.debug.coverage
 
-  function handleStopScan(): void {
+  function handleCancelScan(): void {
     setIsDebugOpen(false)
-    onStopScan()
+    onCancelScan()
+  }
+
+  function handleFinishScan(): void {
+    setIsDebugOpen(false)
+    onFinishScan()
   }
 
   return (
@@ -184,7 +193,15 @@ function ScannerDomOverlay({
         <div className="xr-scanner-hud-header">
           <div className="xr-scanner-hud-session">
             <span className="xr-dom-overlay-dot" aria-hidden="true" />
-            <span>{isStarting ? 'Session starting' : 'Scanning active'}</span>
+            <span>
+              {isStarting
+                ? 'Session starting'
+                : isFinishing
+                  ? 'Finalizing scan'
+                  : isCancelling
+                    ? 'Cancelling scan'
+                    : 'Scanning active'}
+            </span>
           </div>
           <button
             type="button"
@@ -225,14 +242,26 @@ function ScannerDomOverlay({
 
         <p className="xr-scanner-hud-guidance">{formatCoverageGuidance(coverage.guidance)}</p>
 
-        <button
-          type="button"
-          className="xr-scanner-hud-stop"
-          disabled={isStopping}
-          onClick={handleStopScan}
-        >
-          {isStopping ? 'Stopping...' : 'Stop Scan'}
-        </button>
+        <div className="xr-scanner-hud-actions">
+          <button
+            type="button"
+            className="xr-scanner-hud-cancel"
+            disabled={isEnding}
+            onClick={handleCancelScan}
+          >
+            {isCancelling ? 'Cancelling...' : 'Cancel'}
+          </button>
+          {!isStarting ? (
+            <button
+              type="button"
+              className="xr-scanner-hud-finish"
+              disabled={isEnding}
+              onClick={handleFinishScan}
+            >
+              {isFinishing ? 'Finishing...' : 'Finish Scan'}
+            </button>
+          ) : null}
+        </div>
       </section>
 
       <section
@@ -586,12 +615,22 @@ function ScannerDomOverlay({
         <div className="xr-scanner-debug-footer">
           <button
             type="button"
-            className="xr-dom-overlay-stop"
-            disabled={isStopping}
-            onClick={handleStopScan}
+            className="xr-dom-overlay-cancel"
+            disabled={isEnding}
+            onClick={handleCancelScan}
           >
-            {isStopping ? 'Stopping...' : 'Stop Scan'}
+            {isCancelling ? 'Cancelling...' : 'Cancel'}
           </button>
+          {!isStarting ? (
+            <button
+              type="button"
+              className="xr-dom-overlay-finish"
+              disabled={isEnding}
+              onClick={handleFinishScan}
+            >
+              {isFinishing ? 'Finishing...' : 'Finish Scan'}
+            </button>
+          ) : null}
         </div>
       </section>
     </>
