@@ -79,6 +79,8 @@ function formatDepthStatus(status: DepthSensingStatus): string {
       return 'Requesting'
     case 'active':
       return 'Active'
+    case 'gpu-selected':
+      return 'GPU selected'
     case 'unavailable':
       return 'Unavailable'
     case 'error':

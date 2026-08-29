@@ -1,7 +1,9 @@
 import type {
+  DepthAcquisitionStatus,
   DepthSensingStatus,
   ReferenceSpaceStatus,
   ScannerSessionState,
+  XRDepthException,
   XRPresentationStatus,
 } from '../types'
 
@@ -48,6 +50,8 @@ function formatDepthStatus(status: DepthSensingStatus): string {
       return 'Requesting'
     case 'active':
       return 'Active'
+    case 'gpu-selected':
+      return 'GPU selected'
     case 'unavailable':
       return 'Unavailable'
     case 'error':
@@ -55,6 +59,29 @@ function formatDepthStatus(status: DepthSensingStatus): string {
     default:
       return 'Idle'
   }
+}
+
+function formatDepthValue(value: string | boolean | number | null): string {
+  return value === null ? 'N/A' : String(value)
+}
+
+function formatDepthAcquisitionStatus(status: DepthAcquisitionStatus): string {
+  switch (status) {
+    case 'available':
+      return 'Available'
+    case 'null':
+      return 'Returned null'
+    case 'threw':
+      return 'Threw exception'
+    case 'unsupported':
+      return 'Unsupported'
+    default:
+      return 'Not attempted'
+  }
+}
+
+function formatDepthException(label: string, error: XRDepthException): string {
+  return `${label}: ${error.name} — ${error.message}`
 }
 
 function formatDepthResolution(width: number | null, height: number | null): string {
@@ -147,8 +174,16 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
         </div>
         <div className="xr-dom-overlay-depth-meta">
           <div>
-            <span>Data type</span>
-            <strong>{sessionState.debug.depth.dataType}</strong>
+            <span>Depth usage</span>
+            <strong>{formatDepthValue(sessionState.debug.depth.session.usage)}</strong>
+          </div>
+          <div>
+            <span>Depth format</span>
+            <strong>{sessionState.debug.depth.session.dataFormat}</strong>
+          </div>
+          <div>
+            <span>Depth active</span>
+            <strong>{formatDepthValue(sessionState.debug.depth.session.active)}</strong>
           </div>
           <div>
             <span>Resolution</span>
@@ -160,6 +195,14 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
             <span>Valid depth frames</span>
             <strong>{sessionState.debug.depth.validFrameCount}</strong>
           </div>
+          <div>
+            <span>Raw scale</span>
+            <strong>{formatDepthValue(sessionState.debug.depth.rawValueToMeters)}</strong>
+          </div>
+        </div>
+        <div className="xr-dom-overlay-depth-acquisition">
+          <span>getDepthInformation(view)</span>
+          <strong>{formatDepthAcquisitionStatus(sessionState.debug.depth.acquisition.status)}</strong>
         </div>
         <div className="xr-dom-overlay-depth-samples">
           {sessionState.debug.depth.samples.map((sample) => (
@@ -168,6 +211,43 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
               <strong>{formatDepthDistance(sample.distanceMeters)}</strong>
             </div>
           ))}
+        </div>
+        <div className="xr-dom-overlay-depth-errors">
+          {sessionState.debug.depth.acquisition.error ? (
+            <p>
+              {formatDepthException('getDepthInformation', sessionState.debug.depth.acquisition.error)}
+            </p>
+          ) : null}
+          {sessionState.debug.depth.session.usageError ? (
+            <p>{formatDepthException('depthUsage', sessionState.debug.depth.session.usageError)}</p>
+          ) : null}
+          {sessionState.debug.depth.session.dataFormatError ? (
+            <p>
+              {formatDepthException('depthDataFormat', sessionState.debug.depth.session.dataFormatError)}
+            </p>
+          ) : null}
+          {sessionState.debug.depth.session.activeError ? (
+            <p>{formatDepthException('depthActive', sessionState.debug.depth.session.activeError)}</p>
+          ) : null}
+          {sessionState.debug.depth.metadataError ? (
+            <p>{formatDepthException('depth metadata', sessionState.debug.depth.metadataError)}</p>
+          ) : null}
+          {sessionState.debug.depth.rawValueToMetersError ? (
+            <p>
+              {formatDepthException(
+                'rawValueToMeters',
+                sessionState.debug.depth.rawValueToMetersError,
+              )}
+            </p>
+          ) : null}
+          {sessionState.debug.depth.sampleError ? (
+            <p>
+              {formatDepthException(
+                `${sessionState.debug.depth.sampleError.label} sample`,
+                sessionState.debug.depth.sampleError.error,
+              )}
+            </p>
+          ) : null}
         </div>
         {sessionState.debug.depth.error ? (
           <p className="xr-dom-overlay-depth-error">{sessionState.debug.depth.error}</p>

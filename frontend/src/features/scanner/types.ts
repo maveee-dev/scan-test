@@ -21,6 +21,7 @@ export type DepthSensingStatus =
   | 'idle'
   | 'requesting'
   | 'active'
+  | 'gpu-selected'
   | 'unavailable'
   | 'error'
 
@@ -29,6 +30,8 @@ export type DepthDataType =
   | 'luminance-alpha'
   | 'unsigned-short'
   | 'unknown'
+
+export type DepthUsage = 'cpu-optimized' | 'gpu-optimized'
 
 export type DepthSampleLabel = 'center' | 'upper' | 'lower' | 'left' | 'right'
 
@@ -53,6 +56,37 @@ export interface DepthSample {
   distanceMeters: number | null
 }
 
+export interface XRDepthException {
+  name: string
+  message: string
+}
+
+export interface XRDepthSessionDiagnostics {
+  usage: DepthUsage | null
+  dataFormat: DepthDataType
+  active: boolean | null
+  usageError: XRDepthException | null
+  dataFormatError: XRDepthException | null
+  activeError: XRDepthException | null
+}
+
+export type DepthAcquisitionStatus =
+  | 'not-attempted'
+  | 'available'
+  | 'null'
+  | 'threw'
+  | 'unsupported'
+
+export interface XRDepthAcquisitionDiagnostics {
+  status: DepthAcquisitionStatus
+  error: XRDepthException | null
+}
+
+export interface XRDepthSampleError {
+  label: DepthSampleLabel
+  error: XRDepthException
+}
+
 export interface XRDepthDebug {
   status: DepthSensingStatus
   dataType: DepthDataType
@@ -60,6 +94,12 @@ export interface XRDepthDebug {
   height: number | null
   validFrameCount: number
   samples: DepthSample[]
+  rawValueToMeters: number | null
+  session: XRDepthSessionDiagnostics
+  acquisition: XRDepthAcquisitionDiagnostics
+  metadataError: XRDepthException | null
+  rawValueToMetersError: XRDepthException | null
+  sampleError: XRDepthSampleError | null
   error: string | null
 }
 
