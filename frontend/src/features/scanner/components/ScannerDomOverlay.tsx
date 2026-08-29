@@ -1,4 +1,8 @@
-import type { ScannerSessionState } from '../types'
+import type {
+  ReferenceSpaceStatus,
+  ScannerSessionState,
+  XRPresentationStatus,
+} from '../types'
 
 interface ScannerDomOverlayProps {
   onStopScan: () => void
@@ -7,6 +11,34 @@ interface ScannerDomOverlayProps {
 
 function formatCoordinate(value: number | undefined): string {
   return value === undefined ? 'N/A' : value.toFixed(2)
+}
+
+function formatPresentationStatus(status: XRPresentationStatus): string {
+  if (status === 'ready') {
+    return 'Ready'
+  }
+
+  if (status === 'failed') {
+    return 'Failed'
+  }
+
+  return 'Pending'
+}
+
+function formatReferenceSpaceStatus(status: ReferenceSpaceStatus): string {
+  if (status === 'local-floor' || status === 'local') {
+    return status
+  }
+
+  if (status === 'requesting') {
+    return 'Requesting'
+  }
+
+  if (status === 'failed') {
+    return 'Failed'
+  }
+
+  return 'Idle'
 }
 
 function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps) {
@@ -25,26 +57,45 @@ function ScannerDomOverlay({ onStopScan, sessionState }: ScannerDomOverlayProps)
         <span>{isStarting ? 'XR session starting' : 'Scanning session active'}</span>
       </div>
 
+      <div className="xr-dom-overlay-diagnostics">
+        <div>
+          <span>XR session</span>
+          <strong>{sessionState.debug.sessionActive ? 'Active' : 'Ended'}</strong>
+        </div>
+        <div>
+          <span>WebGL context</span>
+          <strong>{formatPresentationStatus(sessionState.debug.glContextStatus)}</strong>
+        </div>
+        <div>
+          <span>XR base layer</span>
+          <strong>{formatPresentationStatus(sessionState.debug.baseLayerStatus)}</strong>
+        </div>
+        <div>
+          <span>Reference space</span>
+          <strong>{formatReferenceSpaceStatus(sessionState.debug.referenceSpaceStatus)}</strong>
+        </div>
+      </div>
+
       <div className="xr-dom-overlay-tracking">
         <span
-          className={`xr-dom-overlay-tracking-dot ${sessionState.debug.trackingActive ? 'is-tracking' : 'is-lost'}`}
+          className={`xr-dom-overlay-tracking-dot ${sessionState.debug.trackingStatus === 'active' ? 'is-tracking' : 'is-lost'}`}
           aria-hidden="true"
         />
         <span>
-          {sessionState.debug.trackingActive
+          {sessionState.debug.trackingStatus === 'active'
             ? 'Tracking active'
-            : 'Viewer pose temporarily unavailable'}
+            : 'Tracking waiting for viewer pose'}
         </span>
       </div>
 
-      <div className="xr-dom-overlay-meta">
+      <div className="xr-dom-overlay-counts">
         <div>
-          <span>Reference space</span>
-          <strong>{sessionState.debug.referenceSpaceType ?? 'pending'}</strong>
+          <span>XR frames received</span>
+          <strong>{sessionState.debug.xrFrameCount}</strong>
         </div>
         <div>
-          <span>Frames sampled</span>
-          <strong>{sessionState.debug.sampledFrameCount}</strong>
+          <span>Valid poses received</span>
+          <strong>{sessionState.debug.poseSampleCount}</strong>
         </div>
       </div>
 

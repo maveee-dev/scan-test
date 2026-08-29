@@ -252,22 +252,44 @@ function ScannerPage({
                 <div className="pose-debug-header">
                   <span id="pose-debug-title">Live pose telemetry</span>
                   <span className="reference-space-label">
-                    {sessionState.debug.referenceSpaceType ?? 'reference pending'}
+                    {sessionState.debug.referenceSpaceStatus}
                   </span>
                 </div>
                 <div className="pose-tracking-state">
                   <span
-                    className={`tracking-indicator ${sessionState.debug.trackingActive ? 'is-tracking' : 'is-lost'}`}
+                    className={`tracking-indicator ${sessionState.debug.trackingStatus === 'active' ? 'is-tracking' : 'is-lost'}`}
                     aria-hidden="true"
                   />
-                  {sessionState.debug.trackingActive
+                  {sessionState.debug.trackingStatus === 'active'
                     ? 'Tracking active'
-                    : 'Viewer pose temporarily unavailable'}
+                    : 'Tracking waiting for viewer pose'}
+                </div>
+                <div className="pose-diagnostics">
+                  <div>
+                    <span>XR session</span>
+                    <strong>{sessionState.debug.sessionActive ? 'Active' : 'Ended'}</strong>
+                  </div>
+                  <div>
+                    <span>WebGL context</span>
+                    <strong>{sessionState.debug.glContextStatus}</strong>
+                  </div>
+                  <div>
+                    <span>XR base layer</span>
+                    <strong>{sessionState.debug.baseLayerStatus}</strong>
+                  </div>
+                  <div>
+                    <span>Reference space</span>
+                    <strong>{sessionState.debug.referenceSpaceStatus}</strong>
+                  </div>
                 </div>
                 <div className="pose-metrics">
                   <div>
-                    <span>Frames sampled</span>
-                    <strong>{sessionState.debug.sampledFrameCount}</strong>
+                    <span>XR frames</span>
+                    <strong>{sessionState.debug.xrFrameCount}</strong>
+                  </div>
+                  <div>
+                    <span>Valid poses</span>
+                    <strong>{sessionState.debug.poseSampleCount}</strong>
                   </div>
                   <div>
                     <span>Position X</span>

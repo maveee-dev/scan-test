@@ -11,8 +11,14 @@ import type {
 } from '../types'
 
 const createInitialDebug = (): ViewerPoseDebug => ({
+  sessionActive: false,
+  glContextStatus: 'unknown',
+  baseLayerStatus: 'unknown',
+  referenceSpaceStatus: 'idle',
+  xrFrameCount: 0,
+  poseSampleCount: 0,
+  trackingStatus: 'waiting',
   trackingActive: false,
-  sampledFrameCount: 0,
   position: null,
   referenceSpaceType: null,
   lastSampledAt: null,
@@ -97,18 +103,12 @@ export function useScannerSession(
               domOverlayStatus,
             }))
           },
-          onDebugUpdate: (debug) => {
+          onDiagnostics: (debug) => {
             if (!mountedRef.current) {
               return
             }
 
-            setSessionState((currentState) => {
-              if (currentState.status !== 'scanning') {
-                return currentState
-              }
-
-              return { ...currentState, debug }
-            })
+            setSessionState((currentState) => ({ ...currentState, debug }))
           },
           onError: (error) => {
             if (!mountedRef.current) {
@@ -132,7 +132,13 @@ export function useScannerSession(
               setSessionState((currentState) => ({
                 ...currentState,
                 status: 'error',
-                debug: createInitialDebug(),
+                debug: {
+                  ...currentState.debug,
+                  sessionActive: false,
+                  trackingActive: false,
+                  trackingStatus: 'waiting',
+                  position: null,
+                },
                 error:
                   currentState.error ??
                   'The XR session ended unexpectedly. Start a new scan to try again.',

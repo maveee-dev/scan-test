@@ -1,9 +1,16 @@
 import type {
   DomOverlayStatus,
+  ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
+  XRPresentationStatus,
   ViewerPoseDebug,
   ViewerPosition,
 } from '../types'
+import {
+  XRPresentationError,
+  XRPresentationService,
+  type XRPresentationDiagnostics,
+} from './xrPresentationService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 
@@ -14,6 +21,7 @@ export type XRSessionErrorCode =
   | 'permission-denied'
   | 'session-request-failed'
   | 'reference-space-failed'
+  | 'presentation-failed'
   | 'session-ended'
   | 'frame-processing-failed'
   | 'session-stop-failed'
@@ -30,7 +38,7 @@ export class XRSessionError extends Error {
 
 export interface XRSessionCallbacks {
   onDomOverlayState: (status: DomOverlayStatus) => void
-  onDebugUpdate: (debug: ViewerPoseDebug) => void
+  onDiagnostics: (diagnostics: ViewerPoseDebug) => void
   onError: (error: XRSessionError) => void
   onSessionEnded: (reason: XRSessionEndReason) => void
 }
@@ -83,6 +91,8 @@ function createError(
 export class XRSessionService {
   private activeSession: XRSession | null = null
 
+  private readonly presentationService = new XRPresentationService()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -99,13 +109,21 @@ export class XRSessionService {
 
   private isEnding = false
 
-  private sampledFrameCount = 0
-
   private lastPublishedAt = Number.NEGATIVE_INFINITY
 
   private trackingActive = false
 
   private position: ViewerPosition | null = null
+
+  private glContextStatus: XRPresentationStatus = 'unknown'
+
+  private baseLayerStatus: XRPresentationStatus = 'unknown'
+
+  private referenceSpaceStatus: ReferenceSpaceStatus = 'idle'
+
+  private xrFrameCount = 0
+
+  private poseSampleCount = 0
 
   public start(options: XRSessionStartOptions): Promise<void> {
     if (this.startPromise) {
@@ -154,6 +172,7 @@ export class XRSessionService {
   public async dispose(): Promise<void> {
     this.callbacks = null
     await this.stop()
+    this.presentationService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -185,11 +204,17 @@ export class XRSessionService {
 
     this.activeSession = session
     this.callbacks = options.callbacks
+    this.resetSessionDiagnostics()
     this.sessionEndListener = () => this.handleSessionEnded(session)
     session.addEventListener('end', this.sessionEndListener)
     this.callbacks.onDomOverlayState(session.domOverlayState ? 'active' : 'unavailable')
+    this.emitDiagnostics()
 
     try {
+      const presentationDiagnostics = await this.presentationService.initialize(session)
+      this.applyPresentationDiagnostics(presentationDiagnostics)
+      this.emitDiagnostics()
+
       const referenceSpaceResult = await this.requestReferenceSpace(session)
 
       if (!this.isActiveSession(session)) {
@@ -206,15 +231,25 @@ export class XRSessionService {
 
       this.referenceSpace = referenceSpaceResult.referenceSpace
       this.referenceSpaceType = referenceSpaceResult.type
-      this.resetDebugState()
       this.startFrameProcessing(session)
     } catch (error) {
+      const presentationDiagnostics = this.presentationService.getDiagnostics()
+      this.applyPresentationDiagnostics(presentationDiagnostics)
+      if (error instanceof XRPresentationError && this.referenceSpaceStatus === 'idle') {
+        this.referenceSpaceStatus = 'failed'
+      }
+      this.emitDiagnostics()
+
       if (this.isActiveSession(session)) {
         await this.endActiveSession(session).catch(() => undefined)
       }
 
       if (error instanceof XRSessionError) {
         throw error
+      }
+
+      if (error instanceof XRPresentationError) {
+        throw new XRSessionError(error.message, 'presentation-failed')
       }
 
       throw createError(
@@ -226,14 +261,23 @@ export class XRSessionService {
   }
 
   private async requestReferenceSpace(session: XRSession): Promise<ReferenceSpaceResult> {
+    this.referenceSpaceStatus = 'requesting'
+    this.emitDiagnostics()
+
     try {
       const referenceSpace = await session.requestReferenceSpace('local-floor')
+      this.referenceSpaceStatus = 'local-floor'
+      this.emitDiagnostics()
       return { referenceSpace, type: 'local-floor' }
     } catch {
       try {
         const referenceSpace = await session.requestReferenceSpace('local')
+        this.referenceSpaceStatus = 'local'
+        this.emitDiagnostics()
         return { referenceSpace, type: 'local' }
       } catch {
+        this.referenceSpaceStatus = 'failed'
+        this.emitDiagnostics()
         throw new XRSessionError(
           'This device could not provide a local tracking reference space.',
           'reference-space-failed',
@@ -253,12 +297,26 @@ export class XRSessionService {
 
     const processFrame: XRFrameRequestCallback = (time, frame) => {
       this.frameRequestId = null
+      this.xrFrameCount += 1
 
       if (!this.isActiveSession(session) || this.isEnding) {
         return
       }
 
-      this.sampledFrameCount += 1
+      try {
+        this.presentationService.clearTransparentFrame()
+      } catch (error) {
+        this.handleFrameProcessingError(
+          session,
+          new XRSessionError(
+            error instanceof XRPresentationError
+              ? error.message
+              : 'The XR framebuffer could not be prepared.',
+            'frame-processing-failed',
+          ),
+        )
+        return
+      }
 
       let pose: XRViewerPose | undefined
       try {
@@ -268,11 +326,14 @@ export class XRSessionService {
       }
 
       this.trackingActive = pose !== undefined
+      if (pose) {
+        this.poseSampleCount += 1
+      }
       this.position = pose ? createPosition(pose.transform.position) : null
 
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
         this.lastPublishedAt = time
-        this.publishDebug(time)
+        this.publishDiagnostics(time)
       }
 
       if (this.isActiveSession(session) && !this.isEnding) {
@@ -302,10 +363,16 @@ export class XRSessionService {
     }
   }
 
-  private publishDebug(time: DOMHighResTimeStamp): void {
-    this.callbacks?.onDebugUpdate({
+  private publishDiagnostics(time: DOMHighResTimeStamp): void {
+    this.callbacks?.onDiagnostics({
+      sessionActive: this.activeSession !== null,
+      glContextStatus: this.glContextStatus,
+      baseLayerStatus: this.baseLayerStatus,
+      referenceSpaceStatus: this.referenceSpaceStatus,
+      xrFrameCount: this.xrFrameCount,
+      poseSampleCount: this.poseSampleCount,
+      trackingStatus: this.trackingActive ? 'active' : 'waiting',
       trackingActive: this.trackingActive,
-      sampledFrameCount: this.sampledFrameCount,
       position: this.position,
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: time,
@@ -328,6 +395,7 @@ export class XRSessionService {
     this.activeSession = null
     this.referenceSpace = null
     this.referenceSpaceType = null
+    this.presentationService.dispose()
     this.frameRequestId = null
     this.isEnding = false
 
@@ -388,11 +456,36 @@ export class XRSessionService {
     }
   }
 
-  private resetDebugState(): void {
-    this.sampledFrameCount = 0
+  private resetSessionDiagnostics(): void {
+    this.glContextStatus = 'unknown'
+    this.baseLayerStatus = 'unknown'
+    this.referenceSpaceStatus = 'idle'
+    this.xrFrameCount = 0
+    this.poseSampleCount = 0
     this.lastPublishedAt = Number.NEGATIVE_INFINITY
     this.trackingActive = false
     this.position = null
+  }
+
+  private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
+    this.glContextStatus = diagnostics.glContextStatus
+    this.baseLayerStatus = diagnostics.baseLayerStatus
+  }
+
+  private emitDiagnostics(): void {
+    this.callbacks?.onDiagnostics({
+      sessionActive: this.activeSession !== null,
+      glContextStatus: this.glContextStatus,
+      baseLayerStatus: this.baseLayerStatus,
+      referenceSpaceStatus: this.referenceSpaceStatus,
+      xrFrameCount: this.xrFrameCount,
+      poseSampleCount: this.poseSampleCount,
+      trackingStatus: this.trackingActive ? 'active' : 'waiting',
+      trackingActive: this.trackingActive,
+      position: this.position,
+      referenceSpaceType: this.referenceSpaceType,
+      lastSampledAt: Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : null,
+    })
   }
 
   private isActiveSession(session: XRSession): boolean {

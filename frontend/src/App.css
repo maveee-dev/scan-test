@@ -507,7 +507,8 @@
   box-shadow: 0 0 10px var(--coral);
 }
 
-.xr-dom-overlay-meta,
+.xr-dom-overlay-diagnostics,
+.xr-dom-overlay-counts,
 .xr-dom-overlay-position {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -515,7 +516,8 @@
   margin-top: 14px;
 }
 
-.xr-dom-overlay-meta > div,
+.xr-dom-overlay-diagnostics > div,
+.xr-dom-overlay-counts > div,
 .xr-dom-overlay-position > div {
   padding: 9px;
   border: 1px solid var(--line);
@@ -523,14 +525,16 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
-.xr-dom-overlay-meta span,
+.xr-dom-overlay-diagnostics span,
+.xr-dom-overlay-counts span,
 .xr-dom-overlay-position span {
   display: block;
   color: var(--dim);
   font-size: 8px;
 }
 
-.xr-dom-overlay-meta strong,
+.xr-dom-overlay-diagnostics strong,
+.xr-dom-overlay-counts strong,
 .xr-dom-overlay-position strong {
   display: block;
   margin-top: 6px;
@@ -736,6 +740,7 @@
 
 .pose-debug-header,
 .pose-tracking-state,
+.pose-diagnostics,
 .pose-metrics span,
 .reference-space-label {
   font-family: var(--mono);
@@ -764,6 +769,36 @@
   margin-top: 13px;
   color: var(--muted);
   font-size: 9px;
+}
+
+.pose-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.pose-diagnostics > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.pose-diagnostics span {
+  color: var(--dim);
+  font-size: 8px;
+}
+
+.pose-diagnostics strong {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+  text-transform: uppercase;
 }
 
 .tracking-indicator {
@@ -876,6 +911,10 @@
   }
 
   .pose-metrics {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .pose-diagnostics {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
