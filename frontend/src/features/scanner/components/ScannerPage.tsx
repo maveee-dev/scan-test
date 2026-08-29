@@ -1,0 +1,266 @@
+import type {
+  ScannerCapabilities,
+  ScannerCheckStatus,
+  ScannerSessionState,
+} from '../types'
+import '../../../App.css'
+
+interface ScannerPageProps {
+  status: ScannerCheckStatus
+  capabilities: ScannerCapabilities | null
+  canStartScan: boolean
+  sessionState: ScannerSessionState
+  onStartScan: () => void
+  onStopScan: () => void
+}
+
+interface CapabilityRowProps {
+  description: string
+  icon: 'webxr' | 'ar'
+  isSupported: boolean
+  label: string
+  status: ScannerCheckStatus
+}
+
+function CapabilityIcon({ icon }: Pick<CapabilityRowProps, 'icon'>) {
+  if (icon === 'ar') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" stroke="currentColor" strokeWidth="1.4" />
+        <path d="m4.5 7.8 7.5 4.3 7.5-4.3M12 12.1V21" stroke="currentColor" strokeWidth="1.4" />
+      </svg>
+    )
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5v-7Z" stroke="currentColor" strokeWidth="1.4" />
+      <path d="m8 10.5 4 2.2 4-2.2M12 12.7V20" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  )
+}
+
+function CapabilityRow({ description, icon, isSupported, label, status }: CapabilityRowProps) {
+  const isChecking = status === 'checking'
+  const stateLabel = isChecking ? 'Checking' : isSupported ? 'Available' : 'Unavailable'
+  const stateClassName = isChecking
+    ? 'is-checking'
+    : isSupported
+      ? 'is-supported'
+      : 'is-unsupported'
+
+  return (
+    <div className="capability-row">
+      <span className="capability-icon">
+        <CapabilityIcon icon={icon} />
+      </span>
+      <span>
+        <span className="capability-name">{label}</span>
+        <span className="capability-description">{description}</span>
+      </span>
+      <span className={`capability-state ${stateClassName}`} role="status">
+        {stateLabel}
+      </span>
+    </div>
+  )
+}
+
+function formatCoordinate(value: number | undefined): string {
+  return value === undefined ? 'N/A' : value.toFixed(2)
+}
+
+function ScannerPage({
+  capabilities,
+  canStartScan,
+  onStartScan,
+  onStopScan,
+  sessionState,
+  status,
+}: ScannerPageProps) {
+  const isChecking = status === 'checking'
+  const allSupported = capabilities?.webxr === true && capabilities.immersiveAr === true
+  const isStarting = sessionState.status === 'starting'
+  const isActive = sessionState.status === 'scanning' || sessionState.status === 'stopping'
+  const isStopping = sessionState.status === 'stopping'
+  const statusLabel = isStarting
+    ? 'Starting session'
+    : isStopping
+      ? 'Stopping session'
+      : isActive
+        ? 'Session active'
+        : sessionState.status === 'error'
+          ? 'Session error'
+          : 'Ready to scan'
+  const statusDescription = isStarting
+    ? 'Requesting camera and spatial tracking access.'
+    : isStopping
+      ? 'Ending XR frame processing safely.'
+      : isActive
+        ? 'Reading viewer pose from the XR device.'
+        : 'Start a session to verify device pose tracking.'
+  const sessionTag = isStarting
+    ? 'Creating session'
+    : isActive
+      ? 'Session active'
+      : 'No session started'
+  const visualLabel = isStarting ? 'START' : isActive ? 'LIVE' : sessionState.status === 'error' ? 'RETRY' : 'READY'
+
+  return (
+    <div className="scanner-shell">
+      <div className="scanner-noise" aria-hidden="true" />
+      <div className="scanner-content">
+        <header className="scanner-header">
+          <span className="brand-lockup">
+            <span className="brand-mark" aria-hidden="true" />
+            Spatial Scanner
+          </span>
+          <span className="header-status">System online</span>
+        </header>
+
+        <main className="scanner-main" aria-labelledby="scanner-title">
+          <section className="scanner-intro">
+            <span className="scanner-eyebrow">Milestone 02 / Pose tracking</span>
+            <h1 className="scanner-title" id="scanner-title">
+              Scan the <em>space</em> around you.
+            </h1>
+            <p className="scanner-description">
+              Start an immersive AR session to verify your browser can track the device as you move through a room.
+            </p>
+          </section>
+
+          <div className="scanner-visual" aria-hidden="true">
+            <div className="scanner-grid" />
+            <span className="scanner-sweep" />
+            <span className="scanner-orbit orbit-one" />
+            <span className="scanner-orbit orbit-two" />
+            <span className="scanner-visual-center">{visualLabel}</span>
+          </div>
+
+          <section className="capability-card" aria-labelledby="capability-title">
+            <div className="capability-card-header">
+              <div>
+                <h2 className="capability-card-title" id="capability-title">
+                  Device readiness
+                </h2>
+                <p className="capability-card-copy">
+                  Confirm support, then test live device pose tracking.
+                </p>
+              </div>
+              <span className="capability-tag">{sessionTag}</span>
+            </div>
+
+            <div className="capability-list" aria-live="polite">
+              <CapabilityRow
+                description="Browser spatial runtime"
+                icon="webxr"
+                isSupported={capabilities?.webxr ?? false}
+                label="WebXR Device API"
+                status={status}
+              />
+              <CapabilityRow
+                description="World-facing augmented reality"
+                icon="ar"
+                isSupported={capabilities?.immersiveAr ?? false}
+                label="Immersive AR"
+                status={status}
+              />
+            </div>
+
+            <div className="capability-card-footer">
+              <span className="footer-symbol">{allSupported ? 'OK' : '->'}</span>
+              <span>
+                {isChecking
+                  ? 'Reading browser capabilities...'
+                  : allSupported
+                    ? 'XR capabilities verified. Ready to begin.'
+                    : 'Immersive AR is not available in this browser.'}
+              </span>
+            </div>
+
+            <div className="scanner-session-controls">
+              <div className={`session-status session-status-${sessionState.status}`}>
+                <span className="session-status-dot" aria-hidden="true" />
+                <span>
+                  <strong>{statusLabel}</strong>
+                  <small>{statusDescription}</small>
+                </span>
+              </div>
+
+              {isActive ? (
+                <button
+                  type="button"
+                  className="scan-button scan-button-stop"
+                  disabled={isStopping}
+                  onClick={onStopScan}
+                >
+                  {isStopping ? 'Stopping...' : 'Stop Scan'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="scan-button"
+                  aria-busy={isStarting}
+                  disabled={!canStartScan || isStarting}
+                  onClick={onStartScan}
+                >
+                  {isStarting ? 'Starting...' : 'Start Scan'}
+                </button>
+              )}
+            </div>
+
+            {sessionState.status === 'error' && sessionState.error ? (
+              <p className="session-error" role="alert">
+                {sessionState.error}
+              </p>
+            ) : null}
+
+            {isActive ? (
+              <section className="pose-debug" aria-labelledby="pose-debug-title">
+                <div className="pose-debug-header">
+                  <span id="pose-debug-title">Live pose telemetry</span>
+                  <span className="reference-space-label">
+                    {sessionState.debug.referenceSpaceType ?? 'reference pending'}
+                  </span>
+                </div>
+                <div className="pose-tracking-state">
+                  <span
+                    className={`tracking-indicator ${sessionState.debug.trackingActive ? 'is-tracking' : 'is-lost'}`}
+                    aria-hidden="true"
+                  />
+                  {sessionState.debug.trackingActive
+                    ? 'Tracking active'
+                    : 'Viewer pose temporarily unavailable'}
+                </div>
+                <div className="pose-metrics">
+                  <div>
+                    <span>Frames sampled</span>
+                    <strong>{sessionState.debug.sampledFrameCount}</strong>
+                  </div>
+                  <div>
+                    <span>Position X</span>
+                    <strong>{formatCoordinate(sessionState.debug.position?.x)}</strong>
+                  </div>
+                  <div>
+                    <span>Position Y</span>
+                    <strong>{formatCoordinate(sessionState.debug.position?.y)}</strong>
+                  </div>
+                  <div>
+                    <span>Position Z</span>
+                    <strong>{formatCoordinate(sessionState.debug.position?.z)}</strong>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+          </section>
+        </main>
+
+        <footer className="scanner-footer">
+          <span>Spatial Scanner / V1.0</span>
+          <span>{isActive ? 'Pose tracking test / no depth' : 'Capability check + session test'}</span>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+export default ScannerPage
