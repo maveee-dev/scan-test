@@ -1,5 +1,9 @@
 import * as THREE from 'three'
-import type { SpatialPoint, SpatialPreviewStatus } from '../types'
+import type {
+  SpatialPoint,
+  SpatialPointObservation,
+  SpatialPreviewStatus,
+} from '../types'
 
 const DEFAULT_CANVAS_WIDTH = 280
 const DEFAULT_CANVAS_HEIGHT = 150
@@ -10,19 +14,19 @@ interface PreviewBounds {
   max: SpatialPoint
 }
 
-function getBounds(points: readonly SpatialPoint[]): PreviewBounds | null {
-  if (points.length === 0) {
+function getBounds(observations: readonly SpatialPointObservation[]): PreviewBounds | null {
+  if (observations.length === 0) {
     return null
   }
 
-  const firstPoint = points[0]
+  const firstPoint = observations[0].point
   const bounds: PreviewBounds = {
     min: { ...firstPoint },
     max: { ...firstPoint },
   }
 
-  for (let index = 1; index < points.length; index += 1) {
-    const point = points[index]
+  for (let index = 1; index < observations.length; index += 1) {
+    const point = observations[index].point
     bounds.min.x = Math.min(bounds.min.x, point.x)
     bounds.min.y = Math.min(bounds.min.y, point.y)
     bounds.min.z = Math.min(bounds.min.z, point.z)
@@ -107,7 +111,7 @@ export class SpatialPointPreviewService {
     }
   }
 
-  public render(points: readonly SpatialPoint[]): void {
+  public render(observations: readonly SpatialPointObservation[]): void {
     if (
       this.previewStatus !== 'ready' ||
       !this.canvas ||
@@ -121,8 +125,9 @@ export class SpatialPointPreviewService {
     }
 
     try {
-      const positions = new Float32Array(points.length * 3)
-      for (const [index, point] of points.entries()) {
+      const positions = new Float32Array(observations.length * 3)
+      for (const [index, observation] of observations.entries()) {
+        const point = observation.point
         positions[index * 3] = point.x
         positions[index * 3 + 1] = point.y
         positions[index * 3 + 2] = point.z
@@ -130,10 +135,10 @@ export class SpatialPointPreviewService {
 
       this.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
       this.geometry.computeBoundingSphere()
-      this.pointCloud.visible = points.length > 0
+      this.pointCloud.visible = observations.length > 0
 
-      if (points.length > 0) {
-        this.updateCamera(points)
+      if (observations.length > 0) {
+        this.updateCamera(observations)
       }
 
       const width = this.canvas.clientWidth || this.canvas.width || DEFAULT_CANVAS_WIDTH
@@ -152,12 +157,12 @@ export class SpatialPointPreviewService {
     this.previewStatus = 'idle'
   }
 
-  private updateCamera(points: readonly SpatialPoint[]): void {
+  private updateCamera(observations: readonly SpatialPointObservation[]): void {
     if (!this.camera) {
       return
     }
 
-    const bounds = getBounds(points)
+    const bounds = getBounds(observations)
     if (!bounds) {
       return
     }

@@ -1,5 +1,7 @@
 import { useState, type RefObject } from 'react'
 import type {
+  CoverageGridCell,
+  CoverageGuidance,
   DepthAcquisitionStatus,
   DepthSensingStatus,
   ReferenceSpaceStatus,
@@ -133,6 +135,39 @@ function formatDepthDistance(distanceMeters: number | null): string {
     : 'N/A'
 }
 
+function formatCoveragePercentage(coverage: number | null): string {
+  return coverage === null || !Number.isFinite(coverage) ? 'N/A' : `${Math.round(coverage)}%`
+}
+
+function formatCoverageGuidance(guidance: CoverageGuidance): string {
+  switch (guidance) {
+    case 'continue-scanning-from-another-angle':
+      return 'Continue scanning from another angle'
+    case 'area-captured-move-to-a-new-surface':
+      return 'Area captured - move to a new surface'
+    default:
+      return 'Move slowly across unscanned areas'
+  }
+}
+
+function CoverageGridOverlay({ grid }: { grid: readonly CoverageGridCell[] }) {
+  return (
+    <div
+      className="xr-coverage-grid"
+      role="img"
+      aria-label="Current view spatial coverage"
+    >
+      {grid.map((cell, index) => (
+        <span
+          key={index}
+          className={`xr-coverage-cell is-${cell.state}${cell.valid ? ' is-valid' : ''}`}
+          aria-hidden="true"
+        />
+      ))}
+    </div>
+  )
+}
+
 function ScannerDomOverlay({
   onStopScan,
   pointPreviewCanvasRef,
@@ -143,6 +178,7 @@ function ScannerDomOverlay({
   const isStopping = sessionState.status === 'stopping'
   const trackingIsActive = sessionState.debug.trackingStatus === 'active'
   const depthStatus = formatDepthStatus(sessionState.debug.depth.status)
+  const coverage = sessionState.debug.coverage
 
   function handleStopScan(): void {
     setIsDebugOpen(false)
@@ -151,6 +187,7 @@ function ScannerDomOverlay({
 
   return (
     <>
+      <CoverageGridOverlay grid={coverage.grid} />
       <section className="xr-scanner-hud" aria-label="Spatial Scanner controls">
         <div className="xr-scanner-hud-header">
           <div className="xr-scanner-hud-session">
@@ -184,7 +221,17 @@ function ScannerDomOverlay({
             <span>Depth</span>
             <strong>{depthStatus}</strong>
           </div>
+          <div className="xr-scanner-hud-status-item">
+            <span>View coverage</span>
+            <strong>{formatCoveragePercentage(coverage.currentViewCoverage)}</strong>
+          </div>
+          <div className="xr-scanner-hud-status-item">
+            <span>Captured / unique</span>
+            <strong>{coverage.capturedCells} / {coverage.totalUniqueCells}</strong>
+          </div>
         </div>
+
+        <p className="xr-scanner-hud-guidance">{formatCoverageGuidance(coverage.guidance)}</p>
 
         <button
           type="button"
@@ -436,6 +483,66 @@ function ScannerDomOverlay({
             {sessionState.debug.spatial.error ? (
               <p className="xr-dom-overlay-spatial-error">{sessionState.debug.spatial.error}</p>
             ) : null}
+          </div>
+
+          <div className="xr-dom-overlay-coverage" aria-label="Spatial coverage diagnostics">
+            <div className="xr-dom-overlay-coverage-header">
+              <span>Spatial coverage / current view</span>
+              <strong>{formatCoveragePercentage(coverage.currentViewCoverage)}</strong>
+            </div>
+            <div className="xr-dom-overlay-coverage-meta">
+              <div>
+                <span>Coverage cell size</span>
+                <strong>{coverage.cellSizeMeters.toFixed(2)} m</strong>
+              </div>
+              <div>
+                <span>Total unique cells</span>
+                <strong>{coverage.totalUniqueCells}</strong>
+              </div>
+              <div>
+                <span>Observed cells</span>
+                <strong>{coverage.observedCells}</strong>
+              </div>
+              <div>
+                <span>Partial cells</span>
+                <strong>{coverage.partialCells}</strong>
+              </div>
+              <div>
+                <span>Captured cells</span>
+                <strong>{coverage.capturedCells}</strong>
+              </div>
+              <div>
+                <span>Map capacity</span>
+                <strong>{coverage.totalUniqueCells} / {coverage.maxCells}</strong>
+              </div>
+              <div>
+                <span>Current valid samples</span>
+                <strong>{coverage.currentValidSamples}</strong>
+              </div>
+              <div>
+                <span>Current captured samples</span>
+                <strong>{coverage.currentCapturedSamples}</strong>
+              </div>
+              <div>
+                <span>Accepted observations</span>
+                <strong>{coverage.acceptedObservationCount}</strong>
+              </div>
+              <div>
+                <span>Rejected duplicate / same-view</span>
+                <strong>{coverage.rejectedDuplicateObservationCount}</strong>
+              </div>
+              <div>
+                <span>Capacity reached</span>
+                <strong>{coverage.capacityReached ? 'Yes' : 'No'}</strong>
+              </div>
+              <div>
+                <span>Capacity-rejected samples</span>
+                <strong>{coverage.capacityRejectedSampleCount}</strong>
+              </div>
+            </div>
+            <p className="xr-dom-overlay-coverage-guidance">
+              Guidance: {formatCoverageGuidance(coverage.guidance)}
+            </p>
           </div>
         </div>
 

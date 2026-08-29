@@ -810,8 +810,53 @@
   overflow: hidden;
 }
 
+.xr-coverage-grid {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  grid-template-rows: repeat(9, minmax(0, 1fr));
+  gap: 2px;
+  width: min(84vw, 480px);
+  aspect-ratio: 16 / 9;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.xr-coverage-cell {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+}
+
+.xr-coverage-cell.is-unobserved.is-valid {
+  border-color: rgba(243, 241, 233, 0.16);
+  background: rgba(243, 241, 233, 0.025);
+}
+
+.xr-coverage-cell.is-observed {
+  border-color: rgba(212, 239, 105, 0.32);
+  background: rgba(212, 239, 105, 0.1);
+}
+
+.xr-coverage-cell.is-partial {
+  border-color: rgba(212, 239, 105, 0.54);
+  background: rgba(212, 239, 105, 0.2);
+}
+
+.xr-coverage-cell.is-captured {
+  border-color: rgba(212, 239, 105, 0.78);
+  background: rgba(212, 239, 105, 0.34);
+  box-shadow: 0 0 8px rgba(212, 239, 105, 0.18);
+}
+
 .xr-scanner-hud {
   position: absolute;
+  z-index: 2;
   top: max(12px, env(safe-area-inset-top));
   left: max(12px, env(safe-area-inset-left));
   right: max(12px, env(safe-area-inset-right));
@@ -888,7 +933,7 @@
 
 .xr-scanner-hud-status {
   display: grid;
-  grid-template-columns: 1.2fr 0.8fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   margin-top: 9px;
 }
@@ -963,8 +1008,19 @@
   opacity: 0.65;
 }
 
+.xr-scanner-hud-guidance {
+  margin: 9px 2px 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.35;
+  letter-spacing: 0.03em;
+  text-align: center;
+}
+
 .xr-scanner-debug {
   position: absolute;
+  z-index: 3;
   top: max(12px, env(safe-area-inset-top));
   right: max(12px, env(safe-area-inset-right));
   bottom: max(12px, env(safe-area-inset-bottom));
@@ -1023,6 +1079,77 @@
 
 .xr-scanner-debug-footer .xr-dom-overlay-stop {
   margin-top: 0;
+}
+
+.xr-dom-overlay-coverage {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.xr-dom-overlay-coverage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.xr-dom-overlay-coverage-header strong {
+  color: var(--acid);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.xr-dom-overlay-coverage-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.xr-dom-overlay-coverage-meta > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.xr-dom-overlay-coverage-meta span {
+  display: block;
+  overflow: hidden;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-coverage-meta strong {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xr-dom-overlay-coverage-guidance {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.4;
 }
 
 .dom-overlay-summary {

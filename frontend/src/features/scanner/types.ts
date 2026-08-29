@@ -129,6 +129,12 @@ export interface SpatialPoint {
   z: number
 }
 
+export interface SpatialPointObservation {
+  normalizedX: number
+  normalizedY: number
+  point: SpatialPoint
+}
+
 export interface SpatialBounds {
   min: SpatialPoint
   max: SpatialPoint
@@ -145,6 +151,50 @@ export interface SpatialPointDebug {
   error: string | null
 }
 
+export type CoverageCellState = 'observed' | 'partial' | 'captured'
+
+export type CoverageGridState = CoverageCellState | 'unobserved'
+
+export type CoverageGuidance =
+  | 'move-slowly-across-unscanned-areas'
+  | 'continue-scanning-from-another-angle'
+  | 'area-captured-move-to-a-new-surface'
+
+export interface CoverageCell {
+  key: string
+  center: SpatialPoint
+  observationCount: number
+  state: CoverageCellState
+  firstObservedAt: number
+  lastObservedAt: number
+  lastAcceptedCameraPosition: ViewerPosition
+}
+
+export interface CoverageGridCell {
+  normalizedX: number
+  normalizedY: number
+  state: CoverageGridState
+  valid: boolean
+}
+
+export interface SpatialCoverageDebug {
+  cellSizeMeters: number
+  totalUniqueCells: number
+  observedCells: number
+  partialCells: number
+  capturedCells: number
+  currentValidSamples: number
+  currentCapturedSamples: number
+  currentViewCoverage: number | null
+  acceptedObservationCount: number
+  rejectedDuplicateObservationCount: number
+  capacityRejectedSampleCount: number
+  maxCells: number
+  capacityReached: boolean
+  guidance: CoverageGuidance
+  grid: CoverageGridCell[]
+}
+
 export interface ViewerPoseDebug {
   sessionActive: boolean
   glContextStatus: XRPresentationStatus
@@ -159,6 +209,7 @@ export interface ViewerPoseDebug {
   lastSampledAt: number | null
   depth: XRDepthDebug
   spatial: SpatialPointDebug
+  coverage: SpatialCoverageDebug
 }
 
 export interface ScannerSessionState {

@@ -6,6 +6,7 @@ import {
 } from '../services/xrSessionService'
 import { createInitialDepthDebug } from '../services/xrDepthService'
 import { createInitialSpatialPointDebug } from '../services/spatialPointService'
+import { createInitialSpatialCoverageDebug } from '../services/spatialCoverageService'
 import type {
   ScanSessionStatus,
   ScannerSessionState,
@@ -26,6 +27,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   lastSampledAt: null,
   depth: createInitialDepthDebug(),
   spatial: createInitialSpatialPointDebug(),
+  coverage: createInitialSpatialCoverageDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -145,6 +147,7 @@ export function useScannerSession(
                   position: null,
                   depth: createInitialDepthDebug(),
                   spatial: createInitialSpatialPointDebug(),
+                  coverage: createInitialSpatialCoverageDebug(),
                 },
                 error:
                   currentState.error ??

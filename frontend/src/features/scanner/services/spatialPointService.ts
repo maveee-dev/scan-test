@@ -3,6 +3,7 @@ import type {
   SpatialBounds,
   SpatialGeometrySource,
   SpatialPoint,
+  SpatialPointObservation,
   SpatialPointDebug,
   SpatialPreviewStatus,
 } from '../types'
@@ -241,7 +242,9 @@ function selectMatrix(
 export class SpatialPointService {
   private diagnostics = createEmptySpatialPointDebug()
 
-  public processFrame(observation: DepthFrameObservation | null): readonly SpatialPoint[] {
+  public processFrame(
+    observation: DepthFrameObservation | null,
+  ): readonly SpatialPointObservation[] {
     if (!observation) {
       this.diagnostics = createEmptySpatialPointDebug()
       return []
@@ -276,7 +279,7 @@ export class SpatialPointService {
       return []
     }
 
-    const points: SpatialPoint[] = []
+    const points: SpatialPointObservation[] = []
     let bounds: SpatialBounds | null = null
     let centerPoint: SpatialPoint | null = null
     let closestCenterDistance = Number.POSITIVE_INFINITY
@@ -314,7 +317,11 @@ export class SpatialPointService {
         continue
       }
 
-      points.push(pointReference)
+      points.push({
+        normalizedX,
+        normalizedY,
+        point: pointReference,
+      })
       bounds = updateBounds(bounds, pointReference)
 
       const centerDistance =

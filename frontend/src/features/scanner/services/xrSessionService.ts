@@ -15,6 +15,7 @@ import {
 import { XRDepthService } from './xrDepthService'
 import { SpatialPointService } from './spatialPointService'
 import { SpatialPointPreviewService } from './spatialPointPreviewService'
+import { SpatialCoverageService } from './spatialCoverageService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 
@@ -104,6 +105,8 @@ export class XRSessionService {
 
   private readonly spatialPointPreviewService = new SpatialPointPreviewService()
 
+  private readonly spatialCoverageService = new SpatialCoverageService()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -187,6 +190,7 @@ export class XRSessionService {
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()
+    this.spatialCoverageService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -356,11 +360,12 @@ export class XRSessionService {
       const depthObservation = pose?.views[0]
         ? this.depthService.inspectFrame(frame, pose.views[0])
         : null
-      const spatialPoints = this.spatialPointService.processFrame(depthObservation)
+      const spatialObservations = this.spatialPointService.processFrame(depthObservation)
+      this.spatialCoverageService.processFrame(spatialObservations, this.position, time)
 
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
         this.lastPublishedAt = time
-        this.spatialPointPreviewService.render(spatialPoints)
+        this.spatialPointPreviewService.render(spatialObservations)
         this.publishDiagnostics(time)
       }
 
@@ -406,6 +411,7 @@ export class XRSessionService {
       lastSampledAt: time,
       depth: this.depthService.getDiagnostics(),
       spatial: this.getSpatialPointDiagnostics(),
+      coverage: this.spatialCoverageService.getDiagnostics(),
     })
   }
 
@@ -429,6 +435,7 @@ export class XRSessionService {
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()
+    this.spatialCoverageService.reset()
     this.frameRequestId = null
     this.isEnding = false
 
@@ -500,6 +507,7 @@ export class XRSessionService {
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()
+    this.spatialCoverageService.reset()
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -522,6 +530,7 @@ export class XRSessionService {
       lastSampledAt: Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : null,
       depth: this.depthService.getDiagnostics(),
       spatial: this.getSpatialPointDiagnostics(),
+      coverage: this.spatialCoverageService.getDiagnostics(),
     })
   }
 
