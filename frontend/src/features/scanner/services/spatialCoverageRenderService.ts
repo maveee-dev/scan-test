@@ -8,10 +8,14 @@ import type {
   XRWebGLContext,
 } from './xrPresentationService'
 import {
-  COVERAGE_VISUAL_PATCH_SIZE_METERS,
   MAX_COVERAGE_CELLS,
   type SpatialCoverageRenderSnapshot,
 } from './spatialCoverageService'
+import {
+  COVERAGE_VISUAL_COLORS,
+  COVERAGE_VISUAL_OPACITY,
+  COVERAGE_VISUAL_PATCH_SIZE_METERS,
+} from './spatialCoverageVisualConfig'
 
 const SURFACE_OFFSET_METERS = 0.002
 const MAX_RENDER_TILES = MAX_COVERAGE_CELLS
@@ -100,11 +104,20 @@ function subtractVectors(first: Vector3, second: Vector3): Vector3 {
 function getColor(state: CoverageCellState): [number, number, number, number] {
   switch (state) {
     case 'captured':
-      return [0.83, 0.94, 0.41, 0.3]
+      return [
+        ...COVERAGE_VISUAL_COLORS.captured,
+        COVERAGE_VISUAL_OPACITY.captured,
+      ]
     case 'partial':
-      return [0.83, 0.94, 0.41, 0.17]
+      return [
+        ...COVERAGE_VISUAL_COLORS.partial,
+        COVERAGE_VISUAL_OPACITY.partial,
+      ]
     default:
-      return [0.83, 0.94, 0.41, 0.09]
+      return [
+        ...COVERAGE_VISUAL_COLORS.observed,
+        COVERAGE_VISUAL_OPACITY.observed,
+      ]
   }
 }
 
@@ -265,6 +278,9 @@ export class SpatialCoverageRenderService {
     renderCapacity: MAX_RENDER_TILES,
     renderUpdateCount: 0,
     visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+    observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
+    partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
+    capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
   }
 
   public initialize(target: XRPresentationRenderTarget | null): void {
@@ -429,6 +445,9 @@ export class SpatialCoverageRenderService {
       renderCapacity: MAX_RENDER_TILES,
       renderUpdateCount: 0,
       visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+      observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
+      partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
+      capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
     }
   }
 

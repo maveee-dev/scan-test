@@ -185,6 +185,9 @@ export interface SpatialCoverageRenderDebug {
   renderCapacity: number
   renderUpdateCount: number
   visualPatchSizeMeters: number
+  observedOpacity: number
+  partialOpacity: number
+  capturedOpacity: number
 }
 
 export interface SpatialCoverageDebug {

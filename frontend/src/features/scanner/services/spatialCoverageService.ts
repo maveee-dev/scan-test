@@ -9,12 +9,13 @@ import type {
   SpatialPointObservation,
   ViewerPosition,
 } from '../types'
+import {
+  COVERAGE_VISUAL_OPACITY,
+  COVERAGE_VISUAL_PATCH_SIZE_METERS,
+} from './spatialCoverageVisualConfig'
 
 /** A 10 cm world-space cell balances surface continuity with mobile memory. */
 export const COVERAGE_CELL_SIZE_METERS = 0.1
-
-/** A slightly overlapping patch helps adjacent world cells read as a mask. */
-export const COVERAGE_VISUAL_PATCH_SIZE_METERS = 0.11
 
 export const COVERAGE_GRID_COLUMNS = 16
 export const COVERAGE_GRID_ROWS = 9
@@ -49,6 +50,9 @@ function createInitialRenderDebug(): SpatialCoverageRenderDebug {
     renderCapacity: MAX_COVERAGE_CELLS,
     renderUpdateCount: 0,
     visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
+    observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
+    partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
+    capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
   }
 }
 
