@@ -11,29 +11,45 @@ import type {
 
 export interface PlaneExtractionConfig {
   readonly downsampleCellSizeMeters: number
+  readonly projectedAreaCellSizeMeters: number
   readonly connectivityBucketSizeMeters: number
   readonly connectivityDistanceMeters: number
   readonly maximumSeedPlaneErrorMeters: number
   readonly maximumPlaneErrorMeters: number
   readonly maximumNormalAngleDegrees: number
+  readonly consolidationAngleDegrees: number
+  readonly consolidationOffsetToleranceMeters: number
+  readonly consolidationAdjacencyMeters: number
+  readonly minimumProjectedOverlapRatio: number
+  readonly highOverlapRatio: number
   readonly minimumSupportPointCount: number
   readonly minimumAreaSquareMeters: number
   readonly maximumRmsErrorMeters: number
   readonly maximumPlaneRefinementPasses: number
+  readonly maximumConsolidationPasses: number
+  readonly ownershipBoundsPaddingMeters: number
 }
 
 /** Conservative defaults for major-surface candidates, not semantic labels. */
 export const DEFAULT_PLANE_EXTRACTION_CONFIG: PlaneExtractionConfig = {
   downsampleCellSizeMeters: 0.075,
+  projectedAreaCellSizeMeters: 0.1,
   connectivityBucketSizeMeters: 0.12,
   connectivityDistanceMeters: 0.18,
   maximumSeedPlaneErrorMeters: 0.06,
   maximumPlaneErrorMeters: 0.045,
   maximumNormalAngleDegrees: 30,
+  consolidationAngleDegrees: 8,
+  consolidationOffsetToleranceMeters: 0.05,
+  consolidationAdjacencyMeters: 0.12,
+  minimumProjectedOverlapRatio: 0.12,
+  highOverlapRatio: 0.5,
   minimumSupportPointCount: 12,
   minimumAreaSquareMeters: 0.2,
   maximumRmsErrorMeters: 0.035,
   maximumPlaneRefinementPasses: 2,
+  maximumConsolidationPasses: 8,
+  ownershipBoundsPaddingMeters: 0.12,
 }
 
 interface AnalysisPoint {
@@ -78,6 +94,23 @@ interface FitPlaneResult {
 interface ExtractedPlane {
   support: readonly number[]
   fit: FitPlaneResult
+}
+
+interface CandidateGroup {
+  candidate: PlaneCandidate
+  support: readonly number[]
+}
+
+interface ConsolidationDiagnostics {
+  candidatePairsTested: number
+  highOverlapCandidatePairs: number
+  candidatesMerged: number
+  averageSupportOverlap: number
+}
+
+interface OwnershipResult {
+  groups: CandidateGroup[]
+  assignedPointCount: number
 }
 
 function getTimestamp(): number {
@@ -190,6 +223,76 @@ function choosePlaneBasis(normal: SpatialPoint): { tangentU: SpatialPoint; tange
   }
 
   return { tangentU, tangentV }
+}
+
+interface ProjectedRange {
+  minU: number
+  maxU: number
+  minV: number
+  maxV: number
+}
+
+function getProjectedRange(
+  points: readonly AnalysisPoint[],
+  support: readonly number[],
+  origin: SpatialPoint,
+  tangentU: SpatialPoint,
+  tangentV: SpatialPoint,
+): ProjectedRange {
+  const range: ProjectedRange = {
+    minU: Infinity,
+    maxU: -Infinity,
+    minV: Infinity,
+    maxV: -Infinity,
+  }
+  for (const index of support) {
+    const relative = subtract(points[index].position, origin)
+    const u = dot(relative, tangentU)
+    const v = dot(relative, tangentV)
+    range.minU = Math.min(range.minU, u)
+    range.maxU = Math.max(range.maxU, u)
+    range.minV = Math.min(range.minV, v)
+    range.maxV = Math.max(range.maxV, v)
+  }
+  return range
+}
+
+function getRangeGap(firstMinimum: number, firstMaximum: number, secondMinimum: number, secondMaximum: number): number {
+  return Math.max(0, Math.max(firstMinimum - secondMaximum, secondMinimum - firstMaximum))
+}
+
+function getRangeOverlap(firstMinimum: number, firstMaximum: number, secondMinimum: number, secondMaximum: number): number {
+  return Math.max(0, Math.min(firstMaximum, secondMaximum) - Math.max(firstMinimum, secondMinimum))
+}
+
+function getRangeSize(minimum: number, maximum: number): number {
+  return Math.max(0, maximum - minimum)
+}
+
+function getProjectedOverlapRatio(first: ProjectedRange, second: ProjectedRange): number {
+  const firstArea = getRangeSize(first.minU, first.maxU) * getRangeSize(first.minV, first.maxV)
+  const secondArea = getRangeSize(second.minU, second.maxU) * getRangeSize(second.minV, second.maxV)
+  const smallerArea = Math.min(firstArea, secondArea)
+  if (smallerArea <= 0) {
+    return 0
+  }
+
+  const overlapArea = getRangeOverlap(first.minU, first.maxU, second.minU, second.maxU) *
+    getRangeOverlap(first.minV, first.maxV, second.minV, second.maxV)
+  return overlapArea / smallerArea
+}
+
+function countSupportOverlap(first: readonly number[], second: readonly number[]): number {
+  const smaller = first.length <= second.length ? first : second
+  const larger = first.length <= second.length ? second : first
+  const largerSet = new Set(larger)
+  let overlap = 0
+  for (const index of smaller) {
+    if (largerSet.has(index)) {
+      overlap += 1
+    }
+  }
+  return overlap
 }
 
 function getSmallestEigenvector(matrixInput: readonly number[]): SpatialPoint | null {
@@ -376,6 +479,15 @@ function createPlaneCandidate(
   }
 
   const areaEstimate = Math.max(0, maxU - minU) * Math.max(0, maxV - minV)
+  const occupiedCells = new Set<string>()
+  for (const index of support) {
+    const point = points[index].position
+    const relative = subtract(point, fit.centroid)
+    const u = dot(relative, basis.tangentU)
+    const v = dot(relative, basis.tangentV)
+    occupiedCells.add(`${Math.floor(u / config.projectedAreaCellSizeMeters)}:${Math.floor(v / config.projectedAreaCellSizeMeters)}`)
+  }
+  const occupiedAreaEstimate = occupiedCells.size * config.projectedAreaCellSizeMeters ** 2
   const up = { x: 0, y: 1, z: 0 }
   const orientationAngleDegrees = (Math.acos(clamp(Math.abs(dot(fit.normal, up)), 0, 1)) * 180) / Math.PI
   const supportPointCount = support.reduce(
@@ -383,7 +495,7 @@ function createPlaneCandidate(
     0,
   )
   const supportScore = clamp(support.length / (config.minimumSupportPointCount * 4), 0, 1)
-  const areaScore = clamp(areaEstimate, 0, 1)
+  const areaScore = clamp(occupiedAreaEstimate, 0, 1)
   const errorScore = 1 - clamp(fit.rmsError / config.maximumRmsErrorMeters, 0, 1)
 
   return {
@@ -392,7 +504,8 @@ function createPlaneCandidate(
     centroid: fit.centroid,
     planeConstant: fit.planeConstant,
     supportPointCount,
-    areaEstimate,
+    areaEstimate: occupiedAreaEstimate,
+    projectedBoundsAreaEstimate: areaEstimate,
     rmsError: fit.rmsError,
     bounds: { min: minimum, max: maximum },
     localBounds: { minU, maxU, minV, maxV },
@@ -608,14 +721,242 @@ function refineRegion(
   return { support, fit }
 }
 
-function extractPlanes(
+function isMergeCompatible(
+  first: CandidateGroup,
+  second: CandidateGroup,
   points: readonly AnalysisPoint[],
   config: PlaneExtractionConfig,
-): { planes: PlaneCandidate[]; assignedPointCount: number } {
+): { compatible: boolean; projectedOverlapRatio: number } {
+  const normalAlignment = Math.abs(dot(first.candidate.normal, second.candidate.normal))
+  const mergeNormalDot = getNormalCompatibilityDot(config.consolidationAngleDegrees)
+  if (normalAlignment < mergeNormalDot) {
+    return { compatible: false, projectedOverlapRatio: 0 }
+  }
+
+  const planeOffset = Math.abs(
+    dot(first.candidate.normal, second.candidate.centroid) - first.candidate.planeConstant,
+  )
+  if (planeOffset > config.consolidationOffsetToleranceMeters) {
+    return { compatible: false, projectedOverlapRatio: 0 }
+  }
+
+  const firstRange = getProjectedRange(
+    points,
+    first.support,
+    first.candidate.centroid,
+    first.candidate.tangentU,
+    first.candidate.tangentV,
+  )
+  const secondRange = getProjectedRange(
+    points,
+    second.support,
+    first.candidate.centroid,
+    first.candidate.tangentU,
+    first.candidate.tangentV,
+  )
+  const projectedOverlapRatio = getProjectedOverlapRatio(firstRange, secondRange)
+  const gapU = getRangeGap(firstRange.minU, firstRange.maxU, secondRange.minU, secondRange.maxU)
+  const gapV = getRangeGap(firstRange.minV, firstRange.maxV, secondRange.minV, secondRange.maxV)
+  const isAdjacent = gapU <= config.consolidationAdjacencyMeters &&
+    gapV <= config.consolidationAdjacencyMeters
+
+  return {
+    compatible: projectedOverlapRatio >= config.minimumProjectedOverlapRatio || isAdjacent,
+    projectedOverlapRatio,
+  }
+}
+
+function mergeCandidateGroups(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+  id: string,
+): CandidateGroup | null {
+  const support = Array.from(new Set([...first.support, ...second.support]))
+  const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
+  const refined = refineRegion(points, support, config, normalCompatibilityDot)
+  if (!refined || refined.support.length < config.minimumSupportPointCount) {
+    return null
+  }
+
+  const candidate = createPlaneCandidate(id, points, refined.support, refined.fit, config)
+  if (
+    !candidate ||
+    candidate.areaEstimate < config.minimumAreaSquareMeters ||
+    candidate.rmsError > config.maximumRmsErrorMeters
+  ) {
+    return null
+  }
+  return { candidate, support: refined.support }
+}
+
+function consolidateCandidates(
+  provisional: readonly CandidateGroup[],
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): { groups: CandidateGroup[]; diagnostics: ConsolidationDiagnostics } {
+  const groups: CandidateGroup[] = provisional.map((group) => ({
+    candidate: group.candidate,
+    support: [...group.support],
+  }))
+  let candidatePairsTested = 0
+  let highOverlapCandidatePairs = 0
+  let candidatesMerged = 0
+  let supportOverlapSum = 0
+
+  for (let pass = 0; pass < config.maximumConsolidationPasses; pass += 1) {
+    let mergedThisPass = false
+    for (let firstIndex = 0; firstIndex < groups.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < groups.length; secondIndex += 1) {
+        const first = groups[firstIndex]
+        const second = groups[secondIndex]
+        candidatePairsTested += 1
+        const supportSize = Math.min(first.support.length, second.support.length)
+        if (supportSize > 0) {
+          supportOverlapSum += countSupportOverlap(first.support, second.support) / supportSize
+        }
+
+        const compatibility = isMergeCompatible(first, second, points, config)
+        if (compatibility.projectedOverlapRatio >= config.highOverlapRatio) {
+          highOverlapCandidatePairs += 1
+        }
+        if (!compatibility.compatible) {
+          continue
+        }
+
+        const merged = mergeCandidateGroups(
+          first,
+          second,
+          points,
+          config,
+          `provisional-merge-${candidatesMerged + 1}`,
+        )
+        if (!merged) {
+          continue
+        }
+
+        groups[firstIndex] = merged
+        groups.splice(secondIndex, 1)
+        candidatesMerged += 1
+        mergedThisPass = true
+        break
+      }
+      if (mergedThisPass) {
+        break
+      }
+    }
+    if (!mergedThisPass) {
+      break
+    }
+  }
+
+  return {
+    groups,
+    diagnostics: {
+      candidatePairsTested,
+      highOverlapCandidatePairs,
+      candidatesMerged,
+      averageSupportOverlap: candidatePairsTested > 0
+        ? supportOverlapSum / candidatePairsTested
+        : 0,
+    },
+  }
+}
+
+function getProjectedOutsideDistance(
+  candidate: PlaneCandidate,
+  point: SpatialPoint,
+): number {
+  const relative = subtract(point, candidate.centroid)
+  const u = dot(relative, candidate.tangentU)
+  const v = dot(relative, candidate.tangentV)
+  const outsideU = Math.max(candidate.localBounds.minU - u, 0, u - candidate.localBounds.maxU)
+  const outsideV = Math.max(candidate.localBounds.minV - v, 0, v - candidate.localBounds.maxV)
+  return Math.hypot(outsideU, outsideV)
+}
+
+function assignPointOwnership(
+  points: readonly AnalysisPoint[],
+  groups: readonly CandidateGroup[],
+  config: PlaneExtractionConfig,
+): OwnershipResult {
+  const ownedSupports = groups.map(() => [] as number[])
+  const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
+
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+    const point = points[pointIndex]
+    let bestGroupIndex = -1
+    let bestScore = Number.POSITIVE_INFINITY
+
+    groups.forEach((group, groupIndex) => {
+      const residual = Math.abs(dot(group.candidate.normal, point.position) - group.candidate.planeConstant)
+      if (residual > config.maximumPlaneErrorMeters) {
+        return
+      }
+      const normalAgreement = Math.abs(dot(group.candidate.normal, point.normal))
+      if (normalAgreement < normalCompatibilityDot) {
+        return
+      }
+      const outsideDistance = getProjectedOutsideDistance(group.candidate, point.position)
+      if (outsideDistance > config.ownershipBoundsPaddingMeters) {
+        return
+      }
+
+      const score = residual / config.maximumPlaneErrorMeters +
+        (1 - normalAgreement) * 0.75 +
+        outsideDistance / Math.max(1e-6, config.ownershipBoundsPaddingMeters)
+      if (score < bestScore) {
+        bestScore = score
+        bestGroupIndex = groupIndex
+      }
+    })
+
+    if (bestGroupIndex >= 0) {
+      ownedSupports[bestGroupIndex].push(pointIndex)
+    }
+  }
+
+  const finalGroups: CandidateGroup[] = []
+  let assignedPointCount = 0
+  ownedSupports.forEach((support) => {
+    if (support.length < config.minimumSupportPointCount) {
+      return
+    }
+    const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
+    const refined = refineRegion(points, support, config, normalCompatibilityDot)
+    if (!refined || refined.support.length < config.minimumSupportPointCount) {
+      return
+    }
+    const candidate = createPlaneCandidate(
+      `plane-${finalGroups.length + 1}`,
+      points,
+      refined.support,
+      refined.fit,
+      config,
+    )
+    if (
+      !candidate ||
+      candidate.areaEstimate < config.minimumAreaSquareMeters ||
+      candidate.rmsError > config.maximumRmsErrorMeters
+    ) {
+      return
+    }
+    finalGroups.push({ candidate, support: refined.support })
+    assignedPointCount += refined.support.length
+  })
+
+  return { groups: finalGroups, assignedPointCount }
+}
+
+function extractProvisionalPlanes(
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): CandidateGroup[] {
   const buckets = createSpatialIndex(points, config.connectivityBucketSizeMeters)
   const assigned = new Uint8Array(points.length)
   const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
-  const extracted: Array<{ candidate: PlaneCandidate; support: readonly number[] }> = []
+  const extracted: CandidateGroup[] = []
 
   for (let seedIndex = 0; seedIndex < points.length; seedIndex += 1) {
     if (assigned[seedIndex] === 1) {
@@ -659,16 +1000,7 @@ function extractPlanes(
     extracted.push({ candidate, support: refined.support })
   }
 
-  extracted.sort((left, right) => right.candidate.areaEstimate - left.candidate.areaEstimate)
-  const planes = extracted.map((entry, index) => ({
-    ...entry.candidate,
-    id: `plane-${index + 1}`,
-  }))
-  let assignedPointCount = 0
-  for (const entry of extracted) {
-    assignedPointCount += entry.support.length
-  }
-  return { planes, assignedPointCount }
+  return extracted
 }
 
 export class PlaneExtractionService {
@@ -681,25 +1013,53 @@ export class PlaneExtractionService {
   public analyze(scan: FinalizedSpatialScan): RoomAnalysisResult {
     const analysisStartedAt = getTimestamp()
     const prepared = createAnalysisPointMap(scan, this.config)
-    const preparationFinishedAt = getTimestamp()
-    const extracted = extractPlanes(prepared.points, this.config)
+    const extractionStartedAt = getTimestamp()
+    const provisionalGroups = extractProvisionalPlanes(prepared.points, this.config)
     const extractionFinishedAt = getTimestamp()
+    const consolidationStartedAt = getTimestamp()
+    const consolidated = consolidateCandidates(provisionalGroups, prepared.points, this.config)
+    const consolidationFinishedAt = getTimestamp()
+    const ownershipStartedAt = getTimestamp()
+    const owned = assignPointOwnership(prepared.points, consolidated.groups, this.config)
+    const ownershipFinishedAt = getTimestamp()
+    const planes = owned.groups
+      .map((group) => group.candidate)
+      .sort((left, right) => right.areaEstimate - left.areaEstimate)
+      .map((plane, index) => ({ ...plane, id: `plane-${index + 1}` }))
+    const largestPlane = planes[0]
+    const assignedPercentage = prepared.points.length > 0
+      ? (owned.assignedPointCount / prepared.points.length) * 100
+      : 0
 
     const result: RoomAnalysisResult = {
       sourceScanId: scan.id,
-      planes: Object.freeze(extracted.planes),
+      planes: Object.freeze(planes),
       stats: {
         inputPoints: prepared.inputPoints,
         filteredPoints: prepared.filteredPoints,
         downsampledPoints: prepared.points.length,
-        planeCount: extracted.planes.length,
-        rejectedPoints: Math.max(0, prepared.points.length - extracted.assignedPointCount),
+        provisionalPlaneCount: provisionalGroups.length,
+        planeCount: planes.length,
+        assignedPoints: owned.assignedPointCount,
+        unassignedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
+        assignedPercentage,
+        rejectedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
+        candidatePairsTested: consolidated.diagnostics.candidatePairsTested,
+        highOverlapCandidatePairs: consolidated.diagnostics.highOverlapCandidatePairs,
+        candidatesMerged: consolidated.diagnostics.candidatesMerged,
+        duplicateCandidatesSuppressed: Math.max(0, provisionalGroups.length - consolidated.groups.length),
+        averageSupportOverlap: consolidated.diagnostics.averageSupportOverlap,
+        largestPlaneSupportPointCount: largestPlane?.supportPointCount ?? 0,
+        largestPlaneOccupiedArea: largestPlane?.areaEstimate ?? 0,
+        largestPlaneRmsError: largestPlane?.rmsError ?? 0,
       },
       timings: {
         inputPreparationMs: prepared.inputPreparationMs,
         downsamplingMs: prepared.downsamplingMs,
-        planeExtractionMs: Math.max(0, extractionFinishedAt - preparationFinishedAt),
-        totalMs: Math.max(0, extractionFinishedAt - analysisStartedAt),
+        initialExtractionMs: Math.max(0, extractionFinishedAt - extractionStartedAt),
+        consolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
+        ownershipMs: Math.max(0, ownershipFinishedAt - ownershipStartedAt),
+        totalMs: Math.max(0, ownershipFinishedAt - analysisStartedAt),
       },
     }
 

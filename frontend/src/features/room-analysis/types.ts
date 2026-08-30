@@ -15,7 +15,9 @@ export interface PlaneCandidate {
   readonly centroid: SpatialPoint
   readonly planeConstant: number
   readonly supportPointCount: number
+  /** Occupied projected support area, not the area of the displayed bounds rectangle. */
   readonly areaEstimate: number
+  readonly projectedBoundsAreaEstimate: number
   readonly rmsError: number
   readonly bounds: {
     readonly min: SpatialPoint
@@ -32,7 +34,9 @@ export interface PlaneCandidate {
 export interface RoomAnalysisTimings {
   readonly inputPreparationMs: number
   readonly downsamplingMs: number
-  readonly planeExtractionMs: number
+  readonly initialExtractionMs: number
+  readonly consolidationMs: number
+  readonly ownershipMs: number
   readonly totalMs: number
 }
 
@@ -43,8 +47,20 @@ export interface RoomAnalysisResult {
     readonly inputPoints: number
     readonly filteredPoints: number
     readonly downsampledPoints: number
+    readonly provisionalPlaneCount: number
     readonly planeCount: number
+    readonly assignedPoints: number
+    readonly unassignedPoints: number
+    readonly assignedPercentage: number
     readonly rejectedPoints: number
+    readonly candidatePairsTested: number
+    readonly highOverlapCandidatePairs: number
+    readonly candidatesMerged: number
+    readonly duplicateCandidatesSuppressed: number
+    readonly averageSupportOverlap: number
+    readonly largestPlaneSupportPointCount: number
+    readonly largestPlaneOccupiedArea: number
+    readonly largestPlaneRmsError: number
   }
   readonly timings: RoomAnalysisTimings
 }

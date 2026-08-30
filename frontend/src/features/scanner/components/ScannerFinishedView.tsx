@@ -136,8 +136,20 @@ function ScannerFinishedView({
               <strong>{analysisResult.stats.filteredPoints} / {analysisResult.stats.downsampledPoints}</strong>
             </div>
             <div>
+              <span>Provisional planes</span>
+              <strong>{analysisResult.stats.provisionalPlaneCount}</strong>
+            </div>
+            <div>
+              <span>Consolidated planes</span>
+              <strong>{analysisResult.stats.planeCount}</strong>
+            </div>
+            <div>
+              <span>Assigned points</span>
+              <strong>{analysisResult.stats.assignedPoints} ({analysisResult.stats.assignedPercentage.toFixed(1)}%)</strong>
+            </div>
+            <div>
               <span>Unassigned points</span>
-              <strong>{analysisResult.stats.rejectedPoints}</strong>
+              <strong>{analysisResult.stats.unassignedPoints}</strong>
             </div>
             <div>
               <span>Analysis time</span>
@@ -146,7 +158,17 @@ function ScannerFinishedView({
           </div>
           <div className="scanner-analysis-timings">
             <span>
-              Preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms · downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms · extraction {analysisResult.timings.planeExtractionMs.toFixed(1)} ms
+              Preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms · downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms · initial extraction {analysisResult.timings.initialExtractionMs.toFixed(1)} ms · consolidation {analysisResult.timings.consolidationMs.toFixed(1)} ms · ownership {analysisResult.timings.ownershipMs.toFixed(1)} ms
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Candidate pairs {analysisResult.stats.candidatePairsTested} · high-overlap pairs {analysisResult.stats.highOverlapCandidatePairs} · merged {analysisResult.stats.candidatesMerged} · duplicate suppressions {analysisResult.stats.duplicateCandidatesSuppressed} · average support overlap {(analysisResult.stats.averageSupportOverlap * 100).toFixed(1)}%
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Largest plane {analysisResult.stats.largestPlaneSupportPointCount} pts · occupied {analysisResult.stats.largestPlaneOccupiedArea.toFixed(2)} m² · RMS {analysisResult.stats.largestPlaneRmsError.toFixed(3)} m
             </span>
           </div>
           {analysisResult.planes.length > 0 ? (
