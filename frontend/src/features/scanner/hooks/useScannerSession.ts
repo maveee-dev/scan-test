@@ -56,6 +56,7 @@ export interface ScannerSessionController {
   startScan: () => void
   cancelScan: () => void
   finishScan: () => void
+  setDebugGeometryVisible: (visible: boolean) => void
   startNewScan: () => void
   discardScan: () => void
 }
@@ -301,6 +302,10 @@ export function useScannerSession(
       })
   }, [service])
 
+  const setDebugGeometryVisible = useCallback((visible: boolean) => {
+    service.setDebugGeometryVisible(visible)
+  }, [service])
+
   const startNewScan = useCallback(() => {
     if (statusRef.current !== 'finished') {
       return
@@ -324,6 +329,7 @@ export function useScannerSession(
     startScan,
     cancelScan,
     finishScan,
+    setDebugGeometryVisible,
     startNewScan,
     discardScan,
   }

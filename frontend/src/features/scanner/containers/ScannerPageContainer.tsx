@@ -17,6 +17,7 @@ function ScannerPageContainer() {
       overlayRootRef={overlayRootRef}
       pointPreviewCanvasRef={pointPreviewCanvasRef}
       onStartScan={sessionController.startScan}
+      onDebugGeometryToggle={sessionController.setDebugGeometryVisible}
       onCancelScan={sessionController.cancelScan}
       onFinishScan={sessionController.finishScan}
       onStartNewScan={sessionController.startNewScan}

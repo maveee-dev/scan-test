@@ -23,6 +23,7 @@ varying vec4 vColor;
 
 void main() {
   gl_Position = uProjectionMatrix * uViewMatrix * vec4(aPosition, 1.0);
+  gl_PointSize = 3.0;
   vColor = aColor;
 }
 `
@@ -117,6 +118,8 @@ export class SpatialCoverageRenderService {
 
   private denseAppliedRevision = -1
 
+  private debugGeometryVisible = false
+
   private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
 
   public initialize(target: XRPresentationRenderTarget | null): void {
@@ -181,6 +184,10 @@ export class SpatialCoverageRenderService {
     }
   }
 
+  public setDebugGeometryVisible(visible: boolean): void {
+    this.debugGeometryVisible = visible
+  }
+
   public render(views: readonly XRView[]): void {
     if (
       this.diagnostics.status !== 'ready' ||
@@ -235,6 +242,9 @@ export class SpatialCoverageRenderService {
         gl.uniformMatrix4fv(this.projectionUniform, false, view.projectionMatrix)
         gl.uniformMatrix4fv(this.viewUniform, false, view.transform.inverse.matrix)
         gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
+        if (this.debugGeometryVisible) {
+          gl.drawArrays(gl.POINTS, 0, this.denseVertexCount)
+        }
       }
     } catch {
       this.diagnostics.status = 'failed'
@@ -254,6 +264,7 @@ export class SpatialCoverageRenderService {
     this.gl = null
     this.denseVertexCount = 0
     this.denseAppliedRevision = -1
+    this.debugGeometryVisible = false
     this.diagnostics = this.createInitialDiagnostics()
   }
 

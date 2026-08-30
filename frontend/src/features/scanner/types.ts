@@ -174,6 +174,26 @@ export interface DenseSpatialPointFrame {
   rejectedPointCount: number
 }
 
+export type CoverageLookupKind = 'exact' | 'neighbor' | 'miss'
+
+export interface CoverageLookupResult {
+  state: CoverageCellState | null
+  kind: CoverageLookupKind
+}
+
+export type DenseSpatialSampleLabel =
+  | 'top-center'
+  | 'center'
+  | 'bottom-center'
+  | 'left-center'
+  | 'right-center'
+
+export interface DenseSpatialDiagnosticSample {
+  label: DenseSpatialSampleLabel
+  depthMeters: number | null
+  point: SpatialPoint | null
+}
+
 export interface SpatialBounds {
   min: SpatialPoint
   max: SpatialPoint
@@ -234,6 +254,14 @@ export interface SpatialCoverageDenseDebug {
   observedMaskSampleCount: number
   partialMaskSampleCount: number
   capturedMaskSampleCount: number
+  exactCoverageLookupHitCount: number
+  neighborCoverageLookupHitCount: number
+  coverageLookupMissCount: number
+  coverageLookupHitPercentage: number | null
+  depthMinMeters: number | null
+  depthMaxMeters: number | null
+  worldBounds: SpatialBounds | null
+  representativeSamples: DenseSpatialDiagnosticSample[]
   updateCount: number
 }
 
@@ -244,6 +272,7 @@ export interface SpatialCoverageDebug {
   mappingUpdateRateHz: number
   mappingPhase: number
   mappingUpdateCount: number
+  mappingProcessingDurationMs: number
   totalUniqueCells: number
   observedCells: number
   partialCells: number
@@ -252,6 +281,9 @@ export interface SpatialCoverageDebug {
   currentCapturedSamples: number
   currentViewCoverage: number | null
   acceptedObservationCount: number
+  newCellsCreatedCount: number
+  observedToPartialTransitionCount: number
+  partialToCapturedTransitionCount: number
   rejectedDuplicateObservationCount: number
   capacityRejectedSampleCount: number
   maxCells: number

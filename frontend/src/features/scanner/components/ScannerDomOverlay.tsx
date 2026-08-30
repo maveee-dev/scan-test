@@ -16,6 +16,7 @@ import type {
 
 interface ScannerDomOverlayProps {
   onCancelScan: () => void
+  onDebugGeometryToggle: (visible: boolean) => void
   onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
@@ -140,6 +141,28 @@ function formatCoveragePercentage(coverage: number | null): string {
   return coverage === null || !Number.isFinite(coverage) ? 'N/A' : `${Math.round(coverage)}%`
 }
 
+function formatMeterRange(value: number | null): string {
+  return value !== null && Number.isFinite(value) ? `${value.toFixed(2)} m` : 'N/A'
+}
+
+function formatDenseSamplePoint(
+  depthMeters: number | null,
+  point: SpatialPoint | null,
+): string {
+  if (
+    depthMeters === null ||
+    !Number.isFinite(depthMeters) ||
+    !point ||
+    !Number.isFinite(point.x) ||
+    !Number.isFinite(point.y) ||
+    !Number.isFinite(point.z)
+  ) {
+    return 'N/A'
+  }
+
+  return `${depthMeters.toFixed(2)} m / X ${point.x.toFixed(2)} / Y ${point.y.toFixed(2)} / Z ${point.z.toFixed(2)}`
+}
+
 function formatCoverageGuidance(guidance: CoverageGuidance): string {
   switch (guidance) {
     case 'continue-scanning-from-another-angle':
@@ -164,11 +187,13 @@ function formatCoverageRenderStatus(status: CoverageRenderStatus): string {
 
 function ScannerDomOverlay({
   onCancelScan,
+  onDebugGeometryToggle,
   onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
+  const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
   const isStarting = sessionState.status === 'starting'
   const isFinishing = sessionState.status === 'finishing'
   const isCancelling = sessionState.status === 'cancelling'
@@ -179,12 +204,31 @@ function ScannerDomOverlay({
 
   function handleCancelScan(): void {
     setIsDebugOpen(false)
+    setIsDenseGeometryVisible(false)
+    onDebugGeometryToggle(false)
     onCancelScan()
   }
 
   function handleFinishScan(): void {
     setIsDebugOpen(false)
+    setIsDenseGeometryVisible(false)
+    onDebugGeometryToggle(false)
     onFinishScan()
+  }
+
+  function handleDebugToggle(): void {
+    const nextOpen = !isDebugOpen
+    setIsDebugOpen(nextOpen)
+    if (!nextOpen) {
+      setIsDenseGeometryVisible(false)
+      onDebugGeometryToggle(false)
+    }
+  }
+
+  function handleDebugClose(): void {
+    setIsDebugOpen(false)
+    setIsDenseGeometryVisible(false)
+    onDebugGeometryToggle(false)
   }
 
   return (
@@ -208,7 +252,7 @@ function ScannerDomOverlay({
             className="xr-scanner-hud-debug"
             aria-expanded={isDebugOpen}
             aria-controls="scanner-debug-panel"
-            onClick={() => setIsDebugOpen((open) => !open)}
+            onClick={handleDebugToggle}
           >
             {isDebugOpen ? 'Close Debug' : 'Debug'}
           </button>
@@ -277,8 +321,20 @@ function ScannerDomOverlay({
           </div>
           <button
             type="button"
+            className="xr-scanner-debug-geometry"
+            aria-pressed={isDenseGeometryVisible}
+            onClick={() => {
+              const nextVisible = !isDenseGeometryVisible
+              setIsDenseGeometryVisible(nextVisible)
+              onDebugGeometryToggle(nextVisible)
+            }}
+          >
+            {isDenseGeometryVisible ? 'Hide World Points' : 'Show World Points'}
+          </button>
+          <button
+            type="button"
             className="xr-scanner-debug-close"
-            onClick={() => setIsDebugOpen(false)}
+            onClick={handleDebugClose}
           >
             Close Debug
           </button>
@@ -565,6 +621,18 @@ function ScannerDomOverlay({
                 <strong>{coverage.acceptedObservationCount}</strong>
               </div>
               <div>
+                <span>New cells created</span>
+                <strong>{coverage.newCellsCreatedCount}</strong>
+              </div>
+              <div>
+                <span>Observed to partial</span>
+                <strong>{coverage.observedToPartialTransitionCount}</strong>
+              </div>
+              <div>
+                <span>Partial to captured</span>
+                <strong>{coverage.partialToCapturedTransitionCount}</strong>
+              </div>
+              <div>
                 <span>Rejected duplicate / same-view</span>
                 <strong>{coverage.rejectedDuplicateObservationCount}</strong>
               </div>
@@ -617,6 +685,42 @@ function ScannerDomOverlay({
                 <strong>{coverage.dense.validSampleCount} / {coverage.dense.attemptedSampleCount}</strong>
               </div>
               <div>
+                <span>Exact lookup hits</span>
+                <strong>{coverage.dense.exactCoverageLookupHitCount}</strong>
+              </div>
+              <div>
+                <span>Neighbor lookup hits</span>
+                <strong>{coverage.dense.neighborCoverageLookupHitCount}</strong>
+              </div>
+              <div>
+                <span>Lookup misses</span>
+                <strong>{coverage.dense.coverageLookupMissCount}</strong>
+              </div>
+              <div>
+                <span>Lookup hit rate</span>
+                <strong>{formatCoveragePercentage(coverage.dense.coverageLookupHitPercentage)}</strong>
+              </div>
+              <div>
+                <span>Depth min / max</span>
+                <strong>{formatMeterRange(coverage.dense.depthMinMeters)} / {formatMeterRange(coverage.dense.depthMaxMeters)}</strong>
+              </div>
+              <div>
+                <span>Mapping time</span>
+                <strong>{coverage.mappingProcessingDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>World X min / max</span>
+                <strong>{formatSpatialRange(coverage.dense.worldBounds, 'x')}</strong>
+              </div>
+              <div>
+                <span>World Y min / max</span>
+                <strong>{formatSpatialRange(coverage.dense.worldBounds, 'y')}</strong>
+              </div>
+              <div>
+                <span>World Z min / max</span>
+                <strong>{formatSpatialRange(coverage.dense.worldBounds, 'z')}</strong>
+              </div>
+              <div>
                 <span>Dense triangles</span>
                 <strong>{coverage.dense.generatedTriangleCount}</strong>
               </div>
@@ -656,6 +760,14 @@ function ScannerDomOverlay({
                 <span>Dense render updates</span>
                 <strong>{coverage.render.denseRenderUpdateCount}</strong>
               </div>
+            </div>
+            <div className="xr-dom-overlay-dense-samples" aria-label="Dense world-point samples">
+              {coverage.dense.representativeSamples.map((sample) => (
+                <div key={sample.label}>
+                  <span>{sample.label}</span>
+                  <strong>{formatDenseSamplePoint(sample.depthMeters, sample.point)}</strong>
+                </div>
+              ))}
             </div>
             {coverage.statisticsInvariantError ? (
               <p className="xr-dom-overlay-coverage-error">

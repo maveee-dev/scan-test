@@ -18,6 +18,7 @@ interface ScannerPageProps {
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
   onStartScan: () => void
+  onDebugGeometryToggle: (visible: boolean) => void
   onCancelScan: () => void
   onFinishScan: () => void
   onStartNewScan: () => void
@@ -111,6 +112,7 @@ function ScannerPage({
   capabilities,
   canStartScan,
   onCancelScan,
+  onDebugGeometryToggle,
   onDiscardScan,
   onFinishScan,
   onStartScan,
@@ -179,6 +181,7 @@ function ScannerPage({
       >
         <ScannerDomOverlay
           onCancelScan={onCancelScan}
+          onDebugGeometryToggle={onDebugGeometryToggle}
           onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}
           sessionState={sessionState}

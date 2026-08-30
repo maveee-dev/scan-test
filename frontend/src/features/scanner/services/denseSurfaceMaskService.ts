@@ -1,7 +1,9 @@
 import type {
   CoverageCellState,
   DenseCoverageMesh,
+  DenseSpatialDiagnosticSample,
   DenseSpatialPointFrame,
+  SpatialBounds,
   SpatialCoverageDenseDebug,
   SpatialPoint,
 } from '../types'
@@ -14,8 +16,12 @@ import {
 import { SpatialCoverageService } from './spatialCoverageService'
 
 const FLOATS_PER_VERTEX = 7
-const MAX_DEPTH_DISCONTINUITY_METERS = 0.4
-const MAX_NEIGHBOR_SPAN_METERS = 0.45
+// At 80x45, adjacent samples should be close; these limits preserve a seam
+// at wall/object and wall/ceiling changes instead of spanning the gap.
+const MAX_DEPTH_DISCONTINUITY_METERS = 0.22
+const MAX_NEIGHBOR_SPAN_METERS = 0.22
+const MIN_NEIGHBOR_SPAN_METERS = 0.08
+const NEIGHBOR_SPAN_DEPTH_SCALE = 0.09
 
 function createInitialDiagnostics(): SpatialCoverageDenseDebug {
   return {
@@ -30,6 +36,14 @@ function createInitialDiagnostics(): SpatialCoverageDenseDebug {
     observedMaskSampleCount: 0,
     partialMaskSampleCount: 0,
     capturedMaskSampleCount: 0,
+    exactCoverageLookupHitCount: 0,
+    neighborCoverageLookupHitCount: 0,
+    coverageLookupMissCount: 0,
+    coverageLookupHitPercentage: null,
+    depthMinMeters: null,
+    depthMaxMeters: null,
+    worldBounds: null,
+    representativeSamples: [],
     updateCount: 0,
   }
 }
@@ -40,6 +54,60 @@ function getPoint(frame: DenseSpatialPointFrame, index: number): SpatialPoint {
     y: frame.points[index * 3 + 1],
     z: frame.points[index * 3 + 2],
   }
+}
+
+function updateBounds(bounds: SpatialBounds | null, point: SpatialPoint): SpatialBounds {
+  if (!bounds) {
+    return { min: { ...point }, max: { ...point } }
+  }
+
+  return {
+    min: {
+      x: Math.min(bounds.min.x, point.x),
+      y: Math.min(bounds.min.y, point.y),
+      z: Math.min(bounds.min.z, point.z),
+    },
+    max: {
+      x: Math.max(bounds.max.x, point.x),
+      y: Math.max(bounds.max.y, point.y),
+      z: Math.max(bounds.max.z, point.z),
+    },
+  }
+}
+
+function getSampleIndex(
+  frame: DenseSpatialPointFrame,
+  normalizedX: number,
+  normalizedY: number,
+): number {
+  const column = Math.round(normalizedX * (frame.columns - 1))
+  const row = Math.round(normalizedY * (frame.rows - 1))
+  return row * frame.columns + column
+}
+
+function getRepresentativeSamples(
+  frame: DenseSpatialPointFrame,
+): DenseSpatialDiagnosticSample[] {
+  const coordinates = [
+    { label: 'top-center' as const, x: 0.5, y: 0 },
+    { label: 'center' as const, x: 0.5, y: 0.5 },
+    { label: 'bottom-center' as const, x: 0.5, y: 1 },
+    { label: 'left-center' as const, x: 0, y: 0.5 },
+    { label: 'right-center' as const, x: 1, y: 0.5 },
+  ]
+
+  return coordinates.map(({ label, x, y }) => {
+    const index = getSampleIndex(frame, x, y)
+    if (frame.valid[index] !== 1) {
+      return { label, depthMeters: null, point: null }
+    }
+
+    return {
+      label,
+      depthMeters: frame.distancesMeters[index],
+      point: getPoint(frame, index),
+    }
+  })
 }
 
 function isContinuous(
@@ -57,6 +125,13 @@ function isContinuous(
   const secondX = frame.points[secondOffset]
   const secondY = frame.points[secondOffset + 1]
   const secondZ = frame.points[secondOffset + 2]
+  const maxNeighborSpan = Math.min(
+    MAX_NEIGHBOR_SPAN_METERS,
+    Math.max(
+      MIN_NEIGHBOR_SPAN_METERS,
+      Math.max(firstDepth, secondDepth) * NEIGHBOR_SPAN_DEPTH_SCALE,
+    ),
+  )
 
   return (
     Number.isFinite(firstX) &&
@@ -68,8 +143,7 @@ function isContinuous(
     Number.isFinite(firstDepth) &&
     Number.isFinite(secondDepth) &&
     Math.abs(firstDepth - secondDepth) <= MAX_DEPTH_DISCONTINUITY_METERS &&
-    Math.hypot(firstX - secondX, firstY - secondY, firstZ - secondZ) <=
-      MAX_NEIGHBOR_SPAN_METERS
+    Math.hypot(firstX - secondX, firstY - secondY, firstZ - secondZ) <= maxNeighborSpan
   )
 }
 
@@ -199,6 +273,11 @@ export class DenseSurfaceMaskService {
     diagnostics.rows = frame.rows
     diagnostics.attemptedSampleCount = frame.attemptedSampleCount
     diagnostics.validSampleCount = frame.validPointCount
+    diagnostics.representativeSamples = getRepresentativeSamples(frame)
+
+    let worldBounds: SpatialBounds | null = null
+    let depthMinMeters = Number.POSITIVE_INFINITY
+    let depthMaxMeters = Number.NEGATIVE_INFINITY
 
     for (let index = 0; index < sampleStates.length; index += 1) {
       if (frame.valid[index] !== 1) {
@@ -206,8 +285,20 @@ export class DenseSurfaceMaskService {
         continue
       }
 
-      const state = coverageService.getCoverageStateAtPoint(getPoint(frame, index))
+      const point = getPoint(frame, index)
+      const lookup = coverageService.getCoverageLookupAtPoint(point)
+      const state = lookup.state
       sampleStates[index] = state
+      worldBounds = updateBounds(worldBounds, point)
+      depthMinMeters = Math.min(depthMinMeters, frame.distancesMeters[index])
+      depthMaxMeters = Math.max(depthMaxMeters, frame.distancesMeters[index])
+      if (lookup.kind === 'exact') {
+        diagnostics.exactCoverageLookupHitCount += 1
+      } else if (lookup.kind === 'neighbor') {
+        diagnostics.neighborCoverageLookupHitCount += 1
+      } else {
+        diagnostics.coverageLookupMissCount += 1
+      }
       if (state === null) {
         diagnostics.unknownMaskSampleCount += 1
       } else if (state === 'observed') {
@@ -218,6 +309,17 @@ export class DenseSurfaceMaskService {
         diagnostics.capturedMaskSampleCount += 1
       }
     }
+
+    diagnostics.worldBounds = worldBounds
+    diagnostics.depthMinMeters = Number.isFinite(depthMinMeters) ? depthMinMeters : null
+    diagnostics.depthMaxMeters = Number.isFinite(depthMaxMeters) ? depthMaxMeters : null
+    diagnostics.coverageLookupHitPercentage = diagnostics.validSampleCount > 0
+      ? (
+          (diagnostics.exactCoverageLookupHitCount +
+            diagnostics.neighborCoverageLookupHitCount) /
+          diagnostics.validSampleCount
+        ) * 100
+      : null
 
     const maximumTriangles = Math.max(0, (frame.columns - 1) * (frame.rows - 1) * 2)
     const requiredFloats = maximumTriangles * 3 * FLOATS_PER_VERTEX

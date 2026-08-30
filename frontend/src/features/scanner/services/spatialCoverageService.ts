@@ -1,6 +1,7 @@
 import type {
   CoverageCell,
   CoverageCellState,
+  CoverageLookupResult,
   CoverageGuidance,
   SpatialCoverageDebug,
   SpatialCoverageRenderDebug,
@@ -20,20 +21,18 @@ import {
 /** A 5 cm cell gives the persistent mask enough spatial detail for fine reveal. */
 export const COVERAGE_CELL_SIZE_METERS = 0.05
 
-/** Persistent mapping is intentionally lower resolution than the live mask. */
-export const COVERAGE_MAPPING_COLUMNS = 32
-export const COVERAGE_MAPPING_ROWS = 18
+/** Mapping consumes the same dense world-point frame that drives the mask. */
+export const COVERAGE_MAPPING_COLUMNS = DENSE_MASK_COLUMNS
+export const COVERAGE_MAPPING_ROWS = DENSE_MASK_ROWS
 
 /** About 7 mapping updates per second; the XR renderer still runs every frame. */
 const COVERAGE_PROCESS_INTERVAL_MS = 140
 const MAPPING_PHASE_COUNT = 4
-const MAPPING_PHASE_OFFSETS = [
-  { x: 0, y: 0 },
-  { x: 0.22, y: 0 },
-  { x: 0, y: 0.22 },
-  { x: 0.22, y: 0.22 },
-] as const
 const DISTINCT_OBSERVATION_DISTANCE_METERS = 0.05
+const COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS = 1
+// Neighbor lookup only bridges small measurement jitter around a 5 cm cell;
+// it is deliberately too small to behave like a general spatial search.
+const COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS = 0.065
 // New cells are rejected once this deterministic hard cap is reached.
 export const MAX_COVERAGE_CELLS = 50_000
 const OBSERVED_THRESHOLD = 1
@@ -76,6 +75,14 @@ function createInitialDenseDebug(): SpatialCoverageDenseDebug {
     observedMaskSampleCount: 0,
     partialMaskSampleCount: 0,
     capturedMaskSampleCount: 0,
+    exactCoverageLookupHitCount: 0,
+    neighborCoverageLookupHitCount: 0,
+    coverageLookupMissCount: 0,
+    coverageLookupHitPercentage: null,
+    depthMinMeters: null,
+    depthMaxMeters: null,
+    worldBounds: null,
+    representativeSamples: [],
     updateCount: 0,
   }
 }
@@ -88,6 +95,7 @@ function createInitialCoverageDebug(): SpatialCoverageDebug {
     mappingUpdateRateHz: 1000 / COVERAGE_PROCESS_INTERVAL_MS,
     mappingPhase: 0,
     mappingUpdateCount: 0,
+    mappingProcessingDurationMs: 0,
     totalUniqueCells: 0,
     observedCells: 0,
     partialCells: 0,
@@ -96,6 +104,9 @@ function createInitialCoverageDebug(): SpatialCoverageDebug {
     currentCapturedSamples: 0,
     currentViewCoverage: null,
     acceptedObservationCount: 0,
+    newCellsCreatedCount: 0,
+    observedToPartialTransitionCount: 0,
+    partialToCapturedTransitionCount: 0,
     rejectedDuplicateObservationCount: 0,
     capacityRejectedSampleCount: 0,
     maxCells: MAX_COVERAGE_CELLS,
@@ -138,37 +149,50 @@ function isFinitePointObservation(observation: SpatialPointObservation): boolean
   )
 }
 
-function getGridIndex(normalizedX: number, normalizedY: number): number {
+function getGridIndex(
+  normalizedX: number,
+  normalizedY: number,
+  columns = COVERAGE_MAPPING_COLUMNS,
+  rows = COVERAGE_MAPPING_ROWS,
+): number {
   const column = Math.min(
-    COVERAGE_MAPPING_COLUMNS - 1,
-    Math.max(0, Math.round(normalizedX * (COVERAGE_MAPPING_COLUMNS - 1))),
+    columns - 1,
+    Math.max(0, Math.round(normalizedX * (columns - 1))),
   )
   const row = Math.min(
-    COVERAGE_MAPPING_ROWS - 1,
-    Math.max(0, Math.round(normalizedY * (COVERAGE_MAPPING_ROWS - 1))),
+    rows - 1,
+    Math.max(0, Math.round(normalizedY * (rows - 1))),
   )
 
-  return row * COVERAGE_MAPPING_COLUMNS + column
+  return row * columns + column
 }
 
-function getGridCoordinates(gridIndex: number): { row: number; column: number } {
+function getGridCoordinates(
+  gridIndex: number,
+  columns = COVERAGE_MAPPING_COLUMNS,
+): { row: number; column: number } {
   return {
-    row: Math.floor(gridIndex / COVERAGE_MAPPING_COLUMNS),
-    column: gridIndex % COVERAGE_MAPPING_COLUMNS,
+    row: Math.floor(gridIndex / columns),
+    column: gridIndex % columns,
   }
 }
 
-function getNeighborIndex(row: number, column: number): number | null {
+function getNeighborIndex(
+  row: number,
+  column: number,
+  columns = COVERAGE_MAPPING_COLUMNS,
+  rows = COVERAGE_MAPPING_ROWS,
+): number | null {
   if (
     row < 0 ||
-    row >= COVERAGE_MAPPING_ROWS ||
+    row >= rows ||
     column < 0 ||
-    column >= COVERAGE_MAPPING_COLUMNS
+    column >= columns
   ) {
     return null
   }
 
-  return row * COVERAGE_MAPPING_COLUMNS + column
+  return row * columns + column
 }
 
 function subtractPoints(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
@@ -229,12 +253,17 @@ function getSurfaceNormal(
   center: SpatialPointObservation,
   observationsByGridIndex: ReadonlyMap<number, SpatialPointObservation>,
   cameraPosition: ViewerPosition,
+  columns = COVERAGE_MAPPING_COLUMNS,
+  rows = COVERAGE_MAPPING_ROWS,
 ): SurfaceNormalResult {
-  const { row, column } = getGridCoordinates(getGridIndex(center.normalizedX, center.normalizedY))
-  const leftIndex = getNeighborIndex(row, column - 1)
-  const rightIndex = getNeighborIndex(row, column + 1)
-  const upIndex = getNeighborIndex(row - 1, column)
-  const downIndex = getNeighborIndex(row + 1, column)
+  const { row, column } = getGridCoordinates(
+    getGridIndex(center.normalizedX, center.normalizedY, columns, rows),
+    columns,
+  )
+  const leftIndex = getNeighborIndex(row, column - 1, columns, rows)
+  const rightIndex = getNeighborIndex(row, column + 1, columns, rows)
+  const upIndex = getNeighborIndex(row - 1, column, columns, rows)
+  const downIndex = getNeighborIndex(row + 1, column, columns, rows)
 
   if (leftIndex === null || rightIndex === null || upIndex === null || downIndex === null) {
     return { normal: null, rejectionReason: 'invalid' }
@@ -325,8 +354,8 @@ function hasCameraMoved(
   )
 }
 
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value))
+function getPerformanceTimestamp(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now()
 }
 
 function getGuidance(currentViewCoverage: number | null): CoverageGuidance {
@@ -380,8 +409,8 @@ export class SpatialCoverageService {
   private lastProcessedAt = Number.NEGATIVE_INFINITY
 
   /**
-   * Uses the dense frame as the source of truth, then selects a bounded,
-   * phase-shifted 32x18 subset for persistent world-space accumulation.
+   * Uses all valid dense world points as the source of truth. The mapper is
+   * throttled and deduplicates repeated 5 cm cells inside processFrame.
    */
   public processDenseFrame(
     denseFrame: DenseSpatialPointFrame,
@@ -390,60 +419,56 @@ export class SpatialCoverageService {
     phase: number,
   ): void {
     const normalizedPhase = ((phase % MAPPING_PHASE_COUNT) + MAPPING_PHASE_COUNT) % MAPPING_PHASE_COUNT
-    const offset = MAPPING_PHASE_OFFSETS[normalizedPhase]
     const mappingObservations: SpatialPointObservation[] = []
 
-    for (let row = 0; row < COVERAGE_MAPPING_ROWS; row += 1) {
-      for (let column = 0; column < COVERAGE_MAPPING_COLUMNS; column += 1) {
-        const normalizedX = clamp(
-          (column + offset.x) / (COVERAGE_MAPPING_COLUMNS - 1),
-          0,
-          1,
-        )
-        const normalizedY = clamp(
-          (row + offset.y) / (COVERAGE_MAPPING_ROWS - 1),
-          0,
-          1,
-        )
-        const sourceColumn = clamp(
-          Math.round(normalizedX * (denseFrame.columns - 1)),
-          0,
-          denseFrame.columns - 1,
-        )
-        const sourceRow = clamp(
-          Math.round(normalizedY * (denseFrame.rows - 1)),
-          0,
-          denseFrame.rows - 1,
-        )
-        const sourceIndex = sourceRow * denseFrame.columns + sourceColumn
+    // Rotate traversal order between phases so a cell receiving several
+    // samples does not always choose the same dense-grid representative.
+    const rowStart = normalizedPhase % denseFrame.rows
+    const columnStart = Math.floor(normalizedPhase / 2) % denseFrame.columns
+    for (let rowOffset = 0; rowOffset < denseFrame.rows; rowOffset += 1) {
+      const row = (rowOffset + rowStart) % denseFrame.rows
+      for (let columnOffset = 0; columnOffset < denseFrame.columns; columnOffset += 1) {
+        const column = (columnOffset + columnStart) % denseFrame.columns
+        const sourceIndex = row * denseFrame.columns + column
 
-        if (denseFrame.valid[sourceIndex] !== 1) {
-          continue
+        if (denseFrame.valid[sourceIndex] === 1) {
+          mappingObservations.push({
+            normalizedX: denseFrame.normalizedX[sourceIndex],
+            normalizedY: denseFrame.normalizedY[sourceIndex],
+            depthMeters: denseFrame.distancesMeters[sourceIndex],
+            point: {
+              x: denseFrame.points[sourceIndex * 3],
+              y: denseFrame.points[sourceIndex * 3 + 1],
+              z: denseFrame.points[sourceIndex * 3 + 2],
+            },
+          })
         }
-
-        mappingObservations.push({
-          normalizedX: denseFrame.normalizedX[sourceIndex],
-          normalizedY: denseFrame.normalizedY[sourceIndex],
-          depthMeters: denseFrame.distancesMeters[sourceIndex],
-          point: {
-            x: denseFrame.points[sourceIndex * 3],
-            y: denseFrame.points[sourceIndex * 3 + 1],
-            z: denseFrame.points[sourceIndex * 3 + 2],
-          },
-        })
       }
     }
 
     this.diagnostics.mappingPhase = normalizedPhase
-    if (this.processFrame(mappingObservations, cameraPosition, timestamp)) {
+    const mappingStartedAt = getPerformanceTimestamp()
+    if (this.processFrame(
+      mappingObservations,
+      cameraPosition,
+      timestamp,
+      denseFrame.columns,
+      denseFrame.rows,
+    )) {
       this.diagnostics.mappingUpdateCount += 1
     }
+    this.diagnostics.mappingProcessingDurationMs = Math.max(
+      0,
+      getPerformanceTimestamp() - mappingStartedAt,
+    )
   }
 
   public processFrame(
     observations: readonly SpatialPointObservation[],
     cameraPosition: ViewerPosition | null,
     timestamp: number,
+    gridColumns = COVERAGE_MAPPING_COLUMNS,
+    gridRows = COVERAGE_MAPPING_ROWS,
   ): boolean {
     if (
       !Number.isFinite(timestamp) ||
@@ -463,7 +488,12 @@ export class SpatialCoverageService {
     for (const observation of observations) {
       if (isFinitePointObservation(observation)) {
         observationsByGridIndex.set(
-          getGridIndex(observation.normalizedX, observation.normalizedY),
+          getGridIndex(
+            observation.normalizedX,
+            observation.normalizedY,
+            gridColumns,
+            gridRows,
+          ),
           observation,
         )
       }
@@ -473,13 +503,20 @@ export class SpatialCoverageService {
     const currentFrameKeys = new Set<string>()
 
     for (const observation of observationsByGridIndex.values()) {
-      const gridIndex = getGridIndex(observation.normalizedX, observation.normalizedY)
+      const gridIndex = getGridIndex(
+        observation.normalizedX,
+        observation.normalizedY,
+        gridColumns,
+        gridRows,
+      )
       const coordinates = getCellCoordinates(observation.point)
       const key = getCellKey(coordinates)
       const normalResult = getSurfaceNormal(
         observation,
         observationsByGridIndex,
         cameraPosition,
+        gridColumns,
+        gridRows,
       )
       if (normalResult.rejectionReason === 'invalid') {
         this.diagnostics.rejectedInvalidNormalCount += 1
@@ -517,6 +554,7 @@ export class SpatialCoverageService {
         }
         this.cells.set(key, cell)
         this.incrementStateCount(cell.state)
+        this.diagnostics.newCellsCreatedCount += 1
         this.diagnostics.acceptedObservationCount += 1
         continue
       }
@@ -529,9 +567,15 @@ export class SpatialCoverageService {
         continue
       }
 
-      this.incrementStateCount(existingCell.state, -1)
+      const previousState = existingCell.state
+      this.incrementStateCount(previousState, -1)
       existingCell.observationCount += 1
       existingCell.state = getStateForObservationCount(existingCell.observationCount)
+      if (previousState === 'observed' && existingCell.state === 'partial') {
+        this.diagnostics.observedToPartialTransitionCount += 1
+      } else if (previousState === 'partial' && existingCell.state === 'captured') {
+        this.diagnostics.partialToCapturedTransitionCount += 1
+      }
       existingCell.lastObservedAt = timestamp
       existingCell.lastAcceptedCameraPosition = { ...cameraPosition }
       updateRepresentativePosition(existingCell, observation.point)
@@ -555,16 +599,72 @@ export class SpatialCoverageService {
     return true
   }
 
-  public getCoverageStateAtPoint(point: SpatialPoint): CoverageCellState | null {
+  public getCoverageLookupAtPoint(point: SpatialPoint): CoverageLookupResult {
     if (
       !Number.isFinite(point.x) ||
       !Number.isFinite(point.y) ||
       !Number.isFinite(point.z)
     ) {
-      return null
+      return { state: null, kind: 'miss' }
     }
 
-    return this.cells.get(getCellKey(getCellCoordinates(point)))?.state ?? null
+    const coordinates = getCellCoordinates(point)
+    const exactCell = this.cells.get(getCellKey(coordinates))
+    if (exactCell) {
+      return { state: exactCell.state, kind: 'exact' }
+    }
+
+    let nearestCell: CoverageCell | null = null
+    let nearestDistanceSquared = COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS ** 2
+    for (
+      let xOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+      xOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+      xOffset += 1
+    ) {
+      for (
+        let yOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+        yOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+        yOffset += 1
+      ) {
+        for (
+          let zOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+          zOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+          zOffset += 1
+        ) {
+          if (xOffset === 0 && yOffset === 0 && zOffset === 0) {
+            continue
+          }
+
+          const candidate = this.cells.get(
+            getCellKey({
+              x: coordinates.x + xOffset,
+              y: coordinates.y + yOffset,
+              z: coordinates.z + zOffset,
+            }),
+          )
+          if (!candidate) {
+            continue
+          }
+
+          const deltaX = candidate.representativePosition.x - point.x
+          const deltaY = candidate.representativePosition.y - point.y
+          const deltaZ = candidate.representativePosition.z - point.z
+          const distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+          if (distanceSquared < nearestDistanceSquared) {
+            nearestCell = candidate
+            nearestDistanceSquared = distanceSquared
+          }
+        }
+      }
+    }
+
+    return nearestCell
+      ? { state: nearestCell.state, kind: 'neighbor' }
+      : { state: null, kind: 'miss' }
+  }
+
+  public getCoverageStateAtPoint(point: SpatialPoint): CoverageCellState | null {
+    return this.getCoverageLookupAtPoint(point).state
   }
 
   public getFinalizationCells(): readonly CoverageCell[] {

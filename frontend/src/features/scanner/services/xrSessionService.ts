@@ -26,7 +26,7 @@ import {
 import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
-const DENSE_MASK_UPDATE_INTERVAL_MS = 125
+const DENSE_MASK_UPDATE_INTERVAL_MS = 140
 
 export type XRSessionEndReason = 'stopped' | 'finished' | 'external'
 
@@ -183,6 +183,10 @@ export class XRSessionService {
     )
 
     return startPromise
+  }
+
+  public setDebugGeometryVisible(visible: boolean): void {
+    this.spatialCoverageRenderService.setDebugGeometryVisible(visible)
   }
 
   public async stop(): Promise<void> {
