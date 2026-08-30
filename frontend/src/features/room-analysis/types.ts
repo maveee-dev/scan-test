@@ -36,6 +36,8 @@ export interface RoomAnalysisTimings {
   readonly downsamplingMs: number
   readonly initialExtractionMs: number
   readonly consolidationMs: number
+  readonly ransacMs: number
+  readonly refinementMs: number
   readonly globalReassemblyMs: number
   readonly dominantExpansionMs: number
   readonly ownershipMs: number
@@ -81,6 +83,15 @@ export interface RoomAnalysisResult {
     readonly globalResidualRejects: number
     readonly globalNormalRejects: number
     readonly globalSupportRejects: number
+    readonly ransacHypothesesTested: number
+    readonly degenerateHypothesesRejected: number
+    readonly bestHypothesisInitialInliers: number
+    readonly bestHypothesisWeightedSupport: number
+    readonly bestHypothesisInitialRms: number
+    readonly refinedSupportPointCount: number
+    readonly refinedRmsError: number
+    readonly refinedOccupiedArea: number
+    readonly acceptedDominantPlaneCount: number
     readonly largestPlaneSupportPointCount: number
     readonly largestPlaneOccupiedArea: number
     readonly largestPlaneRmsError: number
@@ -101,5 +112,6 @@ export interface RoomAnalysisResult {
     readonly expansionConnectivityRejects: number
   }
   readonly planeRelationships: readonly PlaneRelationshipDiagnostic[]
+  readonly ransacIterationsPerPlane: readonly number[]
   readonly timings: RoomAnalysisTimings
 }

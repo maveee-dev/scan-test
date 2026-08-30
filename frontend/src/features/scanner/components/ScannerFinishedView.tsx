@@ -126,6 +126,9 @@ function ScannerFinishedView({
             </div>
             <strong>{analysisResult.stats.planeCount}</strong>
           </div>
+          <div className="scanner-analysis-timings">
+            <span>Analysis method: Global dominant planes (position-first, deterministic RANSAC)</span>
+          </div>
           <div className="scanner-analysis-stats">
             <div>
               <span>Fused analysis input</span>
@@ -152,11 +155,11 @@ function ScannerFinishedView({
               <strong>{analysisResult.stats.filteredPoints} / {analysisResult.stats.downsampledPoints}</strong>
             </div>
             <div>
-              <span>Provisional planes</span>
+              <span>Legacy provisional planes</span>
               <strong>{analysisResult.stats.provisionalPlaneCount}</strong>
             </div>
             <div>
-              <span>Consolidated planes</span>
+              <span>Final dominant planes</span>
               <strong>{analysisResult.stats.planeCount}</strong>
             </div>
             <div>
@@ -164,7 +167,7 @@ function ScannerFinishedView({
               <strong>{analysisResult.stats.planeParameterClusterCount}</strong>
             </div>
             <div>
-              <span>Global planes accepted</span>
+              <span>Legacy reassembly planes</span>
               <strong>{analysisResult.stats.globalPlanesAccepted}</strong>
             </div>
             <div>
@@ -239,6 +242,21 @@ function ScannerFinishedView({
               </span>
             </div>
           ))}
+          <div className="scanner-analysis-timings">
+            <span>
+              RANSAC hypotheses {analysisResult.stats.ransacHypothesesTested} · degenerate rejected {analysisResult.stats.degenerateHypothesesRejected} · accepted dominant planes {analysisResult.stats.acceptedDominantPlaneCount}
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Best hypothesis {analysisResult.stats.bestHypothesisInitialInliers} inliers · weighted support {analysisResult.stats.bestHypothesisWeightedSupport.toFixed(1)} · RMS {analysisResult.stats.bestHypothesisInitialRms.toFixed(3)} m · refined {analysisResult.stats.refinedSupportPointCount} points / {analysisResult.stats.refinedOccupiedArea.toFixed(2)} m² / RMS {analysisResult.stats.refinedRmsError.toFixed(3)} m
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              RANSAC {analysisResult.timings.ransacMs.toFixed(1)} ms · refinement {analysisResult.timings.refinementMs.toFixed(1)} ms · iterations per plane {analysisResult.ransacIterationsPerPlane.join(', ') || 'N/A'}
+            </span>
+          </div>
           {analysisResult.planes.length > 0 ? (
             <div className="scanner-plane-list">
               {analysisResult.planes.map((plane) => (

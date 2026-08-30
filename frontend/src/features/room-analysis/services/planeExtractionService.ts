@@ -49,6 +49,20 @@ export interface PlaneExtractionConfig {
   readonly globalPlaneSearchPaddingMeters: number
   readonly maximumGlobalExpansionPasses: number
   readonly maximumGlobalFitPasses: number
+  /** Optional comparison-only path; never feeds normal final candidates. */
+  readonly enableLegacyDiagnostics?: boolean
+  /** Position-only RANSAC inlier tolerance for mobile-depth geometry. */
+  readonly ransacInlierDistanceMeters: number
+  /** Bounded hypothesis budget per dominant plane search. */
+  readonly ransacHypothesisCount: number
+  readonly ransacSeed: number
+  /** Minimum cross-product magnitude for a non-degenerate point triplet. */
+  readonly minimumHypothesisCrossMagnitude: number
+  readonly ransacSupportCellSizeMeters: number
+  readonly ransacSupportGapMeters: number
+  readonly maximumDominantPlanes: number
+  readonly ransacEarlyTerminationFraction: number
+  readonly minimumRansacSupportFraction: number
 }
 
 /** Conservative defaults for major-surface candidates, not semantic labels. */
@@ -82,6 +96,16 @@ export const DEFAULT_PLANE_EXTRACTION_CONFIG: PlaneExtractionConfig = {
   globalPlaneSearchPaddingMeters: 0.35,
   maximumGlobalExpansionPasses: 4,
   maximumGlobalFitPasses: 3,
+  enableLegacyDiagnostics: false,
+  ransacInlierDistanceMeters: 0.04,
+  ransacHypothesisCount: 320,
+  ransacSeed: 0x6d2b79f5,
+  minimumHypothesisCrossMagnitude: 0.0001,
+  ransacSupportCellSizeMeters: 0.1,
+  ransacSupportGapMeters: 0.3,
+  maximumDominantPlanes: 12,
+  ransacEarlyTerminationFraction: 0.7,
+  minimumRansacSupportFraction: 0.01,
 }
 
 interface AnalysisPoint {
@@ -178,6 +202,37 @@ interface GlobalReassemblyDiagnostics {
 interface GlobalReassemblyResult {
   groups: CandidateGroup[]
   diagnostics: GlobalReassemblyDiagnostics
+}
+
+interface RansacHypothesis {
+  normal: SpatialPoint
+  offset: number
+  support: number[]
+  inlierCount: number
+  weightedSupport: number
+  rmsError: number
+  occupiedBoundsArea: number
+  score: number
+}
+
+interface RansacDiagnostics {
+  hypothesesTested: number
+  degenerateHypothesesRejected: number
+  bestHypothesisInitialInliers: number
+  bestHypothesisWeightedSupport: number
+  bestHypothesisInitialRms: number
+  refinedSupportPointCount: number
+  refinedRmsError: number
+  refinedOccupiedArea: number
+  acceptedDominantPlanes: number
+  iterationsPerAcceptedPlane: number[]
+  ransacMs: number
+  refinementMs: number
+}
+
+interface RansacExtractionResult {
+  groups: CandidateGroup[]
+  diagnostics: RansacDiagnostics
 }
 
 interface SpatialBounds {
@@ -1451,7 +1506,6 @@ function assignPointOwnership(
   config: PlaneExtractionConfig,
 ): OwnershipResult {
   const ownedSupports = groups.map(() => [] as number[])
-  const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
 
   for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
     const point = points[pointIndex]
@@ -1464,9 +1518,6 @@ function assignPointOwnership(
         return
       }
       const normalAgreement = Math.abs(dot(group.candidate.normal, point.normal))
-      if (normalAgreement < normalCompatibilityDot) {
-        return
-      }
       const outsideDistance = getProjectedOutsideDistance(group.candidate, point.position)
       if (outsideDistance > config.ownershipBoundsPaddingMeters) {
         return
@@ -1492,8 +1543,7 @@ function assignPointOwnership(
     if (support.length < config.minimumSupportPointCount) {
       return
     }
-    const normalCompatibilityDot = getNormalCompatibilityDot(config.maximumNormalAngleDegrees)
-    const refined = refineRegion(points, support, config, normalCompatibilityDot)
+    const refined = fitRobustPlane(points, support, config)
     if (!refined || refined.support.length < config.minimumSupportPointCount) {
       return
     }
@@ -1591,6 +1641,467 @@ function extractProvisionalPlanes(
   return extracted
 }
 
+function nextDeterministicSeed(seed: number): number {
+  let next = seed >>> 0
+  next ^= next << 13
+  next ^= next >>> 17
+  next ^= next << 5
+  return next >>> 0
+}
+
+function createPointPlaneHypothesis(
+  first: AnalysisPoint,
+  second: AnalysisPoint,
+  third: AnalysisPoint,
+  minimumCrossMagnitude: number,
+): { normal: SpatialPoint; offset: number } | null {
+  const firstEdge = subtract(second.position, first.position)
+  const secondEdge = subtract(third.position, first.position)
+  const crossProduct = cross(firstEdge, secondEdge)
+  const crossMagnitude = length(crossProduct)
+  if (!Number.isFinite(crossMagnitude) || crossMagnitude < minimumCrossMagnitude) {
+    return null
+  }
+
+  const normal = normalize(crossProduct)
+  if (!normal) {
+    return null
+  }
+  return {
+    normal,
+    offset: -dot(normal, first.position),
+  }
+}
+
+interface RansacEvaluation {
+  inlierCount: number
+  weightedSupport: number
+  rmsError: number
+  occupiedBoundsArea: number
+  score: number
+}
+
+function evaluateRansacHypothesis(
+  points: readonly AnalysisPoint[],
+  eligible: readonly number[],
+  normal: SpatialPoint,
+  offset: number,
+  config: PlaneExtractionConfig,
+): RansacEvaluation {
+  const basis = choosePlaneBasis(normal)
+  let inlierCount = 0
+  let weightedSupport = 0
+  let weightedSquaredError = 0
+  let totalWeight = 0
+  let minU = Infinity
+  let maxU = -Infinity
+  let minV = Infinity
+  let maxV = -Infinity
+  const origin = points[eligible[0]].position
+
+  for (const index of eligible) {
+    const point = points[index]
+    totalWeight += point.weight
+    const residual = Math.abs(dot(normal, point.position) + offset)
+    if (residual > config.ransacInlierDistanceMeters) {
+      continue
+    }
+
+    inlierCount += 1
+    weightedSupport += point.weight
+    weightedSquaredError += residual * residual * point.weight
+    if (basis) {
+      const relative = subtract(point.position, origin)
+      const u = dot(relative, basis.tangentU)
+      const v = dot(relative, basis.tangentV)
+      minU = Math.min(minU, u)
+      maxU = Math.max(maxU, u)
+      minV = Math.min(minV, v)
+      maxV = Math.max(maxV, v)
+    }
+  }
+
+  const rmsError = weightedSupport > 0
+    ? Math.sqrt(weightedSquaredError / weightedSupport)
+    : config.ransacInlierDistanceMeters
+  const occupiedBoundsArea = Number.isFinite(minU) && Number.isFinite(minV)
+    ? Math.max(0, maxU - minU) * Math.max(0, maxV - minV)
+    : 0
+  const areaReference = Math.max(config.minimumAreaSquareMeters * 2, 1)
+  const areaQuality = 0.5 + 0.5 * clamp(occupiedBoundsArea / areaReference, 0, 1)
+  const residualQuality = 1 - clamp(rmsError / config.ransacInlierDistanceMeters, 0, 1)
+
+  return {
+    inlierCount,
+    weightedSupport,
+    rmsError,
+    occupiedBoundsArea,
+    score: weightedSupport * areaQuality * (0.5 + 0.5 * residualQuality),
+  }
+}
+
+function collectRansacInliers(
+  points: readonly AnalysisPoint[],
+  eligible: readonly number[],
+  normal: SpatialPoint,
+  offset: number,
+  tolerance: number,
+  target: number[],
+): void {
+  target.length = 0
+  for (const index of eligible) {
+    const residual = Math.abs(dot(normal, points[index].position) + offset)
+    if (residual <= tolerance) {
+      target.push(index)
+    }
+  }
+}
+
+interface RansacSearchResult {
+  hypothesis: RansacHypothesis | null
+  hypothesesTested: number
+  degenerateHypothesesRejected: number
+  iterationsUsed: number
+}
+
+function findBestRansacHypothesis(
+  points: readonly AnalysisPoint[],
+  eligible: readonly number[],
+  config: PlaneExtractionConfig,
+  planeOrdinal: number,
+): RansacSearchResult {
+  let seed = (config.ransacSeed + Math.imul(planeOrdinal + 1, 0x9e3779b9)) >>> 0
+  let best: RansacHypothesis | null = null
+  let hypothesesTested = 0
+  let degenerateHypothesesRejected = 0
+  let iterationsUsed = 0
+  const bestSupport: number[] = []
+
+  const pickIndex = (): number => {
+    seed = nextDeterministicSeed(seed)
+    return eligible[seed % eligible.length]
+  }
+
+  for (let iteration = 0; iteration < config.ransacHypothesisCount; iteration += 1) {
+    iterationsUsed = iteration + 1
+    hypothesesTested += 1
+    const firstIndex = pickIndex()
+    let secondIndex = pickIndex()
+    let thirdIndex = pickIndex()
+    for (let retry = 0; secondIndex === firstIndex && retry < 8; retry += 1) {
+      secondIndex = pickIndex()
+    }
+    for (let retry = 0; (thirdIndex === firstIndex || thirdIndex === secondIndex) && retry < 8; retry += 1) {
+      thirdIndex = pickIndex()
+    }
+    const hypothesis = createPointPlaneHypothesis(
+      points[firstIndex],
+      points[secondIndex],
+      points[thirdIndex],
+      config.minimumHypothesisCrossMagnitude,
+    )
+    if (!hypothesis) {
+      degenerateHypothesesRejected += 1
+      continue
+    }
+
+    const evaluation = evaluateRansacHypothesis(
+      points,
+      eligible,
+      hypothesis.normal,
+      hypothesis.offset,
+      config,
+    )
+    if (
+      best &&
+      evaluation.score <= best.score &&
+      evaluation.inlierCount <= best.inlierCount
+    ) {
+      continue
+    }
+
+    collectRansacInliers(
+      points,
+      eligible,
+      hypothesis.normal,
+      hypothesis.offset,
+      config.ransacInlierDistanceMeters,
+      bestSupport,
+    )
+    best = {
+      normal: hypothesis.normal,
+      offset: hypothesis.offset,
+      support: [...bestSupport],
+      inlierCount: evaluation.inlierCount,
+      weightedSupport: evaluation.weightedSupport,
+      rmsError: evaluation.rmsError,
+      occupiedBoundsArea: evaluation.occupiedBoundsArea,
+      score: evaluation.score,
+    }
+
+    if (evaluation.inlierCount >= eligible.length * config.ransacEarlyTerminationFraction) {
+      break
+    }
+  }
+
+  return {
+    hypothesis: best,
+    hypothesesTested,
+    degenerateHypothesesRejected,
+    iterationsUsed,
+  }
+}
+
+interface ProjectedSupportCell {
+  u: number
+  v: number
+  indices: number[]
+}
+
+function filterRansacSupportComponents(
+  points: readonly AnalysisPoint[],
+  support: readonly number[],
+  fit: FitPlaneResult,
+  config: PlaneExtractionConfig,
+): number[] {
+  const basis = choosePlaneBasis(fit.normal)
+  if (!basis || support.length < 3) {
+    return [...support]
+  }
+
+  const cells = new Map<string, ProjectedSupportCell>()
+  for (const index of support) {
+    const relative = subtract(points[index].position, fit.centroid)
+    const u = Math.floor(dot(relative, basis.tangentU) / config.ransacSupportCellSizeMeters)
+    const v = Math.floor(dot(relative, basis.tangentV) / config.ransacSupportCellSizeMeters)
+    const key = `${u}:${v}`
+    const cell = cells.get(key)
+    if (cell) {
+      cell.indices.push(index)
+    } else {
+      cells.set(key, { u, v, indices: [index] })
+    }
+  }
+
+  const unvisited = new Set(cells.keys())
+  const components: { indices: number[]; cellCount: number }[] = []
+  const cellRadius = Math.ceil(config.ransacSupportGapMeters / config.ransacSupportCellSizeMeters)
+  while (unvisited.size > 0) {
+    const firstKey = unvisited.values().next().value
+    if (typeof firstKey !== 'string') {
+      break
+    }
+    unvisited.delete(firstKey)
+    const firstCell = cells.get(firstKey)
+    if (!firstCell) {
+      continue
+    }
+    const queue = [firstCell]
+    const componentIndices: number[] = []
+    let cellCount = 0
+    for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+      const cell = queue[queueIndex]
+      cellCount += 1
+      componentIndices.push(...cell.indices)
+      for (let uOffset = -cellRadius; uOffset <= cellRadius; uOffset += 1) {
+        for (let vOffset = -cellRadius; vOffset <= cellRadius; vOffset += 1) {
+          if (uOffset === 0 && vOffset === 0) {
+            continue
+          }
+          const neighborKey = `${cell.u + uOffset}:${cell.v + vOffset}`
+          if (!unvisited.delete(neighborKey)) {
+            continue
+          }
+          const neighbor = cells.get(neighborKey)
+          if (neighbor) {
+            queue.push(neighbor)
+          }
+        }
+      }
+    }
+    components.push({ indices: componentIndices, cellCount })
+  }
+
+  const minimumComponentArea = config.minimumAreaSquareMeters * 0.25
+  const retained = components
+    .filter((component) => component.indices.length >= config.minimumSupportPointCount ||
+      component.cellCount * config.ransacSupportCellSizeMeters ** 2 >= minimumComponentArea)
+    .flatMap((component) => component.indices)
+  return retained.length >= 3 ? retained : [...support]
+}
+
+interface DominantPlaneRefinement {
+  support: number[]
+  fit: FitPlaneResult
+  passes: number
+}
+
+function refineDominantRansacSupport(
+  points: readonly AnalysisPoint[],
+  eligible: readonly number[],
+  initialSupport: readonly number[],
+  config: PlaneExtractionConfig,
+): DominantPlaneRefinement | null {
+  let robust = fitRobustPlane(points, initialSupport, config)
+  if (!robust) {
+    return null
+  }
+  let support = filterRansacSupportComponents(points, robust.support, robust.fit, config)
+  robust = fitRobustPlane(points, support, config)
+  if (!robust) {
+    return null
+  }
+
+  let passes = robust.passes
+  for (let pass = 0; pass < config.maximumGlobalExpansionPasses; pass += 1) {
+    const included = new Uint8Array(points.length)
+    for (const index of robust.support) {
+      included[index] = 1
+    }
+    const supportBeforeExpansion = robust.support.length
+    for (const index of eligible) {
+      if (included[index] === 1) {
+        continue
+      }
+      const residual = Math.abs(dot(robust.fit.normal, points[index].position) - robust.fit.planeConstant)
+      if (residual <= config.ransacInlierDistanceMeters) {
+        robust.support.push(index)
+      }
+    }
+    support = filterRansacSupportComponents(points, robust.support, robust.fit, config)
+    const nextRobust = fitRobustPlane(points, support, config)
+    if (!nextRobust) {
+      return null
+    }
+    robust = nextRobust
+    passes += 1 + robust.passes
+    if (support.length === supportBeforeExpansion) {
+      break
+    }
+  }
+
+  return { support: robust.support, fit: robust.fit, passes }
+}
+
+function extractDominantPlanesByRansac(
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): RansacExtractionResult {
+  const diagnostics: RansacDiagnostics = {
+    hypothesesTested: 0,
+    degenerateHypothesesRejected: 0,
+    bestHypothesisInitialInliers: 0,
+    bestHypothesisWeightedSupport: 0,
+    bestHypothesisInitialRms: 0,
+    refinedSupportPointCount: 0,
+    refinedRmsError: 0,
+    refinedOccupiedArea: 0,
+    acceptedDominantPlanes: 0,
+    iterationsPerAcceptedPlane: [],
+    ransacMs: 0,
+    refinementMs: 0,
+  }
+  const available = new Uint8Array(points.length)
+  available.fill(1)
+  const groups: CandidateGroup[] = []
+  let firstPlane = true
+
+  for (let planeOrdinal = 0; planeOrdinal < config.maximumDominantPlanes; planeOrdinal += 1) {
+    const eligible: number[] = []
+    for (let index = 0; index < points.length; index += 1) {
+      if (available[index] === 1) {
+        eligible.push(index)
+      }
+    }
+    if (eligible.length < config.minimumSupportPointCount) {
+      break
+    }
+
+    const searchStartedAt = getTimestamp()
+    const search = findBestRansacHypothesis(points, eligible, config, planeOrdinal)
+    diagnostics.ransacMs += Math.max(0, getTimestamp() - searchStartedAt)
+    diagnostics.hypothesesTested += search.hypothesesTested
+    diagnostics.degenerateHypothesesRejected += search.degenerateHypothesesRejected
+    const hypothesis = search.hypothesis
+    if (!hypothesis || hypothesis.inlierCount < config.minimumSupportPointCount) {
+      break
+    }
+    if (firstPlane) {
+      diagnostics.bestHypothesisInitialInliers = hypothesis.inlierCount
+      diagnostics.bestHypothesisWeightedSupport = hypothesis.weightedSupport
+      diagnostics.bestHypothesisInitialRms = hypothesis.rmsError
+    }
+
+    const refinementStartedAt = getTimestamp()
+    const refined = refineDominantRansacSupport(points, eligible, hypothesis.support, config)
+    diagnostics.refinementMs += Math.max(0, getTimestamp() - refinementStartedAt)
+    if (!refined) {
+      break
+    }
+    const candidate = createPlaneCandidate(
+      `ransac-plane-${groups.length + 1}`,
+      points,
+      refined.support,
+      refined.fit,
+      config,
+    )
+    if (
+      !candidate ||
+      refined.support.length < config.minimumSupportPointCount ||
+      candidate.areaEstimate < config.minimumAreaSquareMeters ||
+      candidate.rmsError > config.maximumRmsErrorMeters
+    ) {
+      break
+    }
+    const supportFraction = refined.support.length / eligible.length
+    if (
+      supportFraction < config.minimumRansacSupportFraction &&
+      candidate.areaEstimate < config.minimumAreaSquareMeters * 2
+    ) {
+      break
+    }
+
+    for (const index of refined.support) {
+      available[index] = 0
+    }
+    groups.push({ candidate, support: refined.support })
+    diagnostics.acceptedDominantPlanes += 1
+    diagnostics.iterationsPerAcceptedPlane.push(search.iterationsUsed)
+    if (firstPlane) {
+      diagnostics.refinedSupportPointCount = refined.support.length
+      diagnostics.refinedRmsError = refined.fit.rmsError
+      diagnostics.refinedOccupiedArea = candidate.areaEstimate
+      firstPlane = false
+    }
+  }
+
+  return { groups, diagnostics }
+}
+
+function createEmptyConsolidationDiagnostics(): ConsolidationDiagnostics {
+  return {
+    candidatePairsTested: 0,
+    highOverlapCandidatePairs: 0,
+    candidatesMerged: 0,
+    averageSupportOverlap: 0,
+  }
+}
+
+function createEmptyGlobalReassemblyDiagnostics(): GlobalReassemblyDiagnostics {
+  return {
+    planeParameterClusterCount: 0,
+    globalPlanesAttempted: 0,
+    globalPlanesAccepted: 0,
+    globalPointsAbsorbed: 0,
+    globalFragmentsAbsorbed: 0,
+    globalExpansionPasses: 0,
+    globalPlaneRefits: 0,
+    globalResidualRejects: 0,
+    globalNormalRejects: 0,
+    globalSupportRejects: 0,
+  }
+}
+
 export class PlaneExtractionService {
   private readonly config: PlaneExtractionConfig
 
@@ -1601,20 +2112,25 @@ export class PlaneExtractionService {
   public analyze(scan: FinalizedSpatialScan): RoomAnalysisResult {
     const analysisStartedAt = getTimestamp()
     const prepared = createAnalysisPointMap(scan, this.config)
-    const extractionStartedAt = getTimestamp()
-    const provisionalGroups = extractProvisionalPlanes(prepared.points, this.config)
-    const extractionFinishedAt = getTimestamp()
-    const consolidationStartedAt = getTimestamp()
-    // Keep the former overlap-based pass as a diagnostic baseline. The final
-    // result is assembled from the provisional groups below so scan gaps do
-    // not prevent coplanar fragments from joining one global plane.
-    const consolidated = consolidateCandidates(provisionalGroups, prepared.points, this.config)
-    const consolidationFinishedAt = getTimestamp()
-    const globalReassemblyStartedAt = getTimestamp()
-    const reassembled = reassembleGlobalPlanes(provisionalGroups, prepared.points, this.config)
-    const globalReassemblyFinishedAt = getTimestamp()
+    let legacyProvisionalGroups: CandidateGroup[] = []
+    let legacyConsolidationDiagnostics = createEmptyConsolidationDiagnostics()
+    let legacyGlobalDiagnostics = createEmptyGlobalReassemblyDiagnostics()
+    let legacyAnalysisMs = 0
+    if (this.config.enableLegacyDiagnostics === true) {
+      const legacyStartedAt = getTimestamp()
+      legacyProvisionalGroups = extractProvisionalPlanes(prepared.points, this.config)
+      const consolidated = consolidateCandidates(legacyProvisionalGroups, prepared.points, this.config)
+      legacyConsolidationDiagnostics = consolidated.diagnostics
+      legacyGlobalDiagnostics = reassembleGlobalPlanes(
+        legacyProvisionalGroups,
+        prepared.points,
+        this.config,
+      ).diagnostics
+      legacyAnalysisMs = Math.max(0, getTimestamp() - legacyStartedAt)
+    }
+    const ransac = extractDominantPlanesByRansac(prepared.points, this.config)
     const ownershipStartedAt = getTimestamp()
-    const owned = assignPointOwnership(prepared.points, reassembled.groups, this.config)
+    const owned = assignPointOwnership(prepared.points, ransac.groups, this.config)
     const ownershipFinishedAt = getTimestamp()
     const rankedGroups = owned.groups
       .slice()
@@ -1651,27 +2167,36 @@ export class PlaneExtractionService {
         analysisFilteredSurfelCount: prepared.analysisFilteredSurfelCount,
         downsampledPoints: prepared.points.length,
         analysisDownsampledSurfelCount: prepared.analysisDownsampledSurfelCount,
-        provisionalPlaneCount: provisionalGroups.length,
+        provisionalPlaneCount: legacyProvisionalGroups.length,
         planeCount: planes.length,
         assignedPoints: owned.assignedPointCount,
         unassignedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
         assignedPercentage,
         rejectedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
-        candidatePairsTested: consolidated.diagnostics.candidatePairsTested,
-        highOverlapCandidatePairs: consolidated.diagnostics.highOverlapCandidatePairs,
-        candidatesMerged: consolidated.diagnostics.candidatesMerged,
-        duplicateCandidatesSuppressed: Math.max(0, provisionalGroups.length - planes.length),
-        averageSupportOverlap: consolidated.diagnostics.averageSupportOverlap,
-        planeParameterClusterCount: reassembled.diagnostics.planeParameterClusterCount,
-        globalPlanesAttempted: reassembled.diagnostics.globalPlanesAttempted,
-        globalPlanesAccepted: reassembled.diagnostics.globalPlanesAccepted,
-        globalPointsAbsorbed: reassembled.diagnostics.globalPointsAbsorbed,
-        globalFragmentsAbsorbed: reassembled.diagnostics.globalFragmentsAbsorbed,
-        globalExpansionPasses: reassembled.diagnostics.globalExpansionPasses,
-        globalPlaneRefits: reassembled.diagnostics.globalPlaneRefits,
-        globalResidualRejects: reassembled.diagnostics.globalResidualRejects,
-        globalNormalRejects: reassembled.diagnostics.globalNormalRejects,
-        globalSupportRejects: reassembled.diagnostics.globalSupportRejects,
+        candidatePairsTested: legacyConsolidationDiagnostics.candidatePairsTested,
+        highOverlapCandidatePairs: legacyConsolidationDiagnostics.highOverlapCandidatePairs,
+        candidatesMerged: legacyConsolidationDiagnostics.candidatesMerged,
+        duplicateCandidatesSuppressed: Math.max(0, legacyProvisionalGroups.length - planes.length),
+        averageSupportOverlap: legacyConsolidationDiagnostics.averageSupportOverlap,
+        planeParameterClusterCount: legacyGlobalDiagnostics.planeParameterClusterCount,
+        globalPlanesAttempted: legacyGlobalDiagnostics.globalPlanesAttempted,
+        globalPlanesAccepted: legacyGlobalDiagnostics.globalPlanesAccepted,
+        globalPointsAbsorbed: legacyGlobalDiagnostics.globalPointsAbsorbed,
+        globalFragmentsAbsorbed: legacyGlobalDiagnostics.globalFragmentsAbsorbed,
+        globalExpansionPasses: legacyGlobalDiagnostics.globalExpansionPasses,
+        globalPlaneRefits: legacyGlobalDiagnostics.globalPlaneRefits,
+        globalResidualRejects: legacyGlobalDiagnostics.globalResidualRejects,
+        globalNormalRejects: legacyGlobalDiagnostics.globalNormalRejects,
+        globalSupportRejects: legacyGlobalDiagnostics.globalSupportRejects,
+        ransacHypothesesTested: ransac.diagnostics.hypothesesTested,
+        degenerateHypothesesRejected: ransac.diagnostics.degenerateHypothesesRejected,
+        bestHypothesisInitialInliers: ransac.diagnostics.bestHypothesisInitialInliers,
+        bestHypothesisWeightedSupport: ransac.diagnostics.bestHypothesisWeightedSupport,
+        bestHypothesisInitialRms: ransac.diagnostics.bestHypothesisInitialRms,
+        refinedSupportPointCount: ransac.diagnostics.refinedSupportPointCount,
+        refinedRmsError: ransac.diagnostics.refinedRmsError,
+        refinedOccupiedArea: ransac.diagnostics.refinedOccupiedArea,
+        acceptedDominantPlaneCount: ransac.diagnostics.acceptedDominantPlanes,
         largestPlaneSupportPointCount: largestPlane?.supportPointCount ?? 0,
         largestPlaneOccupiedArea: largestPlane?.areaEstimate ?? 0,
         largestPlaneRmsError: largestPlane?.rmsError ?? 0,
@@ -1681,24 +2206,27 @@ export class PlaneExtractionService {
         largestPlaneSupportPercentage,
         secondLargestPlaneSupportPercentage,
         topThreePlaneSupportPercentage,
-        dominantSeedsAttempted: reassembled.diagnostics.globalPlanesAttempted,
-        dominantPlanesAccepted: reassembled.diagnostics.globalPlanesAccepted,
-        pointsAbsorbedDuringExpansion: reassembled.diagnostics.globalPointsAbsorbed,
-        fragmentsAbsorbedDuringExpansion: reassembled.diagnostics.globalFragmentsAbsorbed,
-        expansionPasses: reassembled.diagnostics.globalExpansionPasses,
-        planeRefits: reassembled.diagnostics.globalPlaneRefits,
-        expansionResidualRejects: reassembled.diagnostics.globalResidualRejects,
-        expansionNormalRejects: reassembled.diagnostics.globalNormalRejects,
-        expansionConnectivityRejects: reassembled.diagnostics.globalSupportRejects,
+        dominantSeedsAttempted: ransac.diagnostics.acceptedDominantPlanes,
+        dominantPlanesAccepted: ransac.diagnostics.acceptedDominantPlanes,
+        pointsAbsorbedDuringExpansion: 0,
+        fragmentsAbsorbedDuringExpansion: 0,
+        expansionPasses: 0,
+        planeRefits: 0,
+        expansionResidualRejects: 0,
+        expansionNormalRejects: 0,
+        expansionConnectivityRejects: 0,
       },
       planeRelationships: Object.freeze(planeRelationships),
+      ransacIterationsPerPlane: Object.freeze([...ransac.diagnostics.iterationsPerAcceptedPlane]),
       timings: {
         inputPreparationMs: prepared.inputPreparationMs,
         downsamplingMs: prepared.downsamplingMs,
-        initialExtractionMs: Math.max(0, extractionFinishedAt - extractionStartedAt),
-        consolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
-        globalReassemblyMs: Math.max(0, globalReassemblyFinishedAt - globalReassemblyStartedAt),
-        dominantExpansionMs: Math.max(0, globalReassemblyFinishedAt - globalReassemblyStartedAt),
+        initialExtractionMs: ransac.diagnostics.ransacMs,
+        consolidationMs: legacyAnalysisMs,
+        ransacMs: ransac.diagnostics.ransacMs,
+        refinementMs: ransac.diagnostics.refinementMs,
+        globalReassemblyMs: ransac.diagnostics.refinementMs,
+        dominantExpansionMs: ransac.diagnostics.refinementMs,
         ownershipMs: Math.max(0, ownershipFinishedAt - ownershipStartedAt),
         totalMs: Math.max(0, ownershipFinishedAt - analysisStartedAt),
       },
