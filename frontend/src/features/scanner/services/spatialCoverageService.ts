@@ -37,12 +37,18 @@ const DISTINCT_VIEW_ANGLE_RADIANS = (10 * Math.PI) / 180
 const COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS = 1
 // Neighbor lookup only bridges small measurement jitter around a 5 cm cell;
 // it is deliberately too small to behave like a general spatial search.
-const COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS = 0.08
+const COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS = 0.10
+/** Coverage confidence is shared by a small, coplanar physical neighborhood. */
+export const COVERAGE_REGION_SUPPORT_METERS = 0.10
+const COVERAGE_REGION_BUCKET_SIZE_METERS = COVERAGE_REGION_SUPPORT_METERS
+const COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS = 1
+const COVERAGE_REGION_MAX_POINT_TO_PLANE_METERS = 0.06
+const COVERAGE_REGION_MIN_NORMAL_DOT = Math.cos((50 * Math.PI) / 180)
 /** Fusion tolerates depth noise across adjacent 5 cm quantization buckets. */
-const SURFEL_FUSION_MAX_DISTANCE_METERS = 0.08
+const SURFEL_FUSION_MAX_DISTANCE_METERS = 0.10
 /** Prevents a nearby point on a different plane from being fused. */
-const SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS = 0.045
-const SURFEL_FUSION_MIN_NORMAL_DOT = Math.cos((40 * Math.PI) / 180)
+const SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS = 0.06
+const SURFEL_FUSION_MIN_NORMAL_DOT = Math.cos((50 * Math.PI) / 180)
 // New cells are rejected once this deterministic hard cap is reached.
 export const MAX_COVERAGE_CELLS = 50_000
 const OBSERVED_THRESHOLD = 1
@@ -68,6 +74,40 @@ type SurfaceMatchReason =
 interface SurfaceMatchResult {
   cell: CoverageCell | null
   reason: SurfaceMatchReason
+  candidateCount: number
+  compatibleCandidateCount: number
+  distanceRejectedCount: number
+  pointToPlaneRejectedCount: number
+  normalRejectedCount: number
+  normalComparisonCount: number
+  normalCompatibilityPassCount: number
+  normalAngleSumRadians: number
+}
+
+interface CoverageRegion {
+  key: string
+  bucketKey: string
+  representativePosition: SpatialPoint
+  representativeNormal: SpatialPoint | null
+  observationCount: number
+  state: CoverageCellState
+  firstObservedAt: number
+  lastObservedAt: number
+  lastAcceptedCameraPosition: ViewerPosition
+  lastAcceptedCameraDirection: ViewerDirection | null
+  memberCellKeys: Set<string>
+}
+
+interface CoverageRegionMatchResult {
+  region: CoverageRegion | null
+  candidateCount: number
+  compatibleCandidateCount: number
+  distanceRejectedCount: number
+  pointToPlaneRejectedCount: number
+  normalRejectedCount: number
+  normalComparisonCount: number
+  normalCompatibilityPassCount: number
+  normalAngleSumRadians: number
 }
 
 function createInitialRenderDebug(): SpatialCoverageRenderDebug {
@@ -141,6 +181,31 @@ function createInitialCoverageDebug(): SpatialCoverageDebug {
     mappingPhase: 0,
     mappingUpdateCount: 0,
     mappingProcessingDurationMs: 0,
+    incomingMeasuredSampleCount: 0,
+    matchedExistingSurfaceSampleCount: 0,
+    newSurfaceCreationCount: 0,
+    fusionRatio: null,
+    averageCompatibleCandidatesPerSample: 0,
+    samplesRejectedByDistance: 0,
+    samplesRejectedByPointToPlane: 0,
+    samplesRejectedByNormalCompatibility: 0,
+    existingSurfaceMatchRate: null,
+    newSurfaceCreationRate: null,
+    distinctObservationAcceptanceRate: null,
+    normalCompatibilityPassRate: null,
+    averageNormalAngleDegrees: null,
+    surfelsWithOneObservation: 0,
+    surfelsWithTwoObservations: 0,
+    surfelsWithThreeOrMoreObservations: 0,
+    coverageRegionSupportMeters: COVERAGE_REGION_SUPPORT_METERS,
+    coverageRegionCount: 0,
+    coverageRegionObservedCount: 0,
+    coverageRegionPartialCount: 0,
+    coverageRegionCapturedCount: 0,
+    distinctObservationAcceptedCount: 0,
+    distinctTranslationQualifiedCount: 0,
+    distinctRotationQualifiedCount: 0,
+    duplicateViewpointRejectedCount: 0,
     samplesWithNoCompatiblePersistentSurface: 0,
     matchedObservedSurfelCount: 0,
     matchedPartialSurfelCount: 0,
@@ -404,6 +469,30 @@ function getCellCenter(coordinates: { x: number; y: number; z: number }): Spatia
   }
 }
 
+function getCoverageRegionBucketCoordinates(point: SpatialPoint): {
+  x: number
+  y: number
+  z: number
+} {
+  return {
+    x: Math.floor(point.x / COVERAGE_REGION_BUCKET_SIZE_METERS),
+    y: Math.floor(point.y / COVERAGE_REGION_BUCKET_SIZE_METERS),
+    z: Math.floor(point.z / COVERAGE_REGION_BUCKET_SIZE_METERS),
+  }
+}
+
+function getCoverageRegionBucketKey(coordinates: {
+  x: number
+  y: number
+  z: number
+}): string {
+  return getCellKeyFromCoordinates(coordinates.x, coordinates.y, coordinates.z)
+}
+
+function getCoverageRegionState(region: CoverageRegion): CoverageCellState {
+  return getStateForObservationCount(region.observationCount)
+}
+
 function getStateForObservationCount(observationCount: number): CoverageCellState {
   if (observationCount >= CAPTURED_THRESHOLD) {
     return 'captured'
@@ -498,16 +587,24 @@ function mergeNormals(
   return normalizePoint(addPoints(existingNormal, alignedNormal)) ?? existingNormal
 }
 
-function updateRepresentativePosition(cell: CoverageCell, point: SpatialPoint): void {
-  const weight = 1 / cell.observationCount
-  cell.representativePosition = addPoints(
-    cell.representativePosition,
-    scalePoint(subtractPoints(point, cell.representativePosition), weight),
+interface RepresentativeSurface {
+  representativePosition: SpatialPoint
+  observationCount: number
+}
+
+function updateRepresentativePosition(
+  surface: RepresentativeSurface,
+  point: SpatialPoint,
+): void {
+  const weight = 1 / surface.observationCount
+  surface.representativePosition = addPoints(
+    surface.representativePosition,
+    scalePoint(subtractPoints(point, surface.representativePosition), weight),
   )
 }
 
 function findCompatibleCell(
-  cells: ReadonlyMap<string, CoverageCell>,
+  cellBuckets: ReadonlyMap<string, readonly CoverageCell[]>,
   point: SpatialPoint,
   normal: SpatialPoint | null,
 ): SurfaceMatchResult {
@@ -518,6 +615,14 @@ function findCompatibleCell(
   let nearbyCandidateFound = false
   let normalMismatchFound = false
   let pointToPlaneMismatchFound = false
+  let candidateCount = 0
+  let compatibleCandidateCount = 0
+  let distanceRejectedCount = 0
+  let pointToPlaneRejectedCount = 0
+  let normalRejectedCount = 0
+  let normalComparisonCount = 0
+  let normalCompatibilityPassCount = 0
+  let normalAngleSumRadians = 0
 
   for (
     let xOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
@@ -534,65 +639,219 @@ function findCompatibleCell(
         zOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
         zOffset += 1
       ) {
-        const candidate = cells.get(
+        const candidates = cellBuckets.get(
           getCellKeyFromCoordinates(
             coordinates.x + xOffset,
             coordinates.y + yOffset,
             coordinates.z + zOffset,
           ),
         )
-        if (!candidate) {
+        if (!candidates) {
           continue
         }
 
-        const delta = subtractPoints(candidate.representativePosition, point)
-        const distanceSquared = dotPoints(delta, delta)
-        if (distanceSquared > maxDistanceSquared) {
-          continue
-        }
-        nearbyCandidateFound = true
+        for (const candidate of candidates) {
+          candidateCount += 1
 
-        if (normal && candidate.representativeNormal) {
-          const normalDot = dotPoints(normal, candidate.representativeNormal)
-          if (normalDot < SURFEL_FUSION_MIN_NORMAL_DOT) {
-            normalMismatchFound = true
+          const delta = subtractPoints(candidate.representativePosition, point)
+          const distanceSquared = dotPoints(delta, delta)
+          if (distanceSquared > maxDistanceSquared) {
+            distanceRejectedCount += 1
             continue
           }
-        }
+          nearbyCandidateFound = true
 
-        if (candidate.representativeNormal) {
-          const pointToPlaneDistance = Math.abs(
-            dotPoints(delta, candidate.representativeNormal),
-          )
-          if (pointToPlaneDistance > SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS) {
-            pointToPlaneMismatchFound = true
-            continue
+          if (normal && candidate.representativeNormal) {
+            const normalDot = dotPoints(normal, candidate.representativeNormal)
+            normalComparisonCount += 1
+            if (normalDot < SURFEL_FUSION_MIN_NORMAL_DOT) {
+              normalMismatchFound = true
+              normalRejectedCount += 1
+              continue
+            }
+            normalCompatibilityPassCount += 1
+            normalAngleSumRadians += Math.acos(
+              Math.max(-1, Math.min(1, normalDot)),
+            )
           }
-        }
 
-        if (distanceSquared < nearestDistanceSquared) {
-          nearestCell = candidate
-          nearestDistanceSquared = distanceSquared
+          if (candidate.representativeNormal) {
+            const pointToPlaneDistance = Math.abs(
+              dotPoints(delta, candidate.representativeNormal),
+            )
+            if (pointToPlaneDistance > SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS) {
+              pointToPlaneMismatchFound = true
+              pointToPlaneRejectedCount += 1
+              continue
+            }
+          }
+
+          compatibleCandidateCount += 1
+
+          if (distanceSquared < nearestDistanceSquared) {
+            nearestCell = candidate
+            nearestDistanceSquared = distanceSquared
+          }
         }
       }
     }
   }
 
   if (nearestCell) {
-    return { cell: nearestCell, reason: 'compatible' }
+    return {
+      cell: nearestCell,
+      reason: 'compatible',
+      candidateCount,
+      compatibleCandidateCount,
+      distanceRejectedCount,
+      pointToPlaneRejectedCount,
+      normalRejectedCount,
+      normalComparisonCount,
+      normalCompatibilityPassCount,
+      normalAngleSumRadians,
+    }
   }
 
   if (normalMismatchFound) {
-    return { cell: null, reason: 'normal-similarity' }
+    return {
+      cell: null,
+      reason: 'normal-similarity',
+      candidateCount,
+      compatibleCandidateCount,
+      distanceRejectedCount,
+      pointToPlaneRejectedCount,
+      normalRejectedCount,
+      normalComparisonCount,
+      normalCompatibilityPassCount,
+      normalAngleSumRadians,
+    }
   }
 
   if (pointToPlaneMismatchFound) {
-    return { cell: null, reason: 'point-to-plane' }
+    return {
+      cell: null,
+      reason: 'point-to-plane',
+      candidateCount,
+      compatibleCandidateCount,
+      distanceRejectedCount,
+      pointToPlaneRejectedCount,
+      normalRejectedCount,
+      normalComparisonCount,
+      normalCompatibilityPassCount,
+      normalAngleSumRadians,
+    }
   }
 
   return {
     cell: null,
     reason: nearbyCandidateFound ? 'point-to-plane' : 'no-compatible-surface',
+    candidateCount,
+    compatibleCandidateCount,
+    distanceRejectedCount,
+    pointToPlaneRejectedCount,
+    normalRejectedCount,
+    normalComparisonCount,
+    normalCompatibilityPassCount,
+    normalAngleSumRadians,
+  }
+}
+
+function findCompatibleCoverageRegion(
+  regionBuckets: ReadonlyMap<string, readonly CoverageRegion[]>,
+  point: SpatialPoint,
+  normal: SpatialPoint | null,
+): CoverageRegionMatchResult {
+  const coordinates = getCoverageRegionBucketCoordinates(point)
+  const maxDistanceSquared = COVERAGE_REGION_SUPPORT_METERS ** 2
+  let nearestRegion: CoverageRegion | null = null
+  let nearestDistanceSquared = maxDistanceSquared
+  let candidateCount = 0
+  let compatibleCandidateCount = 0
+  let distanceRejectedCount = 0
+  let pointToPlaneRejectedCount = 0
+  let normalRejectedCount = 0
+  let normalComparisonCount = 0
+  let normalCompatibilityPassCount = 0
+  let normalAngleSumRadians = 0
+
+  for (
+    let xOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+    xOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+    xOffset += 1
+  ) {
+    for (
+      let yOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+      yOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+      yOffset += 1
+    ) {
+      for (
+        let zOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+        zOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+        zOffset += 1
+      ) {
+        const bucket = regionBuckets.get(
+          getCoverageRegionBucketKey({
+            x: coordinates.x + xOffset,
+            y: coordinates.y + yOffset,
+            z: coordinates.z + zOffset,
+          }),
+        )
+        if (!bucket) {
+          continue
+        }
+
+        for (const region of bucket) {
+          candidateCount += 1
+          const delta = subtractPoints(region.representativePosition, point)
+          const distanceSquared = dotPoints(delta, delta)
+          if (distanceSquared > maxDistanceSquared) {
+            distanceRejectedCount += 1
+            continue
+          }
+
+          if (normal && region.representativeNormal) {
+            const normalDot = dotPoints(normal, region.representativeNormal)
+            normalComparisonCount += 1
+            if (normalDot < COVERAGE_REGION_MIN_NORMAL_DOT) {
+              normalRejectedCount += 1
+              continue
+            }
+            normalCompatibilityPassCount += 1
+            normalAngleSumRadians += Math.acos(
+              Math.max(-1, Math.min(1, normalDot)),
+            )
+          }
+
+          if (region.representativeNormal) {
+            const pointToPlaneDistance = Math.abs(
+              dotPoints(delta, region.representativeNormal),
+            )
+            if (pointToPlaneDistance > COVERAGE_REGION_MAX_POINT_TO_PLANE_METERS) {
+              pointToPlaneRejectedCount += 1
+              continue
+            }
+          }
+
+          compatibleCandidateCount += 1
+          if (distanceSquared < nearestDistanceSquared) {
+            nearestRegion = region
+            nearestDistanceSquared = distanceSquared
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    region: nearestRegion,
+    candidateCount,
+    compatibleCandidateCount,
+    distanceRejectedCount,
+    pointToPlaneRejectedCount,
+    normalRejectedCount,
+    normalComparisonCount,
+    normalCompatibilityPassCount,
+    normalAngleSumRadians,
   }
 }
 
@@ -603,6 +862,18 @@ function findCompatibleCell(
  */
 export class SpatialCoverageService {
   private readonly cells = new Map<string, CoverageCell>()
+
+  /** Fine geometry buckets may contain more than one surface at a corner. */
+  private readonly cellBuckets = new Map<string, CoverageCell[]>()
+
+  /**
+   * Confidence lives in a coarser local surface neighborhood than the
+   * 5 cm geometry index. Each bucket can hold a few coplanar regions so a
+   * wall/ceiling corner is not merged merely because it shares a bucket.
+   */
+  private readonly coverageRegions = new Map<string, CoverageRegion>()
+
+  private readonly coverageRegionBuckets = new Map<string, CoverageRegion[]>()
 
   private readonly mappingObservations: SpatialPointObservation[] = []
 
@@ -616,6 +887,15 @@ export class SpatialCoverageService {
 
   /** One raw 5 cm world bucket is considered at most once per mapping update. */
   private readonly currentMappingCellKeys = new Set<string>()
+
+  /** A local coverage region receives at most one confidence event per update. */
+  private readonly currentFrameRegionKeys = new Set<string>()
+
+  private normalCompatibilityCandidateCount = 0
+
+  private normalCompatibilityPassCount = 0
+
+  private normalAngleSumRadians = 0
 
   private diagnostics = createInitialCoverageDebug()
 
@@ -743,6 +1023,14 @@ export class SpatialCoverageService {
     currentFrameKeys.clear()
     const currentMappingCellKeys = this.currentMappingCellKeys
     currentMappingCellKeys.clear()
+    const currentFrameRegionKeys = this.currentFrameRegionKeys
+    currentFrameRegionKeys.clear()
+
+    // Rates below use the samples that survive the per-update 5 cm spatial
+    // deduplication, which is the actual bounded mapper input.
+    this.diagnostics.incomingMeasuredSampleCount = 0
+    let compatibleCandidateTotal = 0
+    let distinctAcceptedThisUpdate = 0
 
     for (const observation of observationsByGridIndex.values()) {
       const gridIndex = getGridIndex(
@@ -758,6 +1046,7 @@ export class SpatialCoverageService {
         continue
       }
       currentMappingCellKeys.add(mappingCellKey)
+      this.diagnostics.incomingMeasuredSampleCount += 1
       const normalResult = getSurfaceNormal(
         observation,
         observationsByGridIndex,
@@ -772,11 +1061,21 @@ export class SpatialCoverageService {
       }
 
       const surfaceMatch = findCompatibleCell(
-        this.cells,
+        this.cellBuckets,
         observation.point,
         normalResult.normal,
       )
+      this.diagnostics.samplesRejectedByDistance += surfaceMatch.distanceRejectedCount
+      this.diagnostics.samplesRejectedByPointToPlane +=
+        surfaceMatch.pointToPlaneRejectedCount
+      this.diagnostics.samplesRejectedByNormalCompatibility +=
+        surfaceMatch.normalRejectedCount
+      compatibleCandidateTotal += surfaceMatch.compatibleCandidateCount
+      this.normalCompatibilityCandidateCount += surfaceMatch.normalComparisonCount
+      this.normalCompatibilityPassCount += surfaceMatch.normalCompatibilityPassCount
+      this.normalAngleSumRadians += surfaceMatch.normalAngleSumRadians
       if (surfaceMatch.cell) {
+        this.diagnostics.matchedExistingSurfaceSampleCount += 1
         if (surfaceMatch.cell.state === 'observed') {
           this.diagnostics.matchedObservedSurfelCount += 1
         } else if (surfaceMatch.cell.state === 'partial') {
@@ -799,8 +1098,8 @@ export class SpatialCoverageService {
         this.diagnostics.rejectedDuplicateObservationCount += 1
         continue
       }
-      const key = surfaceMatch.cell?.key ?? getCellKey(coordinates)
-      currentGridKeys.set(gridIndex, key)
+      const bucketKey = getCellKey(coordinates)
+      const key = surfaceMatch.cell?.key ?? this.getAvailableCellKey(bucketKey)
 
       const existingCell = surfaceMatch.cell
       const isDuplicateInCurrentFrame = currentFrameKeys.has(key)
@@ -813,13 +1112,46 @@ export class SpatialCoverageService {
           continue
         }
 
+        const regionMatch = findCompatibleCoverageRegion(
+          this.coverageRegionBuckets,
+          observation.point,
+          normalResult.normal,
+        )
+        this.diagnostics.samplesRejectedByDistance += regionMatch.distanceRejectedCount
+        this.diagnostics.samplesRejectedByPointToPlane +=
+          regionMatch.pointToPlaneRejectedCount
+        this.diagnostics.samplesRejectedByNormalCompatibility +=
+          regionMatch.normalRejectedCount
+        compatibleCandidateTotal += regionMatch.compatibleCandidateCount
+        this.normalCompatibilityCandidateCount += regionMatch.normalComparisonCount
+        this.normalCompatibilityPassCount += regionMatch.normalCompatibilityPassCount
+        this.normalAngleSumRadians += regionMatch.normalAngleSumRadians
+        let region = regionMatch.region
+        let createdRegion = false
+        if (!region) {
+          region = this.createCoverageRegion(
+            observation.point,
+            normalResult.normal,
+            cameraPosition,
+            cameraDirection,
+            timestamp,
+          )
+          createdRegion = region !== null
+        }
+        if (!region) {
+          this.diagnostics.capacityRejectedSampleCount += 1
+          this.diagnostics.capacityReached = true
+          continue
+        }
+
         const cell: CoverageCell = {
           key,
+          coverageRegionKey: region.key,
           center: getCellCenter(coordinates),
           representativePosition: { ...observation.point },
           representativeNormal: normalResult.normal,
-          observationCount: OBSERVED_THRESHOLD,
-          state: 'observed',
+          observationCount: region.observationCount,
+          state: region.state,
           firstObservedAt: timestamp,
           lastObservedAt: timestamp,
           lastAcceptedCameraPosition: { ...cameraPosition },
@@ -828,21 +1160,49 @@ export class SpatialCoverageService {
             : null,
         }
         this.cells.set(key, cell)
+        this.addCellToSpatialBucket(bucketKey, cell)
         this.incrementStateCount(cell.state)
+        region.memberCellKeys.add(cell.key)
+        currentGridKeys.set(gridIndex, key)
         this.diagnostics.newCellsCreatedCount += 1
-        this.diagnostics.acceptedObservationCount += 1
-        continue
+        this.diagnostics.newSurfaceCreationCount += 1
+        if (createdRegion) {
+          currentFrameRegionKeys.add(region.key)
+          this.diagnostics.acceptedObservationCount += 1
+          this.diagnostics.distinctObservationAcceptedCount += 1
+          distinctAcceptedThisUpdate += 1
+          continue
+        }
       }
+
+      currentGridKeys.set(gridIndex, key)
 
       if (isDuplicateInCurrentFrame) {
         this.diagnostics.rejectedDuplicateObservationCount += 1
         continue
       }
 
+      const region = this.getOrCreateCoverageRegionForCell(
+        existingCell ?? this.cells.get(key)!,
+        observation.point,
+        normalResult.normal,
+      )
+      if (!region) {
+        this.diagnostics.capacityRejectedSampleCount += 1
+        this.diagnostics.capacityReached = true
+        continue
+      }
+
+      if (currentFrameRegionKeys.has(region.key)) {
+        this.diagnostics.rejectedDuplicateObservationCount += 1
+        continue
+      }
+      currentFrameRegionKeys.add(region.key)
+
       const viewpointChange = getViewpointChange(
-        existingCell.lastAcceptedCameraPosition,
+        region.lastAcceptedCameraPosition,
         cameraPosition,
-        existingCell.lastAcceptedCameraDirection,
+        region.lastAcceptedCameraDirection,
         cameraDirection,
       )
       if (!viewpointChange.meaningful) {
@@ -853,36 +1213,74 @@ export class SpatialCoverageService {
           this.diagnostics.observationsRejectedInsufficientViewChange += 1
         }
         this.diagnostics.rejectedDuplicateObservationCount += 1
+        this.diagnostics.duplicateViewpointRejectedCount += 1
         continue
       }
 
-      const previousState = existingCell.state
-      this.incrementStateCount(previousState, -1)
-      existingCell.observationCount += 1
-      existingCell.state = getStateForObservationCount(existingCell.observationCount)
-      if (previousState === 'observed' && existingCell.state === 'partial') {
+      const previousState = region.state
+      region.observationCount += 1
+      region.state = getCoverageRegionState(region)
+      if (previousState === 'observed' && region.state === 'partial') {
         this.diagnostics.observedToPartialTransitionCount += 1
-      } else if (previousState === 'partial' && existingCell.state === 'captured') {
+      } else if (previousState === 'partial' && region.state === 'captured') {
         this.diagnostics.partialToCapturedTransitionCount += 1
       }
-      existingCell.lastObservedAt = timestamp
-      existingCell.lastAcceptedCameraPosition = { ...cameraPosition }
-      existingCell.lastAcceptedCameraDirection = cameraDirection
+      region.lastObservedAt = timestamp
+      region.lastAcceptedCameraPosition = { ...cameraPosition }
+      region.lastAcceptedCameraDirection = cameraDirection
         ? { ...cameraDirection }
         : null
-      updateRepresentativePosition(existingCell, observation.point)
-      existingCell.representativeNormal = mergeNormals(
-        existingCell.representativeNormal,
+      updateRepresentativePosition(region, observation.point)
+      region.representativeNormal = mergeNormals(
+        region.representativeNormal,
         normalResult.normal,
       )
-      this.incrementStateCount(existingCell.state)
+      this.synchronizeRegionCells(region)
+      this.updateCellRepresentation(
+        existingCell ?? this.cells.get(key)!,
+        observation.point,
+        normalResult.normal,
+        timestamp,
+      )
       this.diagnostics.acceptedObservationCount += 1
+      this.diagnostics.distinctObservationAcceptedCount += 1
+      distinctAcceptedThisUpdate += 1
+      if (viewpointChange.translationChanged) {
+        this.diagnostics.distinctTranslationQualifiedCount += 1
+      }
+      if (viewpointChange.viewChanged) {
+        this.diagnostics.distinctRotationQualifiedCount += 1
+      }
     }
+
+    const incomingSamples = this.diagnostics.incomingMeasuredSampleCount
+    this.diagnostics.fusionRatio = incomingSamples > 0
+      ? this.diagnostics.matchedExistingSurfaceSampleCount / incomingSamples
+      : null
+    this.diagnostics.existingSurfaceMatchRate = this.diagnostics.fusionRatio
+    this.diagnostics.newSurfaceCreationRate = incomingSamples > 0
+      ? this.diagnostics.newSurfaceCreationCount / incomingSamples
+      : null
+    this.diagnostics.distinctObservationAcceptanceRate = incomingSamples > 0
+      ? distinctAcceptedThisUpdate / incomingSamples
+      : null
+    this.diagnostics.averageCompatibleCandidatesPerSample = incomingSamples > 0
+      ? compatibleCandidateTotal / incomingSamples
+      : 0
+    this.diagnostics.normalCompatibilityPassRate =
+      this.normalCompatibilityCandidateCount > 0
+        ? this.normalCompatibilityPassCount / this.normalCompatibilityCandidateCount
+        : null
+    this.diagnostics.averageNormalAngleDegrees =
+      this.normalCompatibilityPassCount > 0
+        ? (this.normalAngleSumRadians / this.normalCompatibilityPassCount) * (180 / Math.PI)
+        : null
 
     this.diagnostics.currentValidSamples = currentGridKeys.size
     let currentCapturedSamples = 0
     for (const key of currentGridKeys.values()) {
-      if (this.cells.get(key)?.state === 'captured') {
+      const cell = this.cells.get(key)
+      if (cell && this.getCoverageStateForCell(cell) === 'captured') {
         currentCapturedSamples += 1
       }
     }
@@ -903,6 +1301,147 @@ export class SpatialCoverageService {
     return true
   }
 
+  private createCoverageRegion(
+    point: SpatialPoint,
+    normal: SpatialPoint | null,
+    cameraPosition: ViewerPosition,
+    cameraDirection: ViewerDirection | null,
+    timestamp: number,
+  ): CoverageRegion | null {
+    if (this.coverageRegions.size >= MAX_COVERAGE_CELLS) {
+      return null
+    }
+
+    const bucketCoordinates = getCoverageRegionBucketCoordinates(point)
+    const bucketKey = getCoverageRegionBucketKey(bucketCoordinates)
+    const region: CoverageRegion = {
+      key: `${bucketKey}#${this.coverageRegions.size}`,
+      bucketKey,
+      representativePosition: { ...point },
+      representativeNormal: normal ? { ...normal } : null,
+      observationCount: OBSERVED_THRESHOLD,
+      state: 'observed',
+      firstObservedAt: timestamp,
+      lastObservedAt: timestamp,
+      lastAcceptedCameraPosition: { ...cameraPosition },
+      lastAcceptedCameraDirection: cameraDirection ? { ...cameraDirection } : null,
+      memberCellKeys: new Set<string>(),
+    }
+    this.coverageRegions.set(region.key, region)
+    const bucket = this.coverageRegionBuckets.get(bucketKey)
+    if (bucket) {
+      bucket.push(region)
+    } else {
+      this.coverageRegionBuckets.set(bucketKey, [region])
+    }
+    return region
+  }
+
+  private createCoverageRegionFromCell(cell: CoverageCell): CoverageRegion | null {
+    const region = this.createCoverageRegion(
+      cell.representativePosition,
+      cell.representativeNormal,
+      cell.lastAcceptedCameraPosition,
+      cell.lastAcceptedCameraDirection,
+      cell.lastObservedAt,
+    )
+    if (!region) {
+      return null
+    }
+
+    region.observationCount = cell.observationCount
+    region.state = cell.state
+    region.firstObservedAt = cell.firstObservedAt
+    region.lastObservedAt = cell.lastObservedAt
+    return region
+  }
+
+  private getOrCreateCoverageRegionForCell(
+    cell: CoverageCell,
+    point: SpatialPoint,
+    normal: SpatialPoint | null,
+  ): CoverageRegion | null {
+    const linkedRegion = this.coverageRegions.get(cell.coverageRegionKey)
+    if (linkedRegion) {
+      linkedRegion.memberCellKeys.add(cell.key)
+      return linkedRegion
+    }
+
+    const nearbyRegion = findCompatibleCoverageRegion(
+      this.coverageRegionBuckets,
+      point,
+      normal,
+    ).region
+    const region = nearbyRegion ?? this.createCoverageRegionFromCell(cell)
+    if (!region) {
+      return null
+    }
+
+    this.attachCellToRegion(cell, region)
+    return region
+  }
+
+  private attachCellToRegion(cell: CoverageCell, region: CoverageRegion): void {
+    region.memberCellKeys.add(cell.key)
+    cell.coverageRegionKey = region.key
+    if (cell.state !== region.state) {
+      this.incrementStateCount(cell.state, -1)
+      cell.state = region.state
+      this.incrementStateCount(cell.state)
+    }
+    cell.observationCount = region.observationCount
+    cell.lastObservedAt = region.lastObservedAt
+  }
+
+  private synchronizeRegionCells(region: CoverageRegion): void {
+    for (const cellKey of region.memberCellKeys) {
+      const cell = this.cells.get(cellKey)
+      if (!cell) {
+        continue
+      }
+
+      if (cell.state !== region.state) {
+        this.incrementStateCount(cell.state, -1)
+        cell.state = region.state
+        this.incrementStateCount(cell.state)
+      }
+      cell.observationCount = region.observationCount
+      cell.lastObservedAt = region.lastObservedAt
+    }
+  }
+
+  private updateCellRepresentation(
+    cell: CoverageCell,
+    point: SpatialPoint,
+    normal: SpatialPoint | null,
+    timestamp: number,
+  ): void {
+    updateRepresentativePosition(cell, point)
+    cell.representativeNormal = mergeNormals(cell.representativeNormal, normal)
+    cell.lastObservedAt = timestamp
+  }
+
+  private getCoverageStateForCell(cell: CoverageCell): CoverageCellState {
+    return this.coverageRegions.get(cell.coverageRegionKey)?.state ?? cell.state
+  }
+
+  private getAvailableCellKey(bucketKey: string): string {
+    if (!this.cells.has(bucketKey)) {
+      return bucketKey
+    }
+
+    return `${bucketKey}#${this.cells.size}`
+  }
+
+  private addCellToSpatialBucket(bucketKey: string, cell: CoverageCell): void {
+    const bucket = this.cellBuckets.get(bucketKey)
+    if (bucket) {
+      bucket.push(cell)
+    } else {
+      this.cellBuckets.set(bucketKey, [cell])
+    }
+  }
+
   public getCoverageLookupAtPoint(point: SpatialPoint): CoverageLookupResult {
     if (
       !Number.isFinite(point.x) ||
@@ -913,11 +1452,36 @@ export class SpatialCoverageService {
     }
 
     const coordinates = getCellCoordinates(point)
-    const exactCell = this.cells.get(
+    const exactCandidates = this.cellBuckets.get(
       getCellKeyFromCoordinates(coordinates.x, coordinates.y, coordinates.z),
     )
-    if (exactCell) {
-      return { state: exactCell.state, kind: 'exact' }
+    if (exactCandidates && exactCandidates.length > 0) {
+      let nearestExactCell = exactCandidates[0]
+      let nearestExactDistanceSquared = Number.POSITIVE_INFINITY
+      for (const candidate of exactCandidates) {
+        const delta = subtractPoints(candidate.representativePosition, point)
+        const distanceSquared = dotPoints(delta, delta)
+        if (distanceSquared < nearestExactDistanceSquared) {
+          nearestExactCell = candidate
+          nearestExactDistanceSquared = distanceSquared
+        }
+      }
+      return {
+        state: this.getCoverageStateForCell(nearestExactCell),
+        kind: 'exact',
+      }
+    }
+
+    // Dense samples can land in a neighboring 5 cm bucket because of depth
+    // noise. Resolve the larger coplanar coverage neighborhood before falling
+    // back to the fine geometry-cell index.
+    const nearbyRegion = findCompatibleCoverageRegion(
+      this.coverageRegionBuckets,
+      point,
+      null,
+    ).region
+    if (nearbyRegion) {
+      return { state: nearbyRegion.state, kind: 'neighbor' }
     }
 
     let nearestCell: CoverageCell | null = null
@@ -941,31 +1505,33 @@ export class SpatialCoverageService {
             continue
           }
 
-          const candidate = this.cells.get(
+          const candidates = this.cellBuckets.get(
             getCellKeyFromCoordinates(
               coordinates.x + xOffset,
               coordinates.y + yOffset,
               coordinates.z + zOffset,
             ),
           )
-          if (!candidate) {
+          if (!candidates) {
             continue
           }
 
-          const deltaX = candidate.representativePosition.x - point.x
-          const deltaY = candidate.representativePosition.y - point.y
-          const deltaZ = candidate.representativePosition.z - point.z
-          const distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
-          if (distanceSquared < nearestDistanceSquared) {
-            nearestCell = candidate
-            nearestDistanceSquared = distanceSquared
+          for (const candidate of candidates) {
+            const deltaX = candidate.representativePosition.x - point.x
+            const deltaY = candidate.representativePosition.y - point.y
+            const deltaZ = candidate.representativePosition.z - point.z
+            const distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+            if (distanceSquared < nearestDistanceSquared) {
+              nearestCell = candidate
+              nearestDistanceSquared = distanceSquared
+            }
           }
         }
       }
     }
 
     return nearestCell
-      ? { state: nearestCell.state, kind: 'neighbor' }
+      ? { state: this.getCoverageStateForCell(nearestCell), kind: 'neighbor' }
       : { state: null, kind: 'miss' }
   }
 
@@ -993,6 +1559,32 @@ export class SpatialCoverageService {
     dense: SpatialCoverageDenseDebug,
   ): SpatialCoverageDebug {
     const totalUniqueCells = this.cells.size
+    let surfelsWithOneObservation = 0
+    let surfelsWithTwoObservations = 0
+    let surfelsWithThreeOrMoreObservations = 0
+    for (const cell of this.cells.values()) {
+      if (cell.observationCount === 1) {
+        surfelsWithOneObservation += 1
+      } else if (cell.observationCount === 2) {
+        surfelsWithTwoObservations += 1
+      } else if (cell.observationCount >= 3) {
+        surfelsWithThreeOrMoreObservations += 1
+      }
+    }
+
+    let coverageRegionObservedCount = 0
+    let coverageRegionPartialCount = 0
+    let coverageRegionCapturedCount = 0
+    for (const region of this.coverageRegions.values()) {
+      if (region.state === 'observed') {
+        coverageRegionObservedCount += 1
+      } else if (region.state === 'partial') {
+        coverageRegionPartialCount += 1
+      } else {
+        coverageRegionCapturedCount += 1
+      }
+    }
+
     const statisticsInvariantError =
       this.diagnostics.capturedCells > totalUniqueCells
         ? 'Captured coverage cells exceed total unique coverage cells.'
@@ -1002,6 +1594,13 @@ export class SpatialCoverageService {
       ...this.diagnostics,
       totalUniqueCells,
       capturedCells: Math.min(this.diagnostics.capturedCells, totalUniqueCells),
+      surfelsWithOneObservation,
+      surfelsWithTwoObservations,
+      surfelsWithThreeOrMoreObservations,
+      coverageRegionCount: this.coverageRegions.size,
+      coverageRegionObservedCount,
+      coverageRegionPartialCount,
+      coverageRegionCapturedCount,
       statisticsInvariantError,
       render: { ...render },
       dense: { ...dense },
@@ -1010,12 +1609,19 @@ export class SpatialCoverageService {
 
   public reset(): void {
     this.cells.clear()
+    this.cellBuckets.clear()
+    this.coverageRegions.clear()
+    this.coverageRegionBuckets.clear()
     this.mappingObservations.length = 0
     this.mappingObservationCursor = 0
     this.observationsByGridIndex.clear()
     this.currentGridKeys.clear()
     this.currentFrameKeys.clear()
     this.currentMappingCellKeys.clear()
+    this.currentFrameRegionKeys.clear()
+    this.normalCompatibilityCandidateCount = 0
+    this.normalCompatibilityPassCount = 0
+    this.normalAngleSumRadians = 0
     this.lastProcessedAt = Number.NEGATIVE_INFINITY
     this.transitionRateStartedAt = null
     this.diagnostics = createInitialCoverageDebug()
@@ -1026,6 +1632,14 @@ export class SpatialCoverageService {
   }
 
   private resetCurrentFrameDiagnostics(): void {
+    this.diagnostics.incomingMeasuredSampleCount = 0
+    this.diagnostics.matchedExistingSurfaceSampleCount = 0
+    this.diagnostics.newSurfaceCreationCount = 0
+    this.diagnostics.fusionRatio = null
+    this.diagnostics.averageCompatibleCandidatesPerSample = 0
+    this.diagnostics.existingSurfaceMatchRate = null
+    this.diagnostics.newSurfaceCreationRate = null
+    this.diagnostics.distinctObservationAcceptanceRate = null
     this.diagnostics.currentValidSamples = 0
     this.diagnostics.currentCapturedSamples = 0
     this.diagnostics.currentViewCoverage = null

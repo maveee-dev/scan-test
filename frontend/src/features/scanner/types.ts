@@ -225,6 +225,7 @@ export type CoverageGuidance =
 
 export interface CoverageCell {
   key: string
+  coverageRegionKey: string
   center: SpatialPoint
   representativePosition: SpatialPoint
   representativeNormal: SpatialPoint | null
@@ -306,6 +307,31 @@ export interface SpatialCoverageDebug {
   mappingPhase: number
   mappingUpdateCount: number
   mappingProcessingDurationMs: number
+  incomingMeasuredSampleCount: number
+  matchedExistingSurfaceSampleCount: number
+  newSurfaceCreationCount: number
+  fusionRatio: number | null
+  averageCompatibleCandidatesPerSample: number
+  samplesRejectedByDistance: number
+  samplesRejectedByPointToPlane: number
+  samplesRejectedByNormalCompatibility: number
+  existingSurfaceMatchRate: number | null
+  newSurfaceCreationRate: number | null
+  distinctObservationAcceptanceRate: number | null
+  normalCompatibilityPassRate: number | null
+  averageNormalAngleDegrees: number | null
+  surfelsWithOneObservation: number
+  surfelsWithTwoObservations: number
+  surfelsWithThreeOrMoreObservations: number
+  coverageRegionSupportMeters: number
+  coverageRegionCount: number
+  coverageRegionObservedCount: number
+  coverageRegionPartialCount: number
+  coverageRegionCapturedCount: number
+  distinctObservationAcceptedCount: number
+  distinctTranslationQualifiedCount: number
+  distinctRotationQualifiedCount: number
+  duplicateViewpointRejectedCount: number
   samplesWithNoCompatiblePersistentSurface: number
   matchedObservedSurfelCount: number
   matchedPartialSurfelCount: number

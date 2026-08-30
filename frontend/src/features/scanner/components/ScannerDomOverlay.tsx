@@ -143,6 +143,12 @@ function formatCoveragePercentage(coverage: number | null): string {
   return coverage === null || !Number.isFinite(coverage) ? 'N/A' : `${Math.round(coverage)}%`
 }
 
+function formatCoverageRatio(ratio: number | null): string {
+  return ratio === null || !Number.isFinite(ratio)
+    ? 'N/A'
+    : `${Math.round(ratio * 100)}%`
+}
+
 function formatMeterRange(value: number | null): string {
   return value !== null && Number.isFinite(value) ? `${value.toFixed(2)} m` : 'N/A'
 }
@@ -624,6 +630,62 @@ function ScannerDomOverlay({
                 <strong>{coverage.mappingUpdateCount}</strong>
               </div>
               <div>
+                <span>Incoming measured samples</span>
+                <strong>{coverage.incomingMeasuredSampleCount}</strong>
+              </div>
+              <div>
+                <span>Matched existing surfels</span>
+                <strong>{coverage.matchedExistingSurfaceSampleCount}</strong>
+              </div>
+              <div>
+                <span>New surfels created</span>
+                <strong>{coverage.newSurfaceCreationCount}</strong>
+              </div>
+              <div>
+                <span>Existing-surface match rate</span>
+                <strong>{formatCoverageRatio(coverage.existingSurfaceMatchRate)}</strong>
+              </div>
+              <div>
+                <span>New-surface creation rate</span>
+                <strong>{formatCoverageRatio(coverage.newSurfaceCreationRate)}</strong>
+              </div>
+              <div>
+                <span>Fusion ratio</span>
+                <strong>{formatCoverageRatio(coverage.fusionRatio)}</strong>
+              </div>
+              <div>
+                <span>Avg compatible candidates / sample</span>
+                <strong>{coverage.averageCompatibleCandidatesPerSample.toFixed(2)}</strong>
+              </div>
+              <div>
+                <span>Distinct acceptance rate</span>
+                <strong>{formatCoverageRatio(coverage.distinctObservationAcceptanceRate)}</strong>
+              </div>
+              <div>
+                <span>Distance candidate rejects</span>
+                <strong>{coverage.samplesRejectedByDistance}</strong>
+              </div>
+              <div>
+                <span>Point-to-plane candidate rejects</span>
+                <strong>{coverage.samplesRejectedByPointToPlane}</strong>
+              </div>
+              <div>
+                <span>Normal candidate rejects</span>
+                <strong>{coverage.samplesRejectedByNormalCompatibility}</strong>
+              </div>
+              <div>
+                <span>Normal compatibility pass rate</span>
+                <strong>{formatCoverageRatio(coverage.normalCompatibilityPassRate)}</strong>
+              </div>
+              <div>
+                <span>Average normal angle</span>
+                <strong>
+                  {coverage.averageNormalAngleDegrees === null
+                    ? 'N/A'
+                    : `${coverage.averageNormalAngleDegrees.toFixed(1)}°`}
+                </strong>
+              </div>
+              <div>
                 <span>Unmatched persistent surfaces</span>
                 <strong>{coverage.samplesWithNoCompatiblePersistentSurface}</strong>
               </div>
@@ -672,6 +734,22 @@ function ScannerDomOverlay({
                 <strong>{coverage.acceptedObservationCount}</strong>
               </div>
               <div>
+                <span>Distinct observations accepted</span>
+                <strong>{coverage.distinctObservationAcceptedCount}</strong>
+              </div>
+              <div>
+                <span>Translation-qualified accepts</span>
+                <strong>{coverage.distinctTranslationQualifiedCount}</strong>
+              </div>
+              <div>
+                <span>Rotation-qualified accepts</span>
+                <strong>{coverage.distinctRotationQualifiedCount}</strong>
+              </div>
+              <div>
+                <span>Duplicate viewpoint rejects</span>
+                <strong>{coverage.duplicateViewpointRejectedCount}</strong>
+              </div>
+              <div>
                 <span>New cells created</span>
                 <strong>{coverage.newCellsCreatedCount}</strong>
               </div>
@@ -690,6 +768,32 @@ function ScannerDomOverlay({
               <div>
                 <span>Partial to captured / sec</span>
                 <strong>{coverage.partialToCapturedTransitionsPerSecond.toFixed(2)}</strong>
+              </div>
+              <div>
+                <span>Surfel age 1 observation</span>
+                <strong>{coverage.surfelsWithOneObservation}</strong>
+              </div>
+              <div>
+                <span>Surfel age 2 observations</span>
+                <strong>{coverage.surfelsWithTwoObservations}</strong>
+              </div>
+              <div>
+                <span>Surfel age 3+ observations</span>
+                <strong>{coverage.surfelsWithThreeOrMoreObservations}</strong>
+              </div>
+              <div>
+                <span>Coverage support</span>
+                <strong>{coverage.coverageRegionSupportMeters.toFixed(2)} m</strong>
+              </div>
+              <div>
+                <span>Coverage regions</span>
+                <strong>{coverage.coverageRegionCount}</strong>
+              </div>
+              <div>
+                <span>Region observed / partial / captured</span>
+                <strong>
+                  {coverage.coverageRegionObservedCount} / {coverage.coverageRegionPartialCount} / {coverage.coverageRegionCapturedCount}
+                </strong>
               </div>
               <div>
                 <span>Rejected duplicate / same-view</span>
