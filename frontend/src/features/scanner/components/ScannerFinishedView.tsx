@@ -181,8 +181,11 @@ function StructuralSurfaceSummary({
   const relevantRelationships = interpretation.relationships
     .filter((relationship) => relationship.relationshipType !== 'other')
     .sort((left, right) => right.verticalHorizontalEvidence - left.verticalHorizontalEvidence ||
-      right.proximityScore - left.proximityScore)
+      right.perpendicularityScore - left.perpendicularityScore)
     .slice(0, 6)
+  const selectedSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'selected')
+  const alternateSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'alternate')
+  const unselectedSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'unselected')
 
   return (
     <section className="scanner-analysis-result" aria-labelledby="structural-surfaces-title">
@@ -203,16 +206,20 @@ function StructuralSurfaceSummary({
           <strong>{interpretation.stats.inputSurfaceCount}</strong>
         </div>
         <div>
-          <span>Likely walls</span>
-          <strong>{interpretation.stats.likelyWallCount}</strong>
+          <span>Selected room walls</span>
+          <strong>{interpretation.stats.selectedWallCount}</strong>
         </div>
         <div>
-          <span>Floor candidate</span>
+          <span>Selected floor</span>
           <strong>{interpretation.stats.floorCandidate ?? 'Not confidently observed'}</strong>
         </div>
         <div>
-          <span>Ceiling candidate</span>
+          <span>Selected ceiling</span>
           <strong>{interpretation.stats.ceilingCandidate ?? 'Not confidently observed'}</strong>
+        </div>
+        <div>
+          <span>Alternate structural candidates</span>
+          <strong>{interpretation.stats.alternateWallCount + interpretation.stats.alternateFloorCount + interpretation.stats.alternateCeilingCount}</strong>
         </div>
         <div>
           <span>Other</span>
@@ -225,34 +232,80 @@ function StructuralSurfaceSummary({
       </div>
       <div className="scanner-analysis-timings">
         <span>
-          Reference space: {interpretation.referenceSpaceType} | relationships {interpretation.relationships.length} | timing relationships {interpretation.timings.relationshipAnalysisMs.toFixed(1)} ms | interpretation {interpretation.timings.interpretationMs.toFixed(1)} ms | total {interpretation.timings.totalMs.toFixed(1)} ms
+          Reference space: {interpretation.referenceSpaceType} | wall direction groups {interpretation.stats.wallDirectionGroupCount} | relationships {interpretation.relationships.length} | timing relationships {interpretation.timings.relationshipAnalysisMs.toFixed(1)} ms | interpretation {interpretation.timings.interpretationMs.toFixed(1)} ms | total {interpretation.timings.totalMs.toFixed(1)} ms
         </span>
       </div>
-      <div className="scanner-plane-list">
-        {interpretation.surfaces.map((surface) => (
-          <div className="scanner-plane-row" key={surface.planeId}>
-            <span>
-              <strong>{surface.planeId}</strong>
-              <small>{getStructuralRoleLabel(surface.role)} | confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m</small>
-            </span>
-            <span>
-              area {surface.occupiedArea.toFixed(2)} m2 | support {surface.ownedSupport} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support score {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)}
-            </span>
+      {interpretation.directionGroups.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Direction groups: {interpretation.directionGroups.map((group) => `${group.id} [${group.planeIds.join(', ')}] -> ${group.selectedPlaneId ?? 'alternate'} | spread ${group.normalSpreadDegrees.toFixed(1)} deg | offset span ${group.planeOffsetSpanMeters.toFixed(2)} m`).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+      {selectedSurfaces.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Selected room surfaces</span></div>
+          <div className="scanner-plane-list">
+            {selectedSurfaces.map((surface) => (
+              <StructuralSurfaceRow key={surface.planeId} surface={surface} />
+            ))}
           </div>
-        ))}
-      </div>
+        </>
+      ) : null}
+      {alternateSurfaces.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Alternate structural candidates</span></div>
+          <div className="scanner-plane-list">
+            {alternateSurfaces.map((surface) => (
+              <StructuralSurfaceRow key={surface.planeId} surface={surface} />
+            ))}
+          </div>
+        </>
+      ) : null}
+      {unselectedSurfaces.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Other and uncertain geometry</span></div>
+          <div className="scanner-plane-list">
+            {unselectedSurfaces.map((surface) => (
+              <StructuralSurfaceRow key={surface.planeId} surface={surface} />
+            ))}
+          </div>
+        </>
+      ) : null}
       {relevantRelationships.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>
             Key relationships: {relevantRelationships.map((relationship) => {
               const first = planeById.get(relationship.firstPlaneId)
               const second = planeById.get(relationship.secondPlaneId)
-              return `${relationship.firstPlaneId} (${first ? getStructuralRoleLabel(first.role) : 'surface'}) / ${relationship.secondPlaneId} (${second ? getStructuralRoleLabel(second.role) : 'surface'}) ${relationship.relationshipType}, ${relationship.normalAngleDegrees.toFixed(1)} deg, proximity ${relationship.supportProximityMeters.toFixed(2)} m`
+              const supportDistance = relationship.closestSupportDistanceMeters.toFixed(2)
+              return `${relationship.firstPlaneId} (${first ? getStructuralRoleLabel(first.role) : 'surface'}) / ${relationship.secondPlaneId} (${second ? getStructuralRoleLabel(second.role) : 'surface'}) ${relationship.relationshipType}, angle ${relationship.normalAngleDegrees.toFixed(1)} deg, closest support ${supportDistance} m, ${relationship.supportNearIntersection ? 'supports near intersection' : 'supports not near intersection'}`
             }).join(' | ')}
           </span>
         </div>
       ) : null}
     </section>
+  )
+}
+
+function StructuralSurfaceRow({
+  surface,
+}: {
+  surface: RoomStructureInterpretationResult['surfaces'][number]
+}) {
+  const selectionLabel = surface.selection === 'selected'
+    ? 'Selected'
+    : surface.selection === 'alternate' ? 'Alternate' : 'Not selected'
+  return (
+    <div className={`scanner-plane-row ${surface.selection === 'selected' ? 'scanner-plane-row-selected' : 'scanner-plane-row-secondary'}`}>
+      <span>
+        <strong>{surface.planeId}</strong>
+        <small>{selectionLabel} | {getStructuralRoleLabel(surface.role)} | role confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m | normal ({surface.normal.x.toFixed(2)}, {surface.normal.y.toFixed(2)}, {surface.normal.z.toFixed(2)}) | d {(-surface.planeConstant).toFixed(3)}</small>
+      </span>
+      <span>
+        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)}
+      </span>
+    </div>
   )
 }
 

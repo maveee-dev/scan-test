@@ -472,8 +472,12 @@ Structural room-surface interpretation is the next post-scan stage. It reads
 the final geometric candidates and their bounded relationship graph to assign
 careful likely structural roles such as wall, floor, ceiling, other, or
 unknown. Orientation, size, support, height, and nearby perpendicular geometry
-are evidence rather than guarantees. This stage preserves uncertainty and
-does not yet create plane intersections, a room boundary, or a final room mesh.
+are evidence rather than guarantees. A role candidate is not automatically a
+selected room-envelope surface: compatible same-direction candidates compete
+for a primary representative, while alternate candidates and uncertain
+geometry remain available for later processing. The interpretation preserves
+uncertainty and does not yet create plane intersections, a room boundary, or a
+final room mesh.
 
 The longer-term post-scan direction is:
 

@@ -111,10 +111,16 @@ function addStructuralSurfaces(
     }
     const geometry = createPlaneGeometry(plane)
     const color = STRUCTURAL_SURFACE_COLORS[surface.role]
+    const isSelected = surface.selection === 'selected'
+    const isAlternate = surface.selection === 'alternate'
     const material = new THREE.MeshBasicMaterial({
       color,
       depthWrite: false,
-      opacity: 0.16 + surface.confidence * 0.2,
+      opacity: isSelected
+        ? 0.24 + surface.confidence * 0.24
+        : isAlternate
+          ? 0.08 + surface.confidence * 0.1
+          : 0.05 + surface.confidence * 0.06,
       side: THREE.DoubleSide,
       transparent: true,
     })
@@ -122,7 +128,11 @@ function addStructuralSurfaces(
     const outlineGeometry = new THREE.EdgesGeometry(geometry)
     const outlineMaterial = new THREE.LineBasicMaterial({
       color,
-      opacity: 0.45 + surface.confidence * 0.35,
+      opacity: isSelected
+        ? 0.8 + surface.confidence * 0.15
+        : isAlternate
+          ? 0.28 + surface.confidence * 0.18
+          : 0.18 + surface.confidence * 0.12,
       transparent: true,
     })
     const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial)

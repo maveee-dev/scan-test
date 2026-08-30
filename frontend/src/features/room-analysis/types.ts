@@ -91,6 +91,8 @@ export type StructuralSurfaceRole = 'wall' | 'floor' | 'ceiling' | 'other' | 'un
 
 export type StructuralRelationshipType = 'parallel' | 'perpendicular-like' | 'other'
 
+export type StructuralSurfaceSelection = 'selected' | 'alternate' | 'unselected'
+
 export interface StructuralSurfaceEvidence {
   readonly orientationScore: number
   readonly sizeScore: number
@@ -103,11 +105,16 @@ export interface StructuralSurfaceEvidence {
 export interface StructuralSurfaceCandidate {
   readonly planeId: string
   readonly role: StructuralSurfaceRole
+  /** Role evidence is kept separate from whether this surface won room-envelope selection. */
+  readonly selection: StructuralSurfaceSelection
   readonly confidence: number
   readonly evidence: StructuralSurfaceEvidence
   readonly centroid: SpatialPoint
   readonly centroidHeight: number
   readonly occupiedArea: number
+  /** Exclusive support copied from the final physical-surface consensus. */
+  readonly finalOwnedSupport: number
+  /** @deprecated Use finalOwnedSupport; retained as a compatibility alias. */
   readonly ownedSupport: number
   readonly normal: SpatialPoint
   readonly planeConstant: number
@@ -127,17 +134,45 @@ export interface StructuralSurfaceRelationship {
   readonly planeOffsetDifferenceMeters: number
   readonly centroidDistanceMeters: number
   readonly centroidHeightDifferenceMeters: number
+  /** Gap between the finite world-space support bounds. */
+  readonly supportBoundsGapMeters: number
+  /** Bounded closest-support approximation; for parallel planes it includes plane separation. */
+  readonly closestSupportDistanceMeters: number
+  /** @deprecated Use closestSupportDistanceMeters. */
   readonly supportProximityMeters: number
   readonly proximityScore: number
+  readonly perpendicularityScore: number
+  readonly parallelismScore: number
   readonly relationshipType: StructuralRelationshipType
   readonly planeIntersectionPossible: boolean
+  /** Whether finite support is close enough to a mathematical intersection to be meaningful. */
+  readonly supportNearIntersection: boolean
   readonly verticalHorizontalEvidence: number
+}
+
+export interface StructuralDirectionGroup {
+  readonly id: string
+  readonly role: 'wall' | 'floor' | 'ceiling'
+  readonly planeIds: readonly string[]
+  readonly selectedPlaneId: string | null
+  readonly representativeNormal: SpatialPoint
+  readonly normalSpreadDegrees: number
+  readonly planeOffsetSpanMeters: number
 }
 
 export interface RoomStructureInterpretationResult {
   readonly sourceScanId: string
   readonly referenceSpaceType: 'local-floor' | 'local'
   readonly surfaces: readonly StructuralSurfaceCandidate[]
+  /** Selected room-envelope surfaces, kept distinct from role evidence. */
+  readonly selectedWalls: readonly StructuralSurfaceCandidate[]
+  readonly selectedFloor: StructuralSurfaceCandidate | null
+  readonly selectedCeiling: StructuralSurfaceCandidate | null
+  readonly alternateWallCandidates: readonly StructuralSurfaceCandidate[]
+  readonly alternateFloorCandidates: readonly StructuralSurfaceCandidate[]
+  readonly alternateCeilingCandidates: readonly StructuralSurfaceCandidate[]
+  readonly directionGroups: readonly StructuralDirectionGroup[]
+  /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
   readonly ceilingCandidate: StructuralSurfaceCandidate | null
@@ -146,7 +181,15 @@ export interface RoomStructureInterpretationResult {
   readonly relationships: readonly StructuralSurfaceRelationship[]
   readonly stats: {
     readonly inputSurfaceCount: number
+    readonly roleCandidateCount: number
     readonly likelyWallCount: number
+    readonly selectedWallCount: number
+    readonly alternateWallCount: number
+    readonly selectedFloorCount: number
+    readonly alternateFloorCount: number
+    readonly selectedCeilingCount: number
+    readonly alternateCeilingCount: number
+    readonly wallDirectionGroupCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number

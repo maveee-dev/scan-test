@@ -383,6 +383,15 @@
   line-height: 1.4;
 }
 
+.scanner-plane-row-selected {
+  border-left-color: var(--acid);
+}
+
+.scanner-plane-row-secondary {
+  border-left-color: var(--dim);
+  opacity: 0.78;
+}
+
 .scanner-plane-row > span {
   display: flex;
   flex-direction: column;
