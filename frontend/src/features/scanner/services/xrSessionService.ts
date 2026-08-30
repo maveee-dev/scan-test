@@ -487,8 +487,16 @@ export class XRSessionService {
           const denseMesh = this.denseSurfaceMaskService.build(
             densePointFrame,
             this.spatialCoverageService,
+            time,
           )
           this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
+          this.lastDenseMaskUpdatedAt = time
+        } else {
+          const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(
+            this.spatialCoverageService,
+            time,
+          )
+          this.spatialCoverageRenderService.updateDenseMesh(cachedDenseMesh)
           this.lastDenseMaskUpdatedAt = time
         }
       }

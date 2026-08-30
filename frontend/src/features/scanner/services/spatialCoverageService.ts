@@ -17,6 +17,7 @@ import {
   DENSE_MASK_ROWS,
   COVERAGE_VISUAL_OPACITY,
   COVERAGE_VISUAL_PATCH_SIZE_METERS,
+  DENSE_VISUAL_STABILIZATION_CONFIG,
 } from './spatialCoverageVisualConfig'
 
 /** A 5 cm cell gives the persistent mask enough spatial detail for fine reveal. */
@@ -104,6 +105,16 @@ function createInitialDenseDebug(): SpatialCoverageDenseDebug {
     worldBounds: null,
     representativeSamples: [],
     updateCount: 0,
+    updateRateHz: 0,
+    processingDurationMs: 0,
+    visualCacheEntryCount: 0,
+    visualCacheMaxEntries: DENSE_VISUAL_STABILIZATION_CONFIG.maxCacheEntries,
+    visualCacheHitCount: 0,
+    visualCacheRefreshCount: 0,
+    visualCacheExpirationCount: 0,
+    visualHoleFillSampleCount: 0,
+    visualHoleFillRejectCount: 0,
+    smoothedVisualFragmentCount: 0,
   }
 }
 

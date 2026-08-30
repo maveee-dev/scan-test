@@ -270,6 +270,16 @@ export interface SpatialCoverageDenseDebug {
   worldBounds: SpatialBounds | null
   representativeSamples: DenseSpatialDiagnosticSample[]
   updateCount: number
+  updateRateHz: number
+  processingDurationMs: number
+  visualCacheEntryCount: number
+  visualCacheMaxEntries: number
+  visualCacheHitCount: number
+  visualCacheRefreshCount: number
+  visualCacheExpirationCount: number
+  visualHoleFillSampleCount: number
+  visualHoleFillRejectCount: number
+  smoothedVisualFragmentCount: number
 }
 
 export interface SpatialCoverageDebug {

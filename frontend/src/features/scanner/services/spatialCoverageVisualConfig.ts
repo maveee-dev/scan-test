@@ -19,3 +19,16 @@ export const COVERAGE_VISUAL_COLORS: Record<CoverageCellState, readonly [number,
   partial: [0.38, 0.78, 0.94],
   captured: [0.56, 0.9, 1],
 }
+
+/** Short-lived presentation-only stabilization; never enters persistent scan data. */
+export const DENSE_VISUAL_STABILIZATION_CONFIG = {
+  cacheLifetimeMs: 220,
+  maxCacheEntries: 6_000,
+  smoothingAlpha: 0.35,
+  smoothingMaxDistanceMeters: 0.06,
+  smoothingMaxPointToPlaneMeters: 0.035,
+  smoothingMinNormalDot: Math.cos((35 * Math.PI) / 180),
+  holeFillMinNeighbors: 3,
+  holeFillMaxDepthSpreadMeters: 0.12,
+  holeFillMaxNeighborSpanMeters: 0.16,
+} as const

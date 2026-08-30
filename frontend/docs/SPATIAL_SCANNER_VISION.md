@@ -1,479 +1,406 @@
 # Spatial Scanner Vision
 
-## Product Vision
+## Product vision
 
 The goal is to build a browser-based spatial room scanner for a hardware-store room customization system.
 
 The scanner should eventually allow a user to:
 
-1. Open the web application on a supported smartphone.
-2. Scan a real physical room using the normal phone camera.
-3. Receive real-time visual feedback showing which physical areas have already been scanned.
-4. Generate a spatial representation of the room.
-5. Convert that scan into a usable 3D room model.
-6. Customize the room using actual hardware-store products such as:
+1. Open the application on a supported smartphone.
+2. Scan a real physical room through the phone camera.
+3. Receive spatially anchored feedback while surfaces are being scanned.
+4. Review the captured spatial data.
+5. Process that data into a simplified 3D room representation.
+6. Customize identified room surfaces with hardware-store products such as paint, tiles, cabinets, shelves, and fixtures.
+7. Estimate material quantities and project cost.
 
-   * wall paint
-   * floor tiles
-   * wall tiles
-   * cabinets
-   * fixtures
-   * shelves
-   * selected furniture/products
-7. Estimate material quantities.
-8. Estimate project cost.
+The system does not require LiDAR. The primary target is an ordinary supported Android smartphone with camera-based tracking and WebXR depth sensing.
 
-The system must not require LiDAR.
+The current phase is the browser-side spatial scanning foundation. Room understanding, persistence, product customization, and cost estimation are later capabilities.
 
-The primary target is ordinary supported smartphones using camera-based spatial tracking and depth estimation.
+## Scanner experience
 
----
+The scanner should feel like a professional spatial scanning tool in the important UX sense: the user sees clear feedback about physical areas that still need scanning, and that feedback belongs to the room rather than to the phone display.
 
-# Scanner Experience
+This is a UX reference concept only. The application does not copy any proprietary implementation or interface.
 
-The scanner should feel similar in concept to professional spatial scanning applications such as Polycam.
+During a normal scan:
 
-This does NOT mean copying Polycam's proprietary implementation or interface.
+- the live camera remains dominant;
+- a compact HUD shows scanning, tracking, depth, current-view coverage, and essential actions;
+- Finish Scan and Cancel remain accessible inside the immersive AR DOM overlay;
+- development diagnostics stay behind Debug mode;
+- the user receives guidance based on real tracking and coverage state.
 
-The important interaction concept is:
+The normal scanning experience does not require scrolling.
 
-> As the user scans the environment, already-captured physical surfaces become visually marked in the AR camera view.
+## Current scanner pipeline
 
-The scan visualization must be attached to the physical environment.
+The current architectural direction is:
 
-It must NOT behave like a fixed progress grid drawn on top of the phone screen.
+```text
+Phone camera
++
+WebXR / ARCore tracking
++
+depth
+        ↓
+dense live spatial geometry
+        ↓
+world-anchored progressive scan mask
+        ↓
+fused persistent surface observations
+        ↓
+Finish Scan
+        ↓
+FinalizedSpatialScan
+        ↓
+room-structure processing
+        ↓
+walls / floor / ceiling / dimensions
+        ↓
+simplified editable 3D room
+        ↓
+paint / tiles / store products
+        ↓
+material quantity + cost estimation
+```
 
----
+The proven browser-side pipeline is:
 
-# Desired Coverage Behavior
+```text
+immersive-ar
+→ camera passthrough
+→ XR reference space
+→ viewer pose tracking
+→ CPU depth sensing where granted
+→ metric depth samples
+→ world-space SpatialPoints
+→ dense world-space surface geometry
+→ persistent fused spatial observations
+```
 
-Example:
+## Persistent scan representation
 
-The user points the phone at a wall.
+Persistent scan data is a fused world-space surface representation. Conceptually:
 
-As the user moves the phone around and sufficiently observes the surface:
+```text
+real measured depth observations
+        ↓
+world-space points
+        ↓
+surface-normal estimation
+        ↓
+spatial lookup / fusion
+        ↓
+stable persistent surface elements
+```
 
-* parts of the physical wall become marked as captured
-* uncaptured regions remain visually different
-* the boundary between captured and uncaptured regions progressively moves as scanning continues
+A persistent surface element may contain:
 
-If the user moves the phone:
+- representative world position;
+- representative surface normal;
+- observation count and coverage state;
+- first and most recent observation time;
+- lightweight distinct-viewpoint information used to prevent stationary-frame completion.
 
-* the captured visualization stays attached to the wall
-* it does not remain fixed to the display
+The domain states are:
 
-If the user turns away:
+```text
+unknown
+→ observed
+→ partial
+→ captured
+```
 
-* the captured wall leaves the camera view naturally
+The internal spatial grid or hash is implementation and data infrastructure. It supports spatial indexing, persistent lookup, confidence, fusion, revisit memory, bounded storage, and finalized scan data. It is not the primary user-facing visualization.
 
-If the user returns to the same wall:
+The internal index must not be presented as large visible squares, checkerboards, horizontal rows, a fixed display grid, or a screen-space progress meter. Repeated measurements of the same physical surface should be fused into stable nearby surface elements instead of becoming unrelated layers of XYZ cells.
 
-* the previously scanned areas should appear captured again
+## Live visualization and persistent data are separate
 
-This behavior is essential.
+Live visualization intentionally has a different resolution and lifetime from persistent mapping:
 
----
+```text
+CURRENT WebXR depth
+        ↓
+dense reconstructed surface geometry
+        ↓
+temporary world-anchored blue surface mask
+```
 
-# World-Space, Not Screen-Space
+At the same time:
 
-The application should distinguish between:
+```text
+persistent fused spatial surfaces
+        ↓
+coverage confidence and spatial memory
+```
 
-## Screen-space visualization
+The live mask is generated from current measured depth geometry. It is not rendered directly from large persistent coverage cells and is not a fixed HTML, CSS, or screen-space effect.
 
-A fixed grid or overlay that stays at the same location on the display.
+Temporary visual geometry may be rebuilt or discarded as the current XR frame changes. It must not create persistent scan data, increase confidence, or become part of `FinalizedSpatialScan` unless supported by real spatial observations.
 
-This is NOT the desired final scanning experience.
+## Progressive reveal behavior
 
-## World-space visualization
+The intended feedback model is:
 
-Coverage information stored using real XR spatial coordinates and rendered back into the AR environment.
+```text
+new / insufficiently scanned surface
+→ strongest blue
 
-This IS the desired behavior.
-
-Conceptually:
-
-camera depth sample
-→ 3D SpatialPoint
-→ world-space coverage cell
-→ coverage confidence
-→ world-anchored visualization
-
-The user's screen is only a window into the environment.
-
-Coverage belongs to the environment itself.
-
----
-
-# Coverage Appearance
-
-The desired effect is similar to a surface mask progressively covering scanned geometry.
-
-Conceptually:
-
-Unscanned:
-
-░░░░░░░░░░░░
-
-Partially scanned:
-
-██████░░░░░░
-
-Mostly scanned:
-
-██████████░░
-
-Captured:
-
-████████████
-
-The exact rendering does not need to match these characters or any specific application's colors.
-
-The key requirement is that captured areas are visually distinguishable and remain spatially anchored.
-
----
-
-# Coverage Confidence
-
-An area must not become fully captured simply because it was visible for several consecutive frames.
-
-Coverage confidence should represent meaningful observations.
-
-Current concept:
-
-1 accepted observation:
 observed
+→ medium blue
 
-2 accepted observations:
 partial
+→ faint blue
 
-3 or more distinct observations:
 captured
+→ transparent
+→ true camera color revealed
+```
 
-A repeated observation should preferably require meaningful camera displacement and eventually may also consider viewing direction.
+Blue means:
 
-This exists so simply holding the phone still does not complete a scan.
+> This physical surface still needs additional scanning.
 
----
+Transparent means:
 
-# Current View Coverage
+> This physical area has been sufficiently captured.
+
+The underlying captured surface remains stored after its blue mask disappears. Returning to that physical area therefore reveals the camera image again without resetting its scan state.
+
+New valid geometry must be eligible for a temporary blue candidate mask even before a persistent element exists. A missing persistent lookup means the physical sample is new or insufficiently known; it does not mean that the sample should be transparent.
+
+The live mask uses a fine, dense surface representation. It should appear mostly continuous, preserve a subtle pixelated or surfel-like frontier, and follow actual physical geometry. It should not look like separated large squares, obvious rows, or a regular screen grid.
+
+The visual treatment is a subtle light blue/cyan translucent mask. Captured areas have no meaningful blue mask, while observed and partial areas retain progressively lower-intensity feedback. Exact opacity, color, resolution, and patch-size tuning belong in implementation configuration rather than this vision document.
+
+## World anchoring
+
+World anchoring is a core scanner requirement.
+
+The live mask is rendered through the same immersive XR presentation as the scan data:
+
+```text
+XRSession
+→ session.requestAnimationFrame()
+→ XRFrame
+→ XRViewerPose
+→ XRView
+→ XRWebGLLayer
+```
+
+Dense surface vertices are reconstructed in the active XR reference-space coordinate system. Rendering uses the actual XR view projection, view transform, and viewport for each view. The mask therefore participates in the same spatial coordinate system as the measured points and remains stationary in the room while the camera moves.
+
+If a physical wall is scanned:
+
+1. its mask exists at that real-world location;
+2. moving the phone changes where the wall appears on the display;
+3. the mask stays attached to the wall;
+4. turning away moves the wall and mask out of view naturally;
+5. returning to the wall restores the appropriate captured, partial, or observed state.
+
+The phone screen is only a view into the spatial environment. Coverage does not belong to screen coordinates.
+
+## Dense physical-surface mask
+
+The live mask is built from current depth-derived world points. Neighboring valid points may form local triangles or another bounded batched surface representation when their geometry is spatially compatible.
+
+Each visual element is positioned from measured world-space geometry and may carry the coverage state resolved from the persistent fused representation. A new or unresolved sample receives the strongest temporary scan mask; a captured sample is transparent.
+
+The surface representation must:
+
+- follow real depth geometry;
+- remain attached to the active XR reference space;
+- follow corners and depth changes without semantic wall or ceiling recognition;
+- preserve natural object silhouettes and physical boundaries;
+- reject connections across unrelated depth surfaces;
+- avoid stretching geometry between near furniture and a distant wall;
+- remain readable and translucent over camera passthrough.
+
+The application does not yet identify whether a surface is a wall, floor, ceiling, furniture, or another object. It only represents measured spatial surfaces.
+
+## Surface confidence and distinct observations
+
+Coverage confidence represents meaningful observation of a physical surface, not elapsed time and not the number of consecutive frames.
+
+Conceptually:
+
+```text
+unknown
+→ observed
+→ partial
+→ captured
+```
+
+Repeated observations may consider:
+
+- camera translation;
+- viewing-direction change;
+- spatial proximity to the prior surface element;
+- surface-normal compatibility;
+- distance from the representative surface plane.
+
+Holding the phone still must not complete a scan. A useful new observation requires a meaningful viewpoint change, while realistic depth noise should not prevent the same physical surface neighborhood from progressing.
+
+The exact translation, rotation, fusion, and discontinuity thresholds are implementation configuration. They may be tuned using physical-device testing without changing the product meaning of the states.
+
+## Surface fusion
+
+Depth measurements contain noise. When new observations are spatially close and approximately coplanar with a previously observed surface, they should be fused into the same persistent surface neighborhood.
+
+Fusion must remain conservative around real geometry boundaries. It must avoid incorrectly combining:
+
+- a wall and ceiling;
+- near furniture and a far wall;
+- different sides of a corner;
+- unrelated nearby surfaces.
+
+Surface-normal directions must be made consistent before smoothing or averaging. The persistent representation should retain representative position and normal information without storing every historical depth point.
+
+This fused spatial representation is the future input for room-structure processing.
+
+## Temporal visual stabilization
+
+The live scan mask may use short-lived visual stabilization to make the feedback readable, including:
+
+- temporary world-space visual caching;
+- conservative small-hole interpolation;
+- modest temporal smoothing;
+- short-lived visual hysteresis.
+
+These techniques affect presentation only. They must not:
+
+- create persistent scan data;
+- increase coverage confidence;
+- mark a surface captured;
+- enter `FinalizedSpatialScan`.
+
+Only real measured spatial observations can affect persistent scan state.
+
+## Current View Coverage
 
 The scanner may show:
 
+```text
 Current View Coverage: XX%
+```
 
-This percentage means:
+This means:
 
+```text
 captured valid spatial samples currently visible
 /
-all valid spatial samples currently visible
+all valid current spatial samples
+```
 
-It does NOT mean:
+It is a current-view scanning indicator only. It does not mean:
 
-* room completion
-* overall scan completion
-* percentage of the entire room captured
+- overall room progress;
+- percentage of the room reconstructed;
+- room completion;
+- percentage of the entire room captured.
 
-Until the system understands the complete room boundary, it must not claim an overall room percentage.
+When no valid current samples exist, the value is `N/A`. Overall completion requires later understanding of the room boundary and expected surfaces.
 
----
+## Finish Scan and FinalizedSpatialScan
 
-# Future Room Completion
+`Finish Scan` stops accepting new observations, copies the persistent fused spatial representation into an independent `FinalizedSpatialScan`, ends the XR session, and clears live scanner resources.
 
-A future milestone may determine:
+The finalized representation contains application data only, such as:
 
-* walls
-* floor
-* ceiling
-* room boundaries
-* room dimensions
-* doors
-* windows
+- scan identifier and timestamps;
+- duration;
+- reference-space type;
+- independent serializable surface positions and normals;
+- coverage states and observation counts;
+- final stored-surface statistics.
 
-Once the room's expected surfaces are known, the system may calculate overall room scan completion.
+It does not contain `XRSession`, `XRFrame`, `XRView`, `XRReferenceSpace`, WebGL resources, Three.js objects, DOM elements, or service references.
 
-Do not introduce this prematurely.
+The lifecycle distinction is:
 
----
+```text
+LIVE SCANNING
 
-# Spatial Reconstruction Goal
+real depth
+├── persistent fused surfaces ──────► FinalizedSpatialScan
+│
+└── temporary dense visual mask ────► discarded on finish
+```
 
-The scanner should eventually produce a simplified, editable 3D representation of the room.
+Cancel Scan ends the session and discards active scan data without creating a finalized snapshot. Starting a new scan begins with an empty active coverage representation.
 
-The goal is NOT necessarily to create a photorealistic scan containing every object.
+## Finished scan preview
 
-For the hardware-store system, the most important geometry is:
+The finished state may show an interactive `Spatial Scan Preview` based only on `FinalizedSpatialScan` data. It can support review controls such as orbit, zoom, and reset view and can frame itself from the finalized spatial bounds.
 
-* walls
-* floor
-* ceiling
-* room dimensions
-* doors
-* windows
-* major permanent structures
+The preview represents:
 
-Temporary objects such as:
+> Captured Spatial Data
 
-* clothes
-* bags
-* movable chairs
-* clutter
+It is not yet:
 
-do not need to become permanent editable room geometry.
+- a reconstructed room;
+- a clean wall model;
+- a digital twin;
+- a final architectural model.
 
----
+An empty finalized scan should show an explanatory empty state instead of an empty 3D scene.
 
-# Why a Simplified Room Model Is Preferred
+Later processing will use the finalized spatial representation to identify major planes, walls, floor, ceiling, room boundaries, and dimensions, then generate a simplified editable room.
 
-The room will eventually be customized.
+## Technical direction
 
-A clean room model makes it easier to:
+The current browser technology direction is:
 
-* apply paint to a specific wall
-* apply tiles to a floor or wall
-* calculate wall area
-* calculate floor area
-* place hardware-store products
-* calculate material quantity
-* estimate cost
+- React;
+- TypeScript;
+- Vite;
+- Three.js for non-XR preview and appropriate visualization;
+- WebXR immersive AR;
+- ARCore-backed Android WebXR implementations;
+- WebXR Depth Sensing when granted by the runtime.
 
-A raw photogrammetry mesh alone is not sufficient for this use case.
+The application must feature-detect WebXR, `immersive-ar`, DOM Overlay, reference spaces, and depth sensing. Capabilities are separate: immersive AR may work without depth sensing, and depth sensing may be unavailable or temporarily missing during an otherwise valid session.
 
----
+Raw XR session, depth acquisition, spatial conversion, coverage fusion, and XR rendering logic remain outside presentation components. The intended flow is:
 
-# Long-Term Customization Experience
+```text
+ScannerPage
+→ ScannerPageContainer
+→ scanner hooks
+→ XR/session services
+→ depth/spatial/coverage services
+→ WebXR
+```
 
-After scanning:
+The active XR renderer uses the session's XR-compatible WebGL presentation context and `XRWebGLLayer`. It must not introduce a disconnected rendering context or a second XR frame loop.
 
-User selects a wall.
+## Performance and resilience principles
 
-Example:
+XR processing stays outside React's high-frequency state path. React receives throttled diagnostics and compact application state, not every XR frame, every depth sample, or the persistent coverage map.
 
-Wall 1
-→ Paint
-→ Choose hardware-store paint product
-→ Apply color/material
+Live depth geometry and persistent surface storage remain bounded and mobile-safe. The implementation should use batched geometry, reusable typed data where practical, bounded spatial storage, and throttled mapping updates.
 
-User selects floor:
+Missing depth, lost tracking, invalid geometry, failed fusion, capacity limits, and temporary lookup misses must not terminate a healthy XR session. The scanner should preserve pose tracking where possible and expose useful diagnostics in Debug mode.
 
-Floor
-→ Tiles
-→ Choose tile product
-→ Apply texture
+When a scan ends, frame callbacks, listeners, depth state, spatial points, coverage data, live geometry, WebGL resources, and preview resources are cleaned up. A finished snapshot survives because it is an independent application representation, not a reference to live XR or scanner service state.
 
-User may place selected products such as:
+## Future room understanding
 
-* cabinets
-* shelves
-* sinks
-* toilets
-* lighting
-* fixtures
-* other supported store products
+Later processing may determine:
 
-The products should eventually come from the hardware store's real product catalog.
+- major planes;
+- walls;
+- floor and ceiling;
+- room boundaries and dimensions;
+- doors and windows;
+- permanent structures.
 
----
+The scanner should not claim this understanding before it exists. In particular, current guidance must not say `Wall complete`, and current coverage must not be described as an overall room percentage.
 
-# Material Estimation Vision
+Once a simplified room is available, later product experiences may apply paint, floor or wall tiles, cabinets, shelves, fixtures, and selected furniture. Material quantities and cost estimates will depend on measured room geometry and the hardware-store product catalog.
 
-Room measurements and selected products should eventually support calculations such as:
-
-Floor area:
-16 m²
-
-Tile:
-60 × 60 cm
-
-Required tiles:
-approximately 45
-
-Allowance:
-10%
-
-Recommended quantity:
-50 tiles
-
-Estimated cost:
-quantity × current store price
-
-Similarly for paint:
-
-Wall area
-→ product coverage rate
-→ number of cans/gallons required
-→ estimated cost
-
-These calculations belong to later phases.
-
----
-
-# Technical Direction
-
-Current scanner technology:
-
-* React
-* TypeScript
-* Vite
-* Three.js
-* WebXR
-* ARCore-backed WebXR on supported Android devices
-* WebXR Depth Sensing
-
-The scanner must not require LiDAR.
-
-Current physical test device:
-
-* ARCore/WebXR-compatible Android device
-* CPU depth sensing has been demonstrated successfully
-
-Do not hard-code application behavior to one particular phone model.
-
-Always feature-detect runtime capabilities.
-
----
-
-# Current Proven Pipeline
-
-The project has already demonstrated:
-
-immersive AR
-→ camera passthrough
-→ local-floor spatial tracking
-→ viewer pose
-→ CPU depth sensing
-→ metric depth
-→ SpatialPoints
-→ world-space coverage cells
-
-The next important visualization goal is:
-
-world-space coverage cells
-→ world-anchored captured-surface visualization
-
----
-
-# Scanner UX Principles
-
-The live camera must remain the main interface.
-
-During normal scanning:
-
-* do not cover most of the camera with diagnostics
-* do not require scrolling
-* keep Stop Scan accessible
-* provide concise guidance
-* provide coverage feedback
-* keep development diagnostics behind Debug mode
-
-The user should be able to focus on moving around the physical room.
-
----
-
-# Scan Guidance
-
-Useful guidance may eventually include:
-
-* Move slowly
-* Continue scanning this area
-* Move to an unscanned area
-* Capture from another angle
-* Area captured
-* Tracking lost
-* Move back to the previous area
-* Depth unavailable
-
-Guidance must reflect real scanner state.
-
-Do not fabricate room understanding.
-
-For example, do not say:
-
-`Wall complete`
-
-until the system can actually identify and track a specific wall.
-
----
-
-# Saving
-
-A Save Scan or Finish Scan feature should only be introduced when there is meaningful scan data to save.
-
-Eventually a saved scan may contain:
-
-* room metadata
-* spatial coverage
-* simplified room geometry
-* dimensions
-* generated model file
-* customization state
-
-Persistence will later require backend/storage.
-
-Do not add Save purely to save temporary debug coordinates.
-
----
-
-# Future Architecture
-
-Long-term system may contain:
-
-Frontend:
-
-* React
-* Three.js
-* WebXR scanner
-* room customization interface
-
-Backend:
-
-* NestJS
-
-Database:
-
-* PostgreSQL
-
-Heavy spatial processing, if later required:
-
-* dedicated processing service
-* potentially Python
-* Open3D
-* COLMAP or other reconstruction tools
-
-These should only be introduced when browser-side capabilities are insufficient.
-
----
-
-# Development Philosophy
-
-Build incrementally.
-
-Do not attempt to clone an entire professional scanning product in one milestone.
-
-Each capability should be proven on a real device before building the next layer.
-
-Current development sequence:
-
-1. WebXR capability detection
-2. immersive AR and pose tracking
-3. depth sensing
-4. world-space SpatialPoints
-5. spatial coverage accumulation
-6. world-anchored coverage visualization
-7. scan finalization/persistence representation
-8. surface/room understanding
-9. simplified 3D room generation
-10. room customization
-11. material estimation
-12. cost estimation
-
-The exact later sequence may evolve as technical findings emerge.
-
----
-
-# Core Product Rule
-
-Whenever implementation decisions are unclear, prioritize this outcome:
-
-> The user should be able to scan a real room with a normal supported smartphone, visually understand which physical surfaces have already been captured, and eventually use that scanned space as an editable 3D environment for hardware-store product visualization and cost estimation.
-
-Do not optimize around development demos that do not contribute to that product experience.
+Those capabilities are intentionally outside the current spatial scanning foundation.

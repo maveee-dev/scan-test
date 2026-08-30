@@ -797,6 +797,42 @@ function ScannerDomOverlay({
                 <strong>{coverage.dense.updateCount}</strong>
               </div>
               <div>
+                <span>Dense mask rate</span>
+                <strong>{coverage.dense.updateRateHz.toFixed(1)} Hz</strong>
+              </div>
+              <div>
+                <span>Dense mask processing</span>
+                <strong>{coverage.dense.processingDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Visual cache entries</span>
+                <strong>{coverage.dense.visualCacheEntryCount} / {coverage.dense.visualCacheMaxEntries}</strong>
+              </div>
+              <div>
+                <span>Visual cache hits</span>
+                <strong>{coverage.dense.visualCacheHitCount}</strong>
+              </div>
+              <div>
+                <span>Visual cache refreshes</span>
+                <strong>{coverage.dense.visualCacheRefreshCount}</strong>
+              </div>
+              <div>
+                <span>Visual cache expirations</span>
+                <strong>{coverage.dense.visualCacheExpirationCount}</strong>
+              </div>
+              <div>
+                <span>Visual hole fills</span>
+                <strong>{coverage.dense.visualHoleFillSampleCount}</strong>
+              </div>
+              <div>
+                <span>Hole-fill rejects</span>
+                <strong>{coverage.dense.visualHoleFillRejectCount}</strong>
+              </div>
+              <div>
+                <span>Smoothed visual samples</span>
+                <strong>{coverage.dense.smoothedVisualFragmentCount}</strong>
+              </div>
+              <div>
                 <span>Dense vertices uploaded</span>
                 <strong>{coverage.render.denseVertexCount}</strong>
               </div>
