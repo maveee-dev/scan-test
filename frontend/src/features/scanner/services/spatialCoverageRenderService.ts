@@ -108,6 +108,8 @@ export class SpatialCoverageRenderService {
 
   private persistentSurfaceBuffer: WebGLBuffer | null = null
 
+  private candidateSurfaceBuffer: WebGLBuffer | null = null
+
   private positionAttribute = -1
 
   private colorAttribute = -1
@@ -120,17 +122,25 @@ export class SpatialCoverageRenderService {
 
   private persistentSurfaceVertexCount = 0
 
+  private candidateSurfaceVertexCount = 0
+
   private denseBufferCapacityBytes = 0
 
   private persistentSurfaceBufferCapacityBytes = 0
+
+  private candidateSurfaceBufferCapacityBytes = 0
 
   private denseAppliedRevision = -1
 
   private persistentSurfaceAppliedRevision = -1
 
+  private candidateSurfaceAppliedRevision = -1
+
   private debugGeometryVisible = false
 
   private persistentSurfelDebugVisible = false
+
+  private candidateSurfaceVisible = true
 
   private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
 
@@ -153,6 +163,10 @@ export class SpatialCoverageRenderService {
       this.persistentSurfaceBuffer = target.gl.createBuffer()
       if (!this.persistentSurfaceBuffer) {
         throw new Error('The persistent surface vertex buffer could not be created.')
+      }
+      this.candidateSurfaceBuffer = target.gl.createBuffer()
+      if (!this.candidateSurfaceBuffer) {
+        throw new Error('The candidate surface vertex buffer could not be created.')
       }
 
       this.positionAttribute = target.gl.getAttribLocation(this.program, 'aPosition')
@@ -259,6 +273,49 @@ export class SpatialCoverageRenderService {
     this.diagnostics.denseVertexCount = 0
   }
 
+  public updateCandidateSurfaceMesh(mesh: DenseCoverageMesh): void {
+    if (
+      this.diagnostics.status !== 'ready' ||
+      !this.gl ||
+      !this.candidateSurfaceBuffer ||
+      this.candidateSurfaceAppliedRevision === mesh.revision
+    ) {
+      return
+    }
+
+    try {
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.candidateSurfaceBuffer)
+      const uploadStartedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (mesh.vertexData.byteLength > this.candidateSurfaceBufferCapacityBytes) {
+        const nextCapacityBytes = Math.max(
+          mesh.vertexData.byteLength,
+          Math.ceil(Math.max(1, this.candidateSurfaceBufferCapacityBytes) * 1.5),
+        )
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, nextCapacityBytes, this.gl.DYNAMIC_DRAW)
+        this.candidateSurfaceBufferCapacityBytes = nextCapacityBytes
+      }
+      if (mesh.vertexData.byteLength > 0) {
+        this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, mesh.vertexData)
+      }
+      this.candidateSurfaceVertexCount = mesh.vertexCount
+      this.candidateSurfaceAppliedRevision = mesh.revision
+      this.diagnostics.candidateVertexCount = mesh.vertexCount
+      this.diagnostics.candidateRenderUpdateCount += 1
+      this.diagnostics.gpuBufferUploadDurationMs = Math.max(
+        0,
+        (typeof performance === 'undefined' ? Date.now() : performance.now()) - uploadStartedAt,
+      )
+    } catch {
+      this.diagnostics.status = 'failed'
+    }
+  }
+
+  public clearCandidateSurfaceMesh(): void {
+    this.candidateSurfaceVertexCount = 0
+    this.candidateSurfaceAppliedRevision = -1
+    this.diagnostics.candidateVertexCount = 0
+  }
+
   public setDebugGeometryVisible(visible: boolean): void {
     this.debugGeometryVisible = visible
     this.diagnostics.rawCurrentDepthVisible = visible
@@ -269,6 +326,11 @@ export class SpatialCoverageRenderService {
     this.diagnostics.persistentSurfelDebugVisible = visible
   }
 
+  public setCandidateSurfaceVisible(visible: boolean): void {
+    this.candidateSurfaceVisible = visible
+    this.diagnostics.candidateSurfaceVisible = visible
+  }
+
   public render(views: readonly XRView[]): void {
     if (
       this.diagnostics.status !== 'ready' ||
@@ -277,9 +339,12 @@ export class SpatialCoverageRenderService {
       !this.program ||
       !this.denseBuffer ||
       !this.persistentSurfaceBuffer ||
+      !this.candidateSurfaceBuffer ||
       !this.projectionUniform ||
       !this.viewUniform ||
-      (this.denseVertexCount === 0 && this.persistentSurfaceVertexCount === 0)
+      (this.denseVertexCount === 0 &&
+        this.persistentSurfaceVertexCount === 0 &&
+        this.candidateSurfaceVertexCount === 0)
     ) {
       return
     }
@@ -305,6 +370,13 @@ export class SpatialCoverageRenderService {
         gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height)
         gl.uniformMatrix4fv(this.projectionUniform, false, view.projectionMatrix)
         gl.uniformMatrix4fv(this.viewUniform, false, view.transform.inverse.matrix)
+
+        if (this.candidateSurfaceVisible && this.candidateSurfaceVertexCount > 0) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.candidateSurfaceBuffer)
+          this.configureVertexAttributes(gl)
+          gl.disable(gl.CULL_FACE)
+          gl.drawArrays(gl.TRIANGLES, 0, this.candidateSurfaceVertexCount)
+        }
 
         if (this.persistentSurfaceVertexCount > 0) {
           gl.bindBuffer(gl.ARRAY_BUFFER, this.persistentSurfaceBuffer)
@@ -344,12 +416,16 @@ export class SpatialCoverageRenderService {
     this.gl = null
     this.denseVertexCount = 0
     this.persistentSurfaceVertexCount = 0
+    this.candidateSurfaceVertexCount = 0
     this.denseBufferCapacityBytes = 0
     this.persistentSurfaceBufferCapacityBytes = 0
+    this.candidateSurfaceBufferCapacityBytes = 0
     this.denseAppliedRevision = -1
     this.persistentSurfaceAppliedRevision = -1
+    this.candidateSurfaceAppliedRevision = -1
     this.debugGeometryVisible = false
     this.persistentSurfelDebugVisible = false
+    this.candidateSurfaceVisible = true
     this.diagnostics = this.createInitialDiagnostics()
   }
 
@@ -364,6 +440,9 @@ export class SpatialCoverageRenderService {
       persistentVertexCount: 0,
       persistentRenderUpdateCount: 0,
       persistentSurfelCount: 0,
+      candidateVertexCount: 0,
+      candidateRenderUpdateCount: 0,
+      candidateSurfaceVisible: true,
       denseVertexCount: 0,
       denseRenderUpdateCount: 0,
       rawCurrentDepthVisible: false,
@@ -380,6 +459,9 @@ export class SpatialCoverageRenderService {
       if (this.persistentSurfaceBuffer) {
         this.gl.deleteBuffer(this.persistentSurfaceBuffer)
       }
+      if (this.candidateSurfaceBuffer) {
+        this.gl.deleteBuffer(this.candidateSurfaceBuffer)
+      }
       if (this.program) {
         this.gl.deleteProgram(this.program)
       }
@@ -388,6 +470,7 @@ export class SpatialCoverageRenderService {
     this.program = null
     this.denseBuffer = null
     this.persistentSurfaceBuffer = null
+    this.candidateSurfaceBuffer = null
     this.positionAttribute = -1
     this.colorAttribute = -1
     this.projectionUniform = null

@@ -517,7 +517,7 @@ export class XRSessionService {
             this.mappingPhase,
           )
           this.mappingPhase = (this.mappingPhase + 1) % 4
-          const persistentSurfaceMesh = this.persistentLiveSurfaceService.processFrame(
+          const persistentSurfaceResult = this.persistentLiveSurfaceService.processFrame(
             densePointFrame,
             this.position,
             time,
@@ -525,7 +525,10 @@ export class XRSessionService {
             this.persistentSurfelDebugVisible,
           )
           this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
-            persistentSurfaceMesh,
+            persistentSurfaceResult.persistentSurfaceMesh,
+          )
+          this.spatialCoverageRenderService.updateCandidateSurfaceMesh(
+            persistentSurfaceResult.candidateSurfaceMesh,
           )
           if (this.rawCurrentDepthVisible) {
             const denseMesh = this.denseSurfaceMaskService.build(
@@ -546,6 +549,7 @@ export class XRSessionService {
           } else {
             this.spatialCoverageRenderService.clearDenseMesh()
           }
+          this.spatialCoverageRenderService.clearCandidateSurfaceMesh()
           this.lastDenseMaskUpdatedAt = time
         }
       }

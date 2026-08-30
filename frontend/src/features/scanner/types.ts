@@ -259,6 +259,9 @@ export interface SpatialCoverageRenderDebug {
   persistentVertexCount: number
   persistentRenderUpdateCount: number
   persistentSurfelCount: number
+  candidateVertexCount: number
+  candidateRenderUpdateCount: number
+  candidateSurfaceVisible: boolean
   denseVertexCount: number
   denseRenderUpdateCount: number
   rawCurrentDepthVisible: boolean
@@ -347,6 +350,15 @@ export interface PersistentLiveSurfaceDebug {
   removedSurfelCount: number
   candidateCheckCount: number
   renderedSurfelCount: number
+  matchedCurrentPointCount: number
+  unmatchedCandidateSampleCount: number
+  candidateVisualSurfelCount: number
+  candidateSuppressedByCapturedMatchCount: number
+  candidateSuppressedByIncompleteMatchCount: number
+  capturedPersistentSurfelCount: number
+  partialPersistentSurfelCount: number
+  observedPersistentSurfelCount: number
+  unknownPersistentSurfelCount: number
   updateCount: number
   updateRateHz: number
   processingDurationMs: number

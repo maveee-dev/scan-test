@@ -67,6 +67,7 @@ export const LIVE_SURFACE_CONFIG = {
   maxNormalNeighborDepthDifferenceMeters: 0.35,
   maxNormalNeighborSpanMeters: 0.45,
   footprintRadiusMeters: 0.0425,
+  candidateFootprintRadiusMeters: 0.028,
   surfaceOffsetMeters: 0.001,
   maxSurfels: 20_000,
   maxCandidatesPerSample: 12,

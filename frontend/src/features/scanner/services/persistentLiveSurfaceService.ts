@@ -39,6 +39,11 @@ interface CompatibleSurfelResult {
   candidateCount: number
 }
 
+export interface PersistentLiveSurfaceFrameResult {
+  persistentSurfaceMesh: DenseCoverageMesh
+  candidateSurfaceMesh: DenseCoverageMesh
+}
+
 function getPerformanceTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
 }
@@ -165,9 +170,15 @@ export class PersistentLiveSurfaceService {
 
   private vertexData = new Float32Array(0)
 
+  private candidateVertexData = new Float32Array(0)
+
+  private candidateVertexOffset = 0
+
   private updateSequence = 0
 
   private meshRevision = 0
+
+  private candidateMeshRevision = 0
 
   private firstUpdateAt: number | null = null
 
@@ -181,10 +192,11 @@ export class PersistentLiveSurfaceService {
     timestamp: number,
     coverageService: SpatialCoverageService,
     debugVisible = false,
-  ): DenseCoverageMesh {
+  ): PersistentLiveSurfaceFrameResult {
     const processingStartedAt = getPerformanceTimestamp()
     const sampleCount = frame.columns * frame.rows
     this.updateSequence += 1
+    this.candidateVertexOffset = 0
     this.ensureNormalCapacity(sampleCount)
     this.estimateNormals(frame, cameraPosition)
     this.removeWeakSurfels(timestamp)
@@ -197,6 +209,10 @@ export class PersistentLiveSurfaceService {
     let distanceRejectedCount = 0
     let pointToPlaneRejectedCount = 0
     let normalRejectedCount = 0
+    let matchedCurrentPointCount = 0
+    let unmatchedCandidateSampleCount = 0
+    let candidateSuppressedByCapturedMatchCount = 0
+    let candidateSuppressedByIncompleteMatchCount = 0
 
     for (let index = 0; index < sampleCount; index += 1) {
       if (frame.valid[index] !== 1) {
@@ -226,6 +242,37 @@ export class PersistentLiveSurfaceService {
       distanceRejectedCount += this.lastDistanceRejectedCandidates
       pointToPlaneRejectedCount += this.lastPointToPlaneRejectedCandidates
       normalRejectedCount += this.lastNormalRejectedCandidates
+
+      if (match.surfel) {
+        matchedCurrentPointCount += 1
+        if (match.surfel.visualConfidence >= COVERAGE_VISUAL_CONFIDENCE.captured) {
+          candidateSuppressedByCapturedMatchCount += 1
+        } else {
+          candidateSuppressedByIncompleteMatchCount += 1
+        }
+      } else {
+        unmatchedCandidateSampleCount += 1
+        // This candidate is world-space geometry from the current measured
+        // frame. It fills the brief gap before a new surfel is available and
+        // is deliberately subsampled to keep first-contact work mobile-safe.
+        if (
+          hasNormal &&
+          index % 2 === 0 &&
+          Math.floor(index / frame.columns) % 2 === 0
+        ) {
+          this.ensureCandidateVertexCapacity(this.candidateVertexOffset + VERTICES_PER_SURFEL * FLOATS_PER_VERTEX)
+          this.writeOrientedQuad(
+            this.candidateVertexData,
+            this.samplePoint,
+            this.sampleNormal,
+            LIVE_SURFACE_CONFIG.candidateFootprintRadiusMeters,
+            COVERAGE_VISUAL_COLORS.observed,
+            COVERAGE_VISUAL_OPACITY.candidate,
+            this.candidateVertexOffset,
+          )
+          this.candidateVertexOffset += VERTICES_PER_SURFEL * FLOATS_PER_VERTEX
+        }
+      }
 
       let surfel = match.surfel
       if (!surfel) {
@@ -295,6 +342,12 @@ export class PersistentLiveSurfaceService {
       averageCandidatesPerPoint: incomingMeasuredPointCount > 0
         ? candidateCount / incomingMeasuredPointCount
         : 0,
+      matchedCurrentPointCount,
+      unmatchedCandidateSampleCount,
+      candidateVisualSurfelCount: this.candidateVertexOffset /
+        (VERTICES_PER_SURFEL * FLOATS_PER_VERTEX),
+      candidateSuppressedByCapturedMatchCount,
+      candidateSuppressedByIncompleteMatchCount,
       updateCount: this.diagnostics.updateCount + 1,
       processingDurationMs: Math.max(
         0,
@@ -308,7 +361,10 @@ export class PersistentLiveSurfaceService {
     this.diagnostics.updateRateHz = this.diagnostics.updateCount /
       Math.max(1, (timestamp - this.firstUpdateAt) / 1000)
 
-    return this.buildMesh(debugVisible)
+    return {
+      persistentSurfaceMesh: this.buildMesh(debugVisible),
+      candidateSurfaceMesh: this.buildCandidateMesh(),
+    }
   }
 
   public getDiagnostics(): PersistentLiveSurfaceDebug {
@@ -326,9 +382,12 @@ export class PersistentLiveSurfaceService {
     this.touchedSurfelIds.length = 0
     this.activeSurfelCount = 0
     this.vertexData = new Float32Array(0)
+    this.candidateVertexData = new Float32Array(0)
+    this.candidateVertexOffset = 0
     this.normalScratchArrays()
     this.updateSequence = 0
     this.meshRevision = 0
+    this.candidateMeshRevision = 0
     this.firstUpdateAt = null
     this.cleanupCursor = 0
     this.diagnostics = this.createInitialDiagnostics()
@@ -372,6 +431,15 @@ export class PersistentLiveSurfaceService {
       removedSurfelCount: 0,
       candidateCheckCount: 0,
       renderedSurfelCount: 0,
+      matchedCurrentPointCount: 0,
+      unmatchedCandidateSampleCount: 0,
+      candidateVisualSurfelCount: 0,
+      candidateSuppressedByCapturedMatchCount: 0,
+      candidateSuppressedByIncompleteMatchCount: 0,
+      capturedPersistentSurfelCount: 0,
+      partialPersistentSurfelCount: 0,
+      observedPersistentSurfelCount: 0,
+      unknownPersistentSurfelCount: 0,
       updateCount: 0,
       updateRateHz: 0,
       processingDurationMs: 0,
@@ -737,9 +805,27 @@ export class PersistentLiveSurfaceService {
 
     let offset = 0
     let renderedSurfelCount = 0
+    let capturedPersistentSurfelCount = 0
+    let partialPersistentSurfelCount = 0
+    let observedPersistentSurfelCount = 0
+    let unknownPersistentSurfelCount = 0
     const debugOpacity = 0.16
     for (const surfel of this.surfels) {
-      if (!surfel.active || !surfel.normal) {
+      if (!surfel.active) {
+        continue
+      }
+
+      if (surfel.visualConfidence <= 0) {
+        unknownPersistentSurfelCount += 1
+      } else if (surfel.visualConfidence >= COVERAGE_VISUAL_CONFIDENCE.captured) {
+        capturedPersistentSurfelCount += 1
+      } else if (surfel.visualConfidence >= COVERAGE_VISUAL_CONFIDENCE.partial) {
+        partialPersistentSurfelCount += 1
+      } else {
+        observedPersistentSurfelCount += 1
+      }
+
+      if (!surfel.normal) {
         continue
       }
 
@@ -760,6 +846,10 @@ export class PersistentLiveSurfaceService {
     }
 
     this.diagnostics.renderedSurfelCount = renderedSurfelCount
+    this.diagnostics.capturedPersistentSurfelCount = capturedPersistentSurfelCount
+    this.diagnostics.partialPersistentSurfelCount = partialPersistentSurfelCount
+    this.diagnostics.observedPersistentSurfelCount = observedPersistentSurfelCount
+    this.diagnostics.unknownPersistentSurfelCount = unknownPersistentSurfelCount
     this.diagnostics.weakSurfelCount = 0
     this.diagnostics.confirmedSurfelCount = 0
     this.diagnostics.stableSurfelCount = 0
@@ -785,6 +875,25 @@ export class PersistentLiveSurfaceService {
     }
   }
 
+  private buildCandidateMesh(): DenseCoverageMesh {
+    this.candidateMeshRevision += 1
+    return {
+      revision: this.candidateMeshRevision,
+      vertexData: this.candidateVertexData.subarray(0, this.candidateVertexOffset),
+      vertexCount: this.candidateVertexOffset / FLOATS_PER_VERTEX,
+    }
+  }
+
+  private ensureCandidateVertexCapacity(requiredFloats: number): void {
+    if (this.candidateVertexData.length >= requiredFloats) {
+      return
+    }
+
+    this.candidateVertexData = new Float32Array(
+      Math.max(requiredFloats, Math.ceil(this.candidateVertexData.length * 1.5)),
+    )
+  }
+
   private writeSurfelQuad(
     surfel: LiveSurfaceSurfel,
     color: readonly [number, number, number],
@@ -792,6 +901,26 @@ export class PersistentLiveSurfaceService {
     offset: number,
   ): void {
     const normal = surfel.normal as SpatialPoint
+    this.writeOrientedQuad(
+      this.vertexData,
+      surfel.position,
+      normal,
+      surfel.radius,
+      color,
+      opacity,
+      offset,
+    )
+  }
+
+  private writeOrientedQuad(
+    data: Float32Array,
+    position: SpatialPoint,
+    normal: SpatialPoint,
+    radius: number,
+    color: readonly [number, number, number],
+    opacity: number,
+    offset: number,
+  ): void {
     // Cross a stable world axis with the normal to create an oriented tangent.
     // Switching axes near vertical keeps the basis well-conditioned.
     const referenceX = Math.abs(normal.y) < 0.9 ? 0 : 1
@@ -811,11 +940,10 @@ export class PersistentLiveSurfaceService {
       return
     }
 
-    const radius = surfel.radius
     const offsetDistance = LIVE_SURFACE_CONFIG.surfaceOffsetMeters
-    const centerX = surfel.position.x + normal.x * offsetDistance
-    const centerY = surfel.position.y + normal.y * offsetDistance
-    const centerZ = surfel.position.z + normal.z * offsetDistance
+    const centerX = position.x + normal.x * offsetDistance
+    const centerY = position.y + normal.y * offsetDistance
+    const centerZ = position.z + normal.z * offsetDistance
     this.cornerA.x = centerX - this.tangent.x * radius - this.bitangent.x * radius
     this.cornerA.y = centerY - this.tangent.y * radius - this.bitangent.y * radius
     this.cornerA.z = centerZ - this.tangent.z * radius - this.bitangent.z * radius
@@ -829,11 +957,11 @@ export class PersistentLiveSurfaceService {
     this.cornerD.y = centerY + this.tangent.y * radius + this.bitangent.y * radius
     this.cornerD.z = centerZ + this.tangent.z * radius + this.bitangent.z * radius
 
-    writeVertex(this.vertexData, offset, this.cornerA, color, opacity)
-    writeVertex(this.vertexData, offset + FLOATS_PER_VERTEX, this.cornerB, color, opacity)
-    writeVertex(this.vertexData, offset + FLOATS_PER_VERTEX * 2, this.cornerC, color, opacity)
-    writeVertex(this.vertexData, offset + FLOATS_PER_VERTEX * 3, this.cornerB, color, opacity)
-    writeVertex(this.vertexData, offset + FLOATS_PER_VERTEX * 4, this.cornerD, color, opacity)
-    writeVertex(this.vertexData, offset + FLOATS_PER_VERTEX * 5, this.cornerC, color, opacity)
+    writeVertex(data, offset, this.cornerA, color, opacity)
+    writeVertex(data, offset + FLOATS_PER_VERTEX, this.cornerB, color, opacity)
+    writeVertex(data, offset + FLOATS_PER_VERTEX * 2, this.cornerC, color, opacity)
+    writeVertex(data, offset + FLOATS_PER_VERTEX * 3, this.cornerB, color, opacity)
+    writeVertex(data, offset + FLOATS_PER_VERTEX * 4, this.cornerD, color, opacity)
+    writeVertex(data, offset + FLOATS_PER_VERTEX * 5, this.cornerC, color, opacity)
   }
 }

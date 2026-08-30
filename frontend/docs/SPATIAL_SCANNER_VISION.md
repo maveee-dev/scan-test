@@ -138,10 +138,13 @@ and lifetime from persistent mapping:
 
 ```text
 CURRENT WebXR depth
-        ↓
-persistent fused live surfels
-        ↓
-world-anchored progressive blue surface mask
+        ├── immediate unknown/new candidate visualization
+        │
+        └── persistent surfel fusion
+                 ↓
+           stable live surface
+                 ↓
+           coverage-driven reveal
 ```
 
 At the same time:
@@ -152,8 +155,13 @@ persistent fused spatial surfaces
 coverage confidence and spatial memory
 ```
 
-The persistent live surfel surface provides geometric continuity while current
-depth refines it. Coverage confidence remains separate from geometry
+Current depth is still needed to show a newly visible, valid physical surface
+immediately. That candidate geometry is world-anchored, short-lived, and
+rendered as a strong unknown/new mask only when no compatible persistent
+surfel is available. Once a compatible persistent surfel exists, the
+candidate is suppressed and the persistent surface controls the appearance.
+The persistent live surfel surface provides geometric continuity while
+current depth refines it. Coverage confidence remains separate from geometry
 stability: a geometrically stable surfel can still be blue when it has only
 been observed from one useful viewpoint. The mask is not rendered directly
 from large persistent coverage cells and is not a fixed HTML, CSS, or

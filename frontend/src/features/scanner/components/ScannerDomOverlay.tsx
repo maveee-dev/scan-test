@@ -849,6 +849,32 @@ function ScannerDomOverlay({
                 <strong>{coverage.liveSurface.renderedSurfelCount}</strong>
               </div>
               <div>
+                <span>Current measured / matched</span>
+                <strong>
+                  {coverage.liveSurface.incomingMeasuredPointCount} / {coverage.liveSurface.matchedCurrentPointCount}
+                </strong>
+              </div>
+              <div>
+                <span>Unmatched candidate samples</span>
+                <strong>{coverage.liveSurface.unmatchedCandidateSampleCount}</strong>
+              </div>
+              <div>
+                <span>Candidate visual surfels</span>
+                <strong>{coverage.liveSurface.candidateVisualSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Candidate suppressed captured / incomplete</span>
+                <strong>
+                  {coverage.liveSurface.candidateSuppressedByCapturedMatchCount} / {coverage.liveSurface.candidateSuppressedByIncompleteMatchCount}
+                </strong>
+              </div>
+              <div>
+                <span>Persistent captured / partial / observed / new</span>
+                <strong>
+                  {coverage.liveSurface.capturedPersistentSurfelCount} / {coverage.liveSurface.partialPersistentSurfelCount} / {coverage.liveSurface.observedPersistentSurfelCount} / {coverage.liveSurface.unknownPersistentSurfelCount}
+                </strong>
+              </div>
+              <div>
                 <span>Live reconstruction</span>
                 <strong>{coverage.liveSurface.processingDurationMs.toFixed(1)} ms / {coverage.liveSurface.updateRateHz.toFixed(1)} Hz</strong>
               </div>
