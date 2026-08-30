@@ -102,7 +102,7 @@ function ScannerFinishedView({
       </div>
       {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
 
-      {scan.coverage.length > 0 ? (
+      {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
         <FinalizedSpatialScanPreview analysisResult={analysisResult} scan={scan} />
       ) : (
         <div className="scanner-complete-empty">
@@ -128,8 +128,24 @@ function ScannerFinishedView({
           </div>
           <div className="scanner-analysis-stats">
             <div>
-              <span>Input points</span>
+              <span>Fused analysis input</span>
               <strong>{analysisResult.stats.inputPoints}</strong>
+            </div>
+            <div>
+              <span>Coverage geometry points</span>
+              <strong>{analysisResult.stats.coverageGeometryPoints}</strong>
+            </div>
+            <div>
+              <span>Finalized fused surfels</span>
+              <strong>{analysisResult.stats.finalizedFusedSurfelCount}</strong>
+            </div>
+            <div>
+              <span>Analysis filtered surfels</span>
+              <strong>{analysisResult.stats.analysisFilteredSurfelCount}</strong>
+            </div>
+            <div>
+              <span>Analysis downsampled surfels</span>
+              <strong>{analysisResult.stats.analysisDownsampledSurfelCount}</strong>
             </div>
             <div>
               <span>Filtered / downsampled</span>

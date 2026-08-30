@@ -1,6 +1,7 @@
 import type {
   CoverageCellState,
   FinalizedSpatialScan,
+  FinalizedSurfaceSurfel,
   SpatialPoint,
 } from '../../scanner/types'
 import type {
@@ -89,8 +90,12 @@ interface FilteredPoint {
 
 interface AnalysisPointMapResult {
   inputPoints: number
+  coverageGeometryPoints: number
+  finalizedFusedSurfelCount: number
   filteredPoints: number
+  analysisFilteredSurfelCount: number
   points: AnalysisPoint[]
+  analysisDownsampledSurfelCount: number
   inputPreparationMs: number
   downsamplingMs: number
 }
@@ -229,6 +234,17 @@ function getBucketKey(point: SpatialPoint, bucketSize: number): string {
 function getQualityWeight(state: CoverageCellState, observationCount: number): number {
   const stateWeight = state === 'captured' ? 3 : state === 'partial' ? 2 : 1
   return stateWeight * clamp(observationCount, 1, 3)
+}
+
+function getFusedSurfaceQualityWeight(surfel: FinalizedSurfaceSurfel): number {
+  const coverageWeight = surfel.coverageState === 'captured'
+    ? 1.25
+    : surfel.coverageState === 'partial'
+      ? 1.1
+      : 1
+  const geometryWeight = 1 + clamp(surfel.geometryConfidence, 0, 1)
+  const observationWeight = clamp(surfel.observationWeight, 1, 3)
+  return coverageWeight * geometryWeight * observationWeight
 }
 
 function getNormalCompatibilityDot(maximumNormalAngleDegrees: number): number {
@@ -560,20 +576,41 @@ function createAnalysisPointMap(
 ): AnalysisPointMapResult {
   const preparationStartedAt = getTimestamp()
   const filtered: FilteredPoint[] = []
-  for (const cell of scan.coverage) {
-    if (!cell.normal || !isFinitePoint(cell.position) || !isFinitePoint(cell.normal)) {
-      continue
-    }
+  const fusedSurface = scan.fusedSurface
+  if (fusedSurface.length > 0) {
+    for (const surfel of fusedSurface) {
+      if (!isFinitePoint(surfel.position) || !isFinitePoint(surfel.normal)) {
+        continue
+      }
 
-    const normal = normalize(cell.normal)
-    if (!normal) {
-      continue
+      const normal = normalize(surfel.normal)
+      if (!normal) {
+        continue
+      }
+      filtered.push({
+        position: surfel.position,
+        normal,
+        weight: getFusedSurfaceQualityWeight(surfel),
+      })
     }
-    filtered.push({
-      position: cell.position,
-      normal,
-      weight: getQualityWeight(cell.coverageState, cell.observationCount),
-    })
+  } else {
+    // Compatibility fallback for snapshots created before fused-surface
+    // finalization was introduced. New snapshots always use fused surfels.
+    for (const cell of scan.coverage) {
+      if (!cell.normal || !isFinitePoint(cell.position) || !isFinitePoint(cell.normal)) {
+        continue
+      }
+
+      const normal = normalize(cell.normal)
+      if (!normal) {
+        continue
+      }
+      filtered.push({
+        position: cell.position,
+        normal,
+        weight: getQualityWeight(cell.coverageState, cell.observationCount),
+      })
+    }
   }
   const preparationFinishedAt = getTimestamp()
 
@@ -641,9 +678,13 @@ function createAnalysisPointMap(
   // downsampled positions for spatial connectivity and area estimation.
   points.sort((left, right) => right.weight - left.weight)
   return {
-    inputPoints: scan.coverage.length,
+    inputPoints: fusedSurface.length > 0 ? fusedSurface.length : scan.coverage.length,
+    coverageGeometryPoints: scan.coverage.length,
+    finalizedFusedSurfelCount: fusedSurface.length,
     filteredPoints: filtered.length,
+    analysisFilteredSurfelCount: filtered.length,
     points,
+    analysisDownsampledSurfelCount: points.length,
     inputPreparationMs: Math.max(0, preparationFinishedAt - preparationStartedAt),
     downsamplingMs: Math.max(0, downsamplingFinishedAt - preparationFinishedAt),
   }
@@ -1315,8 +1356,12 @@ export class PlaneExtractionService {
       planes: Object.freeze(planes),
       stats: {
         inputPoints: prepared.inputPoints,
+        coverageGeometryPoints: prepared.coverageGeometryPoints,
+        finalizedFusedSurfelCount: prepared.finalizedFusedSurfelCount,
         filteredPoints: prepared.filteredPoints,
+        analysisFilteredSurfelCount: prepared.analysisFilteredSurfelCount,
         downsampledPoints: prepared.points.length,
+        analysisDownsampledSurfelCount: prepared.analysisDownsampledSurfelCount,
         provisionalPlaneCount: provisionalGroups.length,
         planeCount: planes.length,
         assignedPoints: owned.assignedPointCount,

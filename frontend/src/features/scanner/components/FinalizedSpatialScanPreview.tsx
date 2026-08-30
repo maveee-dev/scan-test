@@ -21,7 +21,10 @@ const PLANE_COLORS = {
   other: 0xd2b8ff,
 } as const
 
-type PreviewMode = 'captured' | 'planes'
+type PreviewMode = 'coverage' | 'fused' | 'planes'
+
+const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
+const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
 
 function createPlaneGeometry(plane: PlaneCandidate): THREE.BufferGeometry {
   const { centroid, tangentU, tangentV, localBounds } = plane
@@ -80,14 +83,58 @@ function addPlaneCandidates(
   return { geometries, materials }
 }
 
+function createFusedSurfaceGeometry(
+  surfels: readonly FinalizedSpatialScan['fusedSurface'][number][],
+): THREE.BufferGeometry {
+  const verticesPerSurfel = 6
+  const positions = new Float32Array(surfels.length * verticesPerSurfel * 3)
+  const colors = new Float32Array(surfels.length * verticesPerSurfel * 3)
+  let vertexOffset = 0
+
+  for (const surfel of surfels) {
+    const normal = new THREE.Vector3(surfel.normal.x, surfel.normal.y, surfel.normal.z).normalize()
+    const reference = Math.abs(normal.y) < 0.9
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0)
+    const tangent = new THREE.Vector3().crossVectors(reference, normal).normalize()
+    const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize()
+    const center = new THREE.Vector3(surfel.position.x, surfel.position.y, surfel.position.z)
+      .addScaledVector(normal, FINALIZED_SURFEL_PREVIEW_OFFSET_METERS)
+    const radius = FINALIZED_SURFEL_PREVIEW_RADIUS_METERS
+    const corners = [
+      center.clone().addScaledVector(tangent, -radius).addScaledVector(bitangent, -radius),
+      center.clone().addScaledVector(tangent, radius).addScaledVector(bitangent, -radius),
+      center.clone().addScaledVector(tangent, -radius).addScaledVector(bitangent, radius),
+      center.clone().addScaledVector(tangent, radius).addScaledVector(bitangent, radius),
+    ]
+    const triangleCorners = [corners[0], corners[1], corners[2], corners[1], corners[3], corners[2]]
+    const color = new THREE.Color(POINT_COLORS[surfel.coverageState])
+    for (const corner of triangleCorners) {
+      positions[vertexOffset * 3] = corner.x
+      positions[vertexOffset * 3 + 1] = corner.y
+      positions[vertexOffset * 3 + 2] = corner.z
+      colors[vertexOffset * 3] = color.r
+      colors[vertexOffset * 3 + 1] = color.g
+      colors[vertexOffset * 3 + 2] = color.b
+      vertexOffset += 1
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  return geometry
+}
+
 function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const resetViewRef = useRef<(() => void) | null>(null)
-  const [mode, setMode] = useState<PreviewMode>('captured')
+  const [mode, setMode] = useState<PreviewMode>('coverage')
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || scan.coverage.length === 0) {
+    const hasSpatialData = scan.coverage.length > 0 || scan.fusedSurface.length > 0
+    if (!canvas || !hasSpatialData) {
       return undefined
     }
 
@@ -114,7 +161,7 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
     controls.minDistance = 0.08
     controls.maxDistance = 100
 
-    const geometry = new THREE.BufferGeometry()
+    const coverageGeometry = new THREE.BufferGeometry()
     const positions = new Float32Array(scan.coverage.length * 3)
     const colors = new Float32Array(scan.coverage.length * 3)
     const minimum = { x: Infinity, y: Infinity, z: Infinity }
@@ -131,21 +178,35 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
       colors[positionOffset + 1] = color.g
       colors[positionOffset + 2] = color.b
 
-      minimum.x = Math.min(minimum.x, cell.position.x)
-      minimum.y = Math.min(minimum.y, cell.position.y)
-      minimum.z = Math.min(minimum.z, cell.position.z)
-      maximum.x = Math.max(maximum.x, cell.position.x)
-      maximum.y = Math.max(maximum.y, cell.position.y)
-      maximum.z = Math.max(maximum.z, cell.position.z)
     })
+
+    const pointsForBounds = mode === 'fused'
+      ? scan.fusedSurface.map((surfel) => surfel.position)
+      : scan.coverage.map((cell) => cell.position)
+    if (pointsForBounds.length === 0) {
+      for (const surfel of scan.fusedSurface) {
+        pointsForBounds.push(surfel.position)
+      }
+    }
+    for (const point of pointsForBounds) {
+      minimum.x = Math.min(minimum.x, point.x)
+      minimum.y = Math.min(minimum.y, point.y)
+      minimum.z = Math.min(minimum.z, point.z)
+      maximum.x = Math.max(maximum.x, point.x)
+      maximum.y = Math.max(maximum.y, point.y)
+      maximum.z = Math.max(maximum.z, point.z)
+    }
 
     let material: THREE.PointsMaterial | null = null
     let pointCloud: THREE.Points | null = null
+    let fusedGeometry: THREE.BufferGeometry | null = null
+    let fusedMaterial: THREE.MeshBasicMaterial | null = null
+    let fusedSurface: THREE.Mesh | null = null
     let planeResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
 
-    if (mode === 'captured') {
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    if (mode === 'coverage') {
+      coverageGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      coverageGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
       material = new THREE.PointsMaterial({
         size: 0.045,
         sizeAttenuation: true,
@@ -153,8 +214,19 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
         transparent: true,
         opacity: 0.94,
       })
-      pointCloud = new THREE.Points(geometry, material)
+      pointCloud = new THREE.Points(coverageGeometry, material)
       scene.add(pointCloud)
+    } else if (mode === 'fused') {
+      fusedGeometry = createFusedSurfaceGeometry(scan.fusedSurface)
+      fusedMaterial = new THREE.MeshBasicMaterial({
+        depthWrite: false,
+        opacity: 0.88,
+        side: THREE.DoubleSide,
+        transparent: true,
+        vertexColors: true,
+      })
+      fusedSurface = new THREE.Mesh(fusedGeometry, fusedMaterial)
+      scene.add(fusedSurface)
     } else if (analysisResult) {
       planeResources = addPlaneCandidates(scene, analysisResult)
     }
@@ -211,13 +283,18 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
       resizeObserver?.disconnect()
       resetViewRef.current = null
       controls.dispose()
-      geometry.dispose()
+      coverageGeometry.dispose()
       material?.dispose()
+      fusedGeometry?.dispose()
+      fusedMaterial?.dispose()
       planeResources?.geometries.forEach((planeGeometry) => planeGeometry.dispose())
       planeResources?.materials.forEach((planeMaterial) => planeMaterial.dispose())
       renderer.dispose()
       if (pointCloud) {
         scene.remove(pointCloud)
+      }
+      if (fusedSurface) {
+        scene.remove(fusedSurface)
       }
     }
   }, [analysisResult, mode, scan])
@@ -234,11 +311,21 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
           <button
             type="button"
             className="scanner-preview-mode"
-            aria-pressed={mode === 'captured'}
-            onClick={() => setMode('captured')}
+            aria-pressed={mode === 'coverage'}
+            onClick={() => setMode('coverage')}
           >
-            Captured Spatial Data
+            Coverage Scan Data
           </button>
+          {scan.fusedSurface.length > 0 ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'fused'}
+              onClick={() => setMode('fused')}
+            >
+              Fused Surface Data
+            </button>
+          ) : null}
           {analysisResult ? (
             <button
               type="button"

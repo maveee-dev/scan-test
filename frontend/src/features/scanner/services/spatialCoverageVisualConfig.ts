@@ -72,6 +72,9 @@ export const LIVE_SURFACE_CONFIG = {
   maxSurfels: 20_000,
   maxCandidatesPerSample: 12,
   maxObservationWeight: 16,
+  // Room analysis receives only surfels confirmed across multiple measured
+  // updates; one-frame transients remain live-only visualization geometry.
+  minimumFinalizationObservationCount: 2,
   weakSurfelLifetimeMs: 10_000,
   maxWeakSurfelsRemovedPerUpdate: 48,
 } as const

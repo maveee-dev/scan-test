@@ -46,8 +46,12 @@ export interface RoomAnalysisResult {
   readonly planes: readonly PlaneCandidate[]
   readonly stats: {
     readonly inputPoints: number
+    readonly coverageGeometryPoints: number
+    readonly finalizedFusedSurfelCount: number
     readonly filteredPoints: number
+    readonly analysisFilteredSurfelCount: number
     readonly downsampledPoints: number
+    readonly analysisDownsampledSurfelCount: number
     readonly provisionalPlaneCount: number
     readonly planeCount: number
     readonly assignedPoints: number

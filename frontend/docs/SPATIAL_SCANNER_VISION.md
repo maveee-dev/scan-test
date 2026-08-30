@@ -38,6 +38,21 @@ The normal scanning experience does not require scrolling.
 
 The current architectural direction is:
 
+After capture, the fused live surface becomes a finalized fused spatial
+surface before room analysis. The post-scan path is therefore:
+
+```text
+current depth
+        ↓
+persistent fused live surface
+        ↓
+FinalizedSpatialScan (fused geometry + coverage metadata)
+        ↓
+plane extraction
+        ↓
+later room interpretation
+```
+
 ```text
 Phone camera
 +
@@ -295,6 +310,13 @@ Surface-normal directions must be made consistent before smoothing or averaging.
 
 This fused spatial representation is the future input for room-structure processing.
 
+When a scan is finished, the finalized scan keeps this fused measured geometry
+alongside the separate coverage/confidence observations. The fused surface is
+the preferred geometric input for post-scan plane analysis because it represents
+the live surfel fusion result rather than the more granular coverage index.
+Coverage remains available for scan statistics, confidence history, and later
+quality decisions.
+
 ## Temporal visual stabilization
 
 The live scan mask may use short-lived visual stabilization to make the feedback readable, including:
@@ -350,6 +372,13 @@ The finalized representation contains application data only, such as:
 - independent serializable surface positions and normals;
 - coverage states and observation counts;
 - final stored-surface statistics.
+
+It may contain both independent coverage cells and a finalized fused surface
+collection. The fused collection contains only confirmed real measured surfels:
+positions, normals, geometry observation quality, and associated coverage state.
+It does not contain temporary current-frame candidates, hole-filled or
+interpolated visualization fragments, visual caches, spatial indexes, or GPU
+resources.
 
 It does not contain `XRSession`, `XRFrame`, `XRView`, `XRReferenceSpace`, WebGL resources, Three.js objects, DOM elements, or service references.
 
@@ -410,9 +439,11 @@ yet claim that a candidate is a floor, wall, or ceiling.
 
 Extraction uses persistent finalized spatial data, not active XR sessions,
 temporary live-mask candidates, visual caches, or rendering resources. The
-analysis keeps disconnected parallel surfaces separate through local spatial
-connectivity and rejects unsupported or noisy points instead of fabricating a
-room shape.
+analysis prefers the finalized fused surface collection; coverage cells remain
+separate scan metadata and are only a compatibility fallback for older
+snapshots. The analysis keeps disconnected parallel surfaces separate through
+local spatial connectivity and rejects unsupported or noisy points instead of
+fabricating a room shape.
 
 ## Technical direction
 

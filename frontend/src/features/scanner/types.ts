@@ -450,6 +450,16 @@ export interface FinalizedCoverageCell {
   readonly observationCount: number
 }
 
+/** Plain, measured geometry copied from the active fused live-surface service. */
+export interface FinalizedSurfaceSurfel {
+  readonly position: SpatialPoint
+  readonly normal: SpatialPoint
+  readonly observationWeight: number
+  readonly geometryObservationCount: number
+  readonly geometryConfidence: number
+  readonly coverageState: CoverageCellState
+}
+
 export interface FinalizedSpatialScanStatistics {
   readonly uniqueCells: number
   readonly observedCells: number
@@ -464,6 +474,7 @@ export interface FinalizedSpatialScan {
   readonly durationMs: number
   readonly referenceSpaceType: ScannerReferenceSpaceType
   readonly coverage: readonly FinalizedCoverageCell[]
+  readonly fusedSurface: readonly FinalizedSurfaceSurfel[]
   readonly statistics: FinalizedSpatialScanStatistics
 }
 

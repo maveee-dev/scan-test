@@ -2,6 +2,7 @@ import type {
   CoverageCellState,
   DenseCoverageMesh,
   DenseSpatialPointFrame,
+  FinalizedSurfaceSurfel,
   PersistentLiveSurfaceDebug,
   SpatialPoint,
   ViewerPosition,
@@ -130,8 +131,9 @@ function maskOpacityForConfidence(confidence: number): number {
 
 /**
  * Fuses measured world-space depth points into bounded persistent live surfels.
- * The service owns only active-session visualization geometry; FinalizedSpatialScan
- * continues to use the independent application coverage representation.
+ * The service owns active-session fused geometry. A finish operation may copy
+ * confirmed real surfels into plain application data before this service is
+ * disposed; visualization buffers never leave this service.
  */
 export class PersistentLiveSurfaceService {
   private readonly surfels: LiveSurfaceSurfel[] = []
@@ -369,6 +371,43 @@ export class PersistentLiveSurfaceService {
 
   public getDiagnostics(): PersistentLiveSurfaceDebug {
     return { ...this.diagnostics }
+  }
+
+  /**
+   * Copies confirmed measured geometry for FinalizedSpatialScan. The returned
+   * values contain no service, spatial-index, or GPU references and are
+   * independently safe to retain after active-session cleanup.
+   */
+  public getFinalizationSurfels(
+    coverageService: SpatialCoverageService,
+  ): readonly FinalizedSurfaceSurfel[] {
+    const finalized: FinalizedSurfaceSurfel[] = []
+    for (const surfel of this.surfels) {
+      if (
+        !surfel.active ||
+        !surfel.normal ||
+        surfel.geometryObservationCount < LIVE_SURFACE_CONFIG.minimumFinalizationObservationCount
+      ) {
+        continue
+      }
+
+      const coverage = coverageService.getCoverageVisualConfidenceAtPoint(
+        surfel.position,
+        surfel.normal,
+      )
+      const coverageState = coverage.directState ?? stateForConfidence(surfel.visualConfidence)
+      const geometryConfidence = Math.min(1, surfel.geometryObservationCount / 3)
+      finalized.push(Object.freeze({
+        position: Object.freeze({ ...surfel.position }),
+        normal: Object.freeze({ ...surfel.normal }),
+        observationWeight: surfel.observationWeight,
+        geometryObservationCount: surfel.geometryObservationCount,
+        geometryConfidence,
+        coverageState,
+      }))
+    }
+
+    return Object.freeze(finalized)
   }
 
   public rebuildForDebugVisibility(visible: boolean): DenseCoverageMesh {

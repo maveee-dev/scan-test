@@ -291,6 +291,9 @@ export class XRSessionService {
         finishedAtMs: finishedAt,
         referenceSpaceType: this.referenceSpaceType,
         coverageCells: this.spatialCoverageService.getFinalizationCells(),
+        fusedSurfaceSurfels: this.persistentLiveSurfaceService.getFinalizationSurfels(
+          this.spatialCoverageService,
+        ),
       })
 
       await this.endActiveSession(session)

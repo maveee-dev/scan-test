@@ -1,6 +1,7 @@
 import type {
   CoverageCell,
   FinalizedCoverageCell,
+  FinalizedSurfaceSurfel,
   FinalizedSpatialScan,
   FinalizedSpatialScanStatistics,
   ScannerReferenceSpaceType,
@@ -11,6 +12,7 @@ export interface FinalizeSpatialScanInput {
   finishedAtMs: number
   referenceSpaceType: ScannerReferenceSpaceType
   coverageCells: readonly CoverageCell[]
+  fusedSurfaceSurfels: readonly FinalizedSurfaceSurfel[]
 }
 
 let scanSequence = 0
@@ -35,6 +37,17 @@ function copyCoverageCell(cell: CoverageCell): FinalizedCoverageCell {
     normal: cell.representativeNormal ? copyPoint(cell.representativeNormal) : null,
     coverageState: cell.state,
     observationCount: cell.observationCount,
+  })
+}
+
+function copySurfaceSurfel(surfel: FinalizedSurfaceSurfel): FinalizedSurfaceSurfel {
+  return Object.freeze({
+    position: copyPoint(surfel.position),
+    normal: copyPoint(surfel.normal),
+    observationWeight: surfel.observationWeight,
+    geometryObservationCount: surfel.geometryObservationCount,
+    geometryConfidence: surfel.geometryConfidence,
+    coverageState: surfel.coverageState,
   })
 }
 
@@ -73,6 +86,7 @@ export class FinalizedSpatialScanService {
       ? input.finishedAtMs
       : startedAtMs
     const coverage = Object.freeze(input.coverageCells.map(copyCoverageCell))
+    const fusedSurface = Object.freeze(input.fusedSurfaceSurfels.map(copySurfaceSurfel))
     const statistics = calculateStatistics(coverage)
 
     return Object.freeze({
@@ -82,6 +96,7 @@ export class FinalizedSpatialScanService {
       durationMs: Math.max(0, finishedAtMs - startedAtMs),
       referenceSpaceType: input.referenceSpaceType,
       coverage,
+      fusedSurface,
       statistics,
     })
   }
