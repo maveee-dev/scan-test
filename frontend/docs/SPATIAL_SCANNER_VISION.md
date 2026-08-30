@@ -424,7 +424,7 @@ FinalizedSpatialScan
         ↓
 quality filtering and spatial downsampling
         ↓
-connected, approximately coplanar support groups
+global coplanar plane-parameter clustering and support reassembly
         ↓
 PlaneCandidates
         ↓
@@ -441,9 +441,14 @@ Extraction uses persistent finalized spatial data, not active XR sessions,
 temporary live-mask candidates, visual caches, or rendering resources. The
 analysis prefers the finalized fused surface collection; coverage cells remain
 separate scan metadata and are only a compatibility fallback for older
-snapshots. The analysis keeps disconnected parallel surfaces separate through
-local spatial connectivity and rejects unsupported or noisy points instead of
-fabricating a room shape.
+snapshots. The analysis first compares provisional fragments using a
+sign-aligned full plane normal and plane offset. Compatible fragments can be
+reassembled even when scan gaps or openings leave their projected support
+disconnected. Bounded spatial support checks and final exclusive point
+ownership are applied after the global plane fit so unsupported or noisy
+points remain unassigned instead of fabricating a room shape. Parallel
+surfaces with different offsets and surfaces with different full normal
+directions remain separate.
 
 ## Technical direction
 

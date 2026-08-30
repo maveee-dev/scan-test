@@ -36,9 +36,17 @@ export interface RoomAnalysisTimings {
   readonly downsamplingMs: number
   readonly initialExtractionMs: number
   readonly consolidationMs: number
+  readonly globalReassemblyMs: number
   readonly dominantExpansionMs: number
   readonly ownershipMs: number
   readonly totalMs: number
+}
+
+export interface PlaneRelationshipDiagnostic {
+  readonly firstPlaneId: string
+  readonly secondPlaneId: string
+  readonly angularDifferenceDegrees: number
+  readonly planeOffsetDifferenceMeters: number
 }
 
 export interface RoomAnalysisResult {
@@ -63,6 +71,16 @@ export interface RoomAnalysisResult {
     readonly candidatesMerged: number
     readonly duplicateCandidatesSuppressed: number
     readonly averageSupportOverlap: number
+    readonly planeParameterClusterCount: number
+    readonly globalPlanesAttempted: number
+    readonly globalPlanesAccepted: number
+    readonly globalPointsAbsorbed: number
+    readonly globalFragmentsAbsorbed: number
+    readonly globalExpansionPasses: number
+    readonly globalPlaneRefits: number
+    readonly globalResidualRejects: number
+    readonly globalNormalRejects: number
+    readonly globalSupportRejects: number
     readonly largestPlaneSupportPointCount: number
     readonly largestPlaneOccupiedArea: number
     readonly largestPlaneRmsError: number
@@ -70,6 +88,8 @@ export interface RoomAnalysisResult {
     readonly secondLargestPlaneOccupiedArea: number
     readonly secondLargestPlaneRmsError: number
     readonly largestPlaneSupportPercentage: number
+    readonly secondLargestPlaneSupportPercentage: number
+    readonly topThreePlaneSupportPercentage: number
     readonly dominantSeedsAttempted: number
     readonly dominantPlanesAccepted: number
     readonly pointsAbsorbedDuringExpansion: number
@@ -80,5 +100,6 @@ export interface RoomAnalysisResult {
     readonly expansionNormalRejects: number
     readonly expansionConnectivityRejects: number
   }
+  readonly planeRelationships: readonly PlaneRelationshipDiagnostic[]
   readonly timings: RoomAnalysisTimings
 }

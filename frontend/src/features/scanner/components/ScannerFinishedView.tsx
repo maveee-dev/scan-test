@@ -160,6 +160,14 @@ function ScannerFinishedView({
               <strong>{analysisResult.stats.planeCount}</strong>
             </div>
             <div>
+              <span>Plane-parameter clusters</span>
+              <strong>{analysisResult.stats.planeParameterClusterCount}</strong>
+            </div>
+            <div>
+              <span>Global planes accepted</span>
+              <strong>{analysisResult.stats.globalPlanesAccepted}</strong>
+            </div>
+            <div>
               <span>Assigned points</span>
               <strong>{analysisResult.stats.assignedPoints} ({analysisResult.stats.assignedPercentage.toFixed(1)}%)</strong>
             </div>
@@ -202,6 +210,35 @@ function ScannerFinishedView({
               Largest support {analysisResult.stats.largestPlaneSupportPercentage.toFixed(1)}% of assigned points · second plane {analysisResult.stats.secondLargestPlaneSupportPointCount} pts / {analysisResult.stats.secondLargestPlaneOccupiedArea.toFixed(2)} m² / RMS {analysisResult.stats.secondLargestPlaneRmsError.toFixed(3)} m
             </span>
           </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Global reassembly {analysisResult.timings.globalReassemblyMs.toFixed(1)} ms Â· parameter clusters {analysisResult.stats.planeParameterClusterCount} Â· seeds {analysisResult.stats.globalPlanesAttempted} Â· accepted {analysisResult.stats.globalPlanesAccepted} Â· absorbed points {analysisResult.stats.globalPointsAbsorbed} Â· absorbed fragments {analysisResult.stats.globalFragmentsAbsorbed} Â· passes {analysisResult.stats.globalExpansionPasses} Â· refits {analysisResult.stats.globalPlaneRefits}
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Global support rejects: residual {analysisResult.stats.globalResidualRejects} Â· normal {analysisResult.stats.globalNormalRejects} Â· projected support {analysisResult.stats.globalSupportRejects}
+            </span>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Largest support {analysisResult.stats.largestPlaneSupportPercentage.toFixed(1)}% Â· second support {analysisResult.stats.secondLargestPlaneSupportPercentage.toFixed(1)}% Â· top 3 support {analysisResult.stats.topThreePlaneSupportPercentage.toFixed(1)}% of assigned points
+            </span>
+          </div>
+          {analysisResult.planeRelationships.length > 0 ? (
+            <div className="scanner-analysis-timings">
+              <span>
+                Top plane relations: {analysisResult.planeRelationships.map((relationship) => `${relationship.firstPlaneId}/${relationship.secondPlaneId} ${relationship.angularDifferenceDegrees.toFixed(1)}° / Δd ${relationship.planeOffsetDifferenceMeters.toFixed(3)} m`).join(' Â· ')}
+              </span>
+            </div>
+          ) : null}
+          {analysisResult.planes.slice(0, 5).map((plane) => (
+            <div className="scanner-analysis-timings" key={`plane-diagnostic-${plane.id}`}>
+              <span>
+                {plane.id} normal ({plane.normal.x.toFixed(2)}, {plane.normal.y.toFixed(2)}, {plane.normal.z.toFixed(2)}) · d {(-plane.planeConstant).toFixed(3)}
+              </span>
+            </div>
+          ))}
           {analysisResult.planes.length > 0 ? (
             <div className="scanner-plane-list">
               {analysisResult.planes.map((plane) => (
