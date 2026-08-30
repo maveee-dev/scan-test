@@ -62,6 +62,12 @@ export interface ViewerPosition {
   z: number
 }
 
+export interface ViewerDirection {
+  x: number
+  y: number
+  z: number
+}
+
 export interface DepthSample {
   label: DepthSampleLabel
   distanceMeters: number | null
@@ -227,6 +233,7 @@ export interface CoverageCell {
   firstObservedAt: number
   lastObservedAt: number
   lastAcceptedCameraPosition: ViewerPosition
+  lastAcceptedCameraDirection: ViewerDirection | null
 }
 
 export type CoverageRenderStatus = 'idle' | 'ready' | 'failed'
@@ -273,6 +280,17 @@ export interface SpatialCoverageDebug {
   mappingPhase: number
   mappingUpdateCount: number
   mappingProcessingDurationMs: number
+  samplesWithNoCompatiblePersistentSurface: number
+  matchedObservedSurfelCount: number
+  matchedPartialSurfelCount: number
+  matchedCapturedSurfelCount: number
+  observationsRejectedInsufficientCameraMovement: number
+  observationsRejectedInsufficientViewChange: number
+  observationsRejectedFusion: number
+  observationsRejectedNormalSimilarity: number
+  observationsRejectedPointToPlane: number
+  observedToPartialTransitionsPerSecond: number
+  partialToCapturedTransitionsPerSecond: number
   totalUniqueCells: number
   observedCells: number
   partialCells: number

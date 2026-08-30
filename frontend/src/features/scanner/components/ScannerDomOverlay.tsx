@@ -589,6 +589,22 @@ function ScannerDomOverlay({
                 <strong>{coverage.mappingUpdateCount}</strong>
               </div>
               <div>
+                <span>Unmatched persistent surfaces</span>
+                <strong>{coverage.samplesWithNoCompatiblePersistentSurface}</strong>
+              </div>
+              <div>
+                <span>Matched observed surfels</span>
+                <strong>{coverage.matchedObservedSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Matched partial surfels</span>
+                <strong>{coverage.matchedPartialSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Matched captured surfels</span>
+                <strong>{coverage.matchedCapturedSurfelCount}</strong>
+              </div>
+              <div>
                 <span>Total unique cells</span>
                 <strong>{coverage.totalUniqueCells}</strong>
               </div>
@@ -633,8 +649,36 @@ function ScannerDomOverlay({
                 <strong>{coverage.partialToCapturedTransitionCount}</strong>
               </div>
               <div>
+                <span>Observed to partial / sec</span>
+                <strong>{coverage.observedToPartialTransitionsPerSecond.toFixed(2)}</strong>
+              </div>
+              <div>
+                <span>Partial to captured / sec</span>
+                <strong>{coverage.partialToCapturedTransitionsPerSecond.toFixed(2)}</strong>
+              </div>
+              <div>
                 <span>Rejected duplicate / same-view</span>
                 <strong>{coverage.rejectedDuplicateObservationCount}</strong>
+              </div>
+              <div>
+                <span>Reject: insufficient movement</span>
+                <strong>{coverage.observationsRejectedInsufficientCameraMovement}</strong>
+              </div>
+              <div>
+                <span>Reject: insufficient view change</span>
+                <strong>{coverage.observationsRejectedInsufficientViewChange}</strong>
+              </div>
+              <div>
+                <span>Reject: fusion</span>
+                <strong>{coverage.observationsRejectedFusion}</strong>
+              </div>
+              <div>
+                <span>Reject: normal similarity</span>
+                <strong>{coverage.observationsRejectedNormalSimilarity}</strong>
+              </div>
+              <div>
+                <span>Reject: point-to-plane</span>
+                <strong>{coverage.observationsRejectedPointToPlane}</strong>
               </div>
               <div>
                 <span>Capacity reached</span>

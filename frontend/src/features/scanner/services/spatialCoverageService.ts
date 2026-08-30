@@ -9,6 +9,7 @@ import type {
   DenseSpatialPointFrame,
   SpatialPoint,
   SpatialPointObservation,
+  ViewerDirection,
   ViewerPosition,
 } from '../types'
 import {
@@ -28,11 +29,19 @@ export const COVERAGE_MAPPING_ROWS = DENSE_MASK_ROWS
 /** About 7 mapping updates per second; the XR renderer still runs every frame. */
 const COVERAGE_PROCESS_INTERVAL_MS = 140
 const MAPPING_PHASE_COUNT = 4
-const DISTINCT_OBSERVATION_DISTANCE_METERS = 0.05
+/** A gentle translation threshold that still rejects a stationary phone. */
+const DISTINCT_OBSERVATION_DISTANCE_METERS = 0.03
+/** Rotation can make a useful new observation even when translation is small. */
+const DISTINCT_VIEW_ANGLE_RADIANS = (10 * Math.PI) / 180
 const COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS = 1
 // Neighbor lookup only bridges small measurement jitter around a 5 cm cell;
 // it is deliberately too small to behave like a general spatial search.
-const COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS = 0.065
+const COVERAGE_NEIGHBOR_LOOKUP_MAX_DISTANCE_METERS = 0.08
+/** Fusion tolerates depth noise across adjacent 5 cm quantization buckets. */
+const SURFEL_FUSION_MAX_DISTANCE_METERS = 0.08
+/** Prevents a nearby point on a different plane from being fused. */
+const SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS = 0.045
+const SURFEL_FUSION_MIN_NORMAL_DOT = Math.cos((40 * Math.PI) / 180)
 // New cells are rejected once this deterministic hard cap is reached.
 export const MAX_COVERAGE_CELLS = 50_000
 const OBSERVED_THRESHOLD = 1
@@ -47,6 +56,17 @@ type NormalRejectionReason = 'invalid' | 'depth-discontinuity'
 interface SurfaceNormalResult {
   normal: SpatialPoint | null
   rejectionReason: NormalRejectionReason | null
+}
+
+type SurfaceMatchReason =
+  | 'compatible'
+  | 'no-compatible-surface'
+  | 'normal-similarity'
+  | 'point-to-plane'
+
+interface SurfaceMatchResult {
+  cell: CoverageCell | null
+  reason: SurfaceMatchReason
 }
 
 function createInitialRenderDebug(): SpatialCoverageRenderDebug {
@@ -96,6 +116,17 @@ function createInitialCoverageDebug(): SpatialCoverageDebug {
     mappingPhase: 0,
     mappingUpdateCount: 0,
     mappingProcessingDurationMs: 0,
+    samplesWithNoCompatiblePersistentSurface: 0,
+    matchedObservedSurfelCount: 0,
+    matchedPartialSurfelCount: 0,
+    matchedCapturedSurfelCount: 0,
+    observationsRejectedInsufficientCameraMovement: 0,
+    observationsRejectedInsufficientViewChange: 0,
+    observationsRejectedFusion: 0,
+    observationsRejectedNormalSimilarity: 0,
+    observationsRejectedPointToPlane: 0,
+    observedToPartialTransitionsPerSecond: 0,
+    partialToCapturedTransitionsPerSecond: 0,
     totalUniqueCells: 0,
     observedCells: 0,
     partialCells: 0,
@@ -130,6 +161,15 @@ function isFinitePosition(position: ViewerPosition | null): position is ViewerPo
     Number.isFinite(position.x) &&
     Number.isFinite(position.y) &&
     Number.isFinite(position.z)
+  )
+}
+
+function isFiniteDirection(direction: ViewerDirection | null): direction is ViewerDirection {
+  return (
+    direction !== null &&
+    Number.isFinite(direction.x) &&
+    Number.isFinite(direction.y) &&
+    Number.isFinite(direction.z)
   )
 }
 
@@ -354,6 +394,40 @@ function hasCameraMoved(
   )
 }
 
+interface ViewpointChange {
+  translationChanged: boolean
+  viewChanged: boolean
+  meaningful: boolean
+}
+
+function getViewpointChange(
+  previousPosition: ViewerPosition,
+  currentPosition: ViewerPosition,
+  previousDirection: ViewerDirection | null,
+  currentDirection: ViewerDirection | null,
+): ViewpointChange {
+  const translationChanged = hasCameraMoved(previousPosition, currentPosition)
+
+  let viewChanged = false
+  if (isFiniteDirection(previousDirection) && isFiniteDirection(currentDirection)) {
+    const normalizedPrevious = normalizePoint(previousDirection)
+    const normalizedCurrent = normalizePoint(currentDirection)
+    if (normalizedPrevious && normalizedCurrent) {
+      const directionDot = Math.max(
+        -1,
+        Math.min(1, dotPoints(normalizedPrevious, normalizedCurrent)),
+      )
+      viewChanged = Math.acos(directionDot) >= DISTINCT_VIEW_ANGLE_RADIANS
+    }
+  }
+
+  return {
+    translationChanged,
+    viewChanged,
+    meaningful: translationChanged || viewChanged,
+  }
+}
+
 function getPerformanceTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
 }
@@ -396,10 +470,100 @@ function updateRepresentativePosition(cell: CoverageCell, point: SpatialPoint): 
   )
 }
 
+function findCompatibleCell(
+  cells: ReadonlyMap<string, CoverageCell>,
+  point: SpatialPoint,
+  normal: SpatialPoint | null,
+): SurfaceMatchResult {
+  const coordinates = getCellCoordinates(point)
+  const maxDistanceSquared = SURFEL_FUSION_MAX_DISTANCE_METERS ** 2
+  let nearestCell: CoverageCell | null = null
+  let nearestDistanceSquared = maxDistanceSquared
+  let nearbyCandidateFound = false
+  let normalMismatchFound = false
+  let pointToPlaneMismatchFound = false
+
+  for (
+    let xOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+    xOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+    xOffset += 1
+  ) {
+    for (
+      let yOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+      yOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+      yOffset += 1
+    ) {
+      for (
+        let zOffset = -COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+        zOffset <= COVERAGE_NEIGHBOR_LOOKUP_RADIUS_CELLS;
+        zOffset += 1
+      ) {
+        const candidate = cells.get(
+          getCellKey({
+            x: coordinates.x + xOffset,
+            y: coordinates.y + yOffset,
+            z: coordinates.z + zOffset,
+          }),
+        )
+        if (!candidate) {
+          continue
+        }
+
+        const delta = subtractPoints(candidate.representativePosition, point)
+        const distanceSquared = dotPoints(delta, delta)
+        if (distanceSquared > maxDistanceSquared) {
+          continue
+        }
+        nearbyCandidateFound = true
+
+        if (normal && candidate.representativeNormal) {
+          const normalDot = dotPoints(normal, candidate.representativeNormal)
+          if (normalDot < SURFEL_FUSION_MIN_NORMAL_DOT) {
+            normalMismatchFound = true
+            continue
+          }
+        }
+
+        if (candidate.representativeNormal) {
+          const pointToPlaneDistance = Math.abs(
+            dotPoints(delta, candidate.representativeNormal),
+          )
+          if (pointToPlaneDistance > SURFEL_FUSION_MAX_POINT_TO_PLANE_METERS) {
+            pointToPlaneMismatchFound = true
+            continue
+          }
+        }
+
+        if (distanceSquared < nearestDistanceSquared) {
+          nearestCell = candidate
+          nearestDistanceSquared = distanceSquared
+        }
+      }
+    }
+  }
+
+  if (nearestCell) {
+    return { cell: nearestCell, reason: 'compatible' }
+  }
+
+  if (normalMismatchFound) {
+    return { cell: null, reason: 'normal-similarity' }
+  }
+
+  if (pointToPlaneMismatchFound) {
+    return { cell: null, reason: 'point-to-plane' }
+  }
+
+  return {
+    cell: null,
+    reason: nearbyCandidateFound ? 'point-to-plane' : 'no-compatible-surface',
+  }
+}
+
 /**
  * Accumulates bounded world-space coverage cells and surface metadata. Repeat
- * observations are accepted only after 5 cm of camera displacement from the
- * cell's last accepted observation.
+ * observations are fused into nearby coplanar surface neighborhoods and are
+ * accepted only after a modest camera translation or view-direction change.
  */
 export class SpatialCoverageService {
   private readonly cells = new Map<string, CoverageCell>()
@@ -408,6 +572,8 @@ export class SpatialCoverageService {
 
   private lastProcessedAt = Number.NEGATIVE_INFINITY
 
+  private transitionRateStartedAt: number | null = null
+
   /**
    * Uses all valid dense world points as the source of truth. The mapper is
    * throttled and deduplicates repeated 5 cm cells inside processFrame.
@@ -415,6 +581,7 @@ export class SpatialCoverageService {
   public processDenseFrame(
     denseFrame: DenseSpatialPointFrame,
     cameraPosition: ViewerPosition | null,
+    cameraDirection: ViewerDirection | null,
     timestamp: number,
     phase: number,
   ): void {
@@ -451,6 +618,7 @@ export class SpatialCoverageService {
     if (this.processFrame(
       mappingObservations,
       cameraPosition,
+      cameraDirection,
       timestamp,
       denseFrame.columns,
       denseFrame.rows,
@@ -466,6 +634,7 @@ export class SpatialCoverageService {
   public processFrame(
     observations: readonly SpatialPointObservation[],
     cameraPosition: ViewerPosition | null,
+    cameraDirection: ViewerDirection | null,
     timestamp: number,
     gridColumns = COVERAGE_MAPPING_COLUMNS,
     gridRows = COVERAGE_MAPPING_ROWS,
@@ -482,6 +651,10 @@ export class SpatialCoverageService {
 
     if (!isFinitePosition(cameraPosition)) {
       return false
+    }
+
+    if (this.transitionRateStartedAt === null) {
+      this.transitionRateStartedAt = timestamp
     }
 
     const observationsByGridIndex = new Map<number, SpatialPointObservation>()
@@ -509,8 +682,6 @@ export class SpatialCoverageService {
         gridColumns,
         gridRows,
       )
-      const coordinates = getCellCoordinates(observation.point)
-      const key = getCellKey(coordinates)
       const normalResult = getSurfaceNormal(
         observation,
         observationsByGridIndex,
@@ -524,13 +695,39 @@ export class SpatialCoverageService {
         this.diagnostics.rejectedDepthDiscontinuityCount += 1
       }
 
+      const surfaceMatch = findCompatibleCell(
+        this.cells,
+        observation.point,
+        normalResult.normal,
+      )
+      if (surfaceMatch.cell) {
+        if (surfaceMatch.cell.state === 'observed') {
+          this.diagnostics.matchedObservedSurfelCount += 1
+        } else if (surfaceMatch.cell.state === 'partial') {
+          this.diagnostics.matchedPartialSurfelCount += 1
+        } else {
+          this.diagnostics.matchedCapturedSurfelCount += 1
+        }
+      } else {
+        this.diagnostics.samplesWithNoCompatiblePersistentSurface += 1
+        if (surfaceMatch.reason === 'normal-similarity') {
+          this.diagnostics.observationsRejectedNormalSimilarity += 1
+          this.diagnostics.observationsRejectedFusion += 1
+        } else if (surfaceMatch.reason === 'point-to-plane') {
+          this.diagnostics.observationsRejectedPointToPlane += 1
+          this.diagnostics.observationsRejectedFusion += 1
+        }
+      }
+
       if (currentGridKeys.has(gridIndex)) {
         this.diagnostics.rejectedDuplicateObservationCount += 1
         continue
       }
+      const coordinates = getCellCoordinates(observation.point)
+      const key = surfaceMatch.cell?.key ?? getCellKey(coordinates)
       currentGridKeys.set(gridIndex, key)
 
-      const existingCell = this.cells.get(key)
+      const existingCell = surfaceMatch.cell
       const isDuplicateInCurrentFrame = currentFrameKeys.has(key)
       currentFrameKeys.add(key)
 
@@ -551,6 +748,9 @@ export class SpatialCoverageService {
           firstObservedAt: timestamp,
           lastObservedAt: timestamp,
           lastAcceptedCameraPosition: { ...cameraPosition },
+          lastAcceptedCameraDirection: cameraDirection
+            ? { ...cameraDirection }
+            : null,
         }
         this.cells.set(key, cell)
         this.incrementStateCount(cell.state)
@@ -559,10 +759,24 @@ export class SpatialCoverageService {
         continue
       }
 
-      if (
-        isDuplicateInCurrentFrame ||
-        !hasCameraMoved(existingCell.lastAcceptedCameraPosition, cameraPosition)
-      ) {
+      if (isDuplicateInCurrentFrame) {
+        this.diagnostics.rejectedDuplicateObservationCount += 1
+        continue
+      }
+
+      const viewpointChange = getViewpointChange(
+        existingCell.lastAcceptedCameraPosition,
+        cameraPosition,
+        existingCell.lastAcceptedCameraDirection,
+        cameraDirection,
+      )
+      if (!viewpointChange.meaningful) {
+        if (!viewpointChange.translationChanged) {
+          this.diagnostics.observationsRejectedInsufficientCameraMovement += 1
+        }
+        if (!viewpointChange.viewChanged) {
+          this.diagnostics.observationsRejectedInsufficientViewChange += 1
+        }
         this.diagnostics.rejectedDuplicateObservationCount += 1
         continue
       }
@@ -578,6 +792,9 @@ export class SpatialCoverageService {
       }
       existingCell.lastObservedAt = timestamp
       existingCell.lastAcceptedCameraPosition = { ...cameraPosition }
+      existingCell.lastAcceptedCameraDirection = cameraDirection
+        ? { ...cameraDirection }
+        : null
       updateRepresentativePosition(existingCell, observation.point)
       existingCell.representativeNormal = mergeNormals(
         existingCell.representativeNormal,
@@ -596,6 +813,14 @@ export class SpatialCoverageService {
         ? (this.diagnostics.currentCapturedSamples / this.diagnostics.currentValidSamples) * 100
         : null
     this.diagnostics.guidance = getGuidance(this.diagnostics.currentViewCoverage)
+    const elapsedSeconds = Math.max(
+      1,
+      (timestamp - (this.transitionRateStartedAt ?? timestamp)) / 1000,
+    )
+    this.diagnostics.observedToPartialTransitionsPerSecond =
+      this.diagnostics.observedToPartialTransitionCount / elapsedSeconds
+    this.diagnostics.partialToCapturedTransitionsPerSecond =
+      this.diagnostics.partialToCapturedTransitionCount / elapsedSeconds
     return true
   }
 
@@ -676,6 +901,9 @@ export class SpatialCoverageService {
         ? { ...cell.representativeNormal }
         : null,
       lastAcceptedCameraPosition: { ...cell.lastAcceptedCameraPosition },
+      lastAcceptedCameraDirection: cell.lastAcceptedCameraDirection
+        ? { ...cell.lastAcceptedCameraDirection }
+        : null,
     }))
   }
 
@@ -702,6 +930,7 @@ export class SpatialCoverageService {
   public reset(): void {
     this.cells.clear()
     this.lastProcessedAt = Number.NEGATIVE_INFINITY
+    this.transitionRateStartedAt = null
     this.diagnostics = createInitialCoverageDebug()
   }
 

@@ -6,6 +6,7 @@ import type {
   SpatialPointDebug,
   XRPresentationStatus,
   ViewerPoseDebug,
+  ViewerDirection,
   ViewerPosition,
 } from '../types'
 import {
@@ -73,6 +74,17 @@ function createPosition(position: DOMPointReadOnly): ViewerPosition {
     x: position.x,
     y: position.y,
     z: position.z,
+  }
+}
+
+function createViewerDirection(orientation: DOMPointReadOnly): ViewerDirection {
+  // Rotate the camera's local forward vector (0, 0, -1) by the XR pose
+  // quaternion. This is only used for distinct-observation gating.
+  const { x, y, z, w } = orientation
+  return {
+    x: -2 * (w * y + x * z),
+    y: 2 * (w * x - y * z),
+    z: -1 + 2 * (x * x + y * y),
   }
 }
 
@@ -151,6 +163,8 @@ export class XRSessionService {
   private trackingActive = false
 
   private position: ViewerPosition | null = null
+
+  private viewerDirection: ViewerDirection | null = null
 
   private glContextStatus: XRPresentationStatus = 'unknown'
 
@@ -439,6 +453,9 @@ export class XRSessionService {
         this.poseSampleCount += 1
       }
       this.position = pose ? createPosition(pose.transform.position) : null
+      this.viewerDirection = pose
+        ? createViewerDirection(pose.transform.orientation)
+        : null
 
       const depthObservation = pose?.views[0]
         ? this.depthService.inspectFrame(frame, pose.views[0])
@@ -462,6 +479,7 @@ export class XRSessionService {
           this.spatialCoverageService.processDenseFrame(
             densePointFrame,
             this.position,
+            this.viewerDirection,
             time,
             this.mappingPhase,
           )
@@ -557,6 +575,9 @@ export class XRSessionService {
     this.denseSurfaceMaskService.reset()
     this.frameRequestId = null
     this.scanStartedAt = null
+    this.trackingActive = false
+    this.position = null
+    this.viewerDirection = null
     this.isEnding = false
 
     const callback = this.callbacks?.onSessionEnded
@@ -628,6 +649,7 @@ export class XRSessionService {
     this.mappingPhase = 0
     this.trackingActive = false
     this.position = null
+    this.viewerDirection = null
     this.scanStartedAt = null
     this.requestedEndReason = null
     this.depthService.dispose()
