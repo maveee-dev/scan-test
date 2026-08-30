@@ -1,10 +1,12 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { CoverageCellState, FinalizedSpatialScan } from '../types'
+import type { PlaneCandidate, RoomAnalysisResult } from '../../room-analysis/types'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
+  analysisResult?: RoomAnalysisResult | null
 }
 
 const POINT_COLORS: Record<CoverageCellState, number> = {
@@ -13,10 +15,75 @@ const POINT_COLORS: Record<CoverageCellState, number> = {
   captured: 0xa2ecff,
 }
 const MAX_PIXEL_RATIO = 2
+const PLANE_COLORS = {
+  'horizontal-like': 0x9fe8ff,
+  'vertical-like': 0x76d3e8,
+  other: 0xd2b8ff,
+} as const
 
-function FinalizedSpatialScanPreview({ scan }: FinalizedSpatialScanPreviewProps) {
+type PreviewMode = 'captured' | 'planes'
+
+function createPlaneGeometry(plane: PlaneCandidate): THREE.BufferGeometry {
+  const { centroid, tangentU, tangentV, localBounds } = plane
+  const corners = [
+    [localBounds.minU, localBounds.minV],
+    [localBounds.maxU, localBounds.minV],
+    [localBounds.maxU, localBounds.maxV],
+    [localBounds.minU, localBounds.maxV],
+  ] as const
+  const positions = new Float32Array(corners.length * 3)
+
+  corners.forEach(([u, v], index) => {
+    const offset = index * 3
+    positions[offset] = centroid.x + tangentU.x * u + tangentV.x * v
+    positions[offset + 1] = centroid.y + tangentU.y * u + tangentV.y * v
+    positions[offset + 2] = centroid.z + tangentU.z * u + tangentV.z * v
+  })
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setIndex([0, 1, 2, 0, 2, 3])
+  return geometry
+}
+
+function addPlaneCandidates(
+  scene: THREE.Scene,
+  analysisResult: RoomAnalysisResult,
+): { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } {
+  const group = new THREE.Group()
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.Material[] = []
+
+  for (const plane of analysisResult.planes) {
+    const geometry = createPlaneGeometry(plane)
+    const material = new THREE.MeshBasicMaterial({
+      color: PLANE_COLORS[plane.orientationCategory],
+      depthWrite: false,
+      opacity: 0.24,
+      side: THREE.DoubleSide,
+      transparent: true,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    const outlineGeometry = new THREE.EdgesGeometry(geometry)
+    const outlineMaterial = new THREE.LineBasicMaterial({
+      color: PLANE_COLORS[plane.orientationCategory],
+      opacity: 0.8,
+      transparent: true,
+    })
+    const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial)
+    group.add(mesh, outline)
+    geometries.push(geometry, outlineGeometry)
+    materials.push(material, outlineMaterial)
+  }
+
+  scene.add(group)
+  return { geometries, materials }
+}
+
+function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const resetViewRef = useRef<(() => void) | null>(null)
+  const [mode, setMode] = useState<PreviewMode>('captured')
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -72,17 +139,25 @@ function FinalizedSpatialScanPreview({ scan }: FinalizedSpatialScanPreviewProps)
       maximum.z = Math.max(maximum.z, cell.position.z)
     })
 
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-    const material = new THREE.PointsMaterial({
-      size: 0.045,
-      sizeAttenuation: true,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.94,
-    })
-    const pointCloud = new THREE.Points(geometry, material)
-    scene.add(pointCloud)
+    let material: THREE.PointsMaterial | null = null
+    let pointCloud: THREE.Points | null = null
+    let planeResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+
+    if (mode === 'captured') {
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+      material = new THREE.PointsMaterial({
+        size: 0.045,
+        sizeAttenuation: true,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.94,
+      })
+      pointCloud = new THREE.Points(geometry, material)
+      scene.add(pointCloud)
+    } else if (analysisResult) {
+      planeResources = addPlaneCandidates(scene, analysisResult)
+    }
 
     const center = new THREE.Vector3(
       (minimum.x + maximum.x) / 2,
@@ -137,11 +212,15 @@ function FinalizedSpatialScanPreview({ scan }: FinalizedSpatialScanPreviewProps)
       resetViewRef.current = null
       controls.dispose()
       geometry.dispose()
-      material.dispose()
+      material?.dispose()
+      planeResources?.geometries.forEach((planeGeometry) => planeGeometry.dispose())
+      planeResources?.materials.forEach((planeMaterial) => planeMaterial.dispose())
       renderer.dispose()
-      scene.remove(pointCloud)
+      if (pointCloud) {
+        scene.remove(pointCloud)
+      }
     }
-  }, [scan])
+  }, [analysisResult, mode, scan])
 
   return (
     <div className="scanner-scan-preview">
@@ -151,7 +230,26 @@ function FinalizedSpatialScanPreview({ scan }: FinalizedSpatialScanPreviewProps)
         aria-label="Interactive spatial scan preview"
       />
       <div className="scanner-scan-preview-toolbar">
-        <span>Captured spatial data</span>
+        <div className="scanner-scan-preview-modes" role="group" aria-label="Spatial scan preview mode">
+          <button
+            type="button"
+            className="scanner-preview-mode"
+            aria-pressed={mode === 'captured'}
+            onClick={() => setMode('captured')}
+          >
+            Captured Spatial Data
+          </button>
+          {analysisResult ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'planes'}
+              onClick={() => setMode('planes')}
+            >
+              Plane Candidates
+            </button>
+          ) : null}
+        </div>
         <button
           type="button"
           className="scan-button scan-button-secondary scanner-preview-reset"
@@ -160,6 +258,11 @@ function FinalizedSpatialScanPreview({ scan }: FinalizedSpatialScanPreviewProps)
           Reset View
         </button>
       </div>
+      {mode === 'planes' && analysisResult?.planes.length === 0 ? (
+        <p className="scanner-scan-preview-note">
+          No major geometric plane candidates were detected in this scan.
+        </p>
+      ) : null}
     </div>
   )
 }

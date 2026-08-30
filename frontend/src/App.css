@@ -212,6 +212,192 @@
   text-transform: uppercase;
 }
 
+.scanner-scan-preview-modes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.scanner-preview-mode {
+  padding: 0;
+  border: 0;
+  color: var(--dim);
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.scanner-preview-mode[aria-pressed="true"] {
+  color: var(--acid);
+}
+
+.scanner-preview-mode:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
+.scanner-scan-preview-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.scanner-analysis-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.scanner-analysis-controls > div,
+.scanner-analysis-result-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.scanner-analysis-label {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.scanner-analysis-copy {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scanner-analysis-controls .scan-button {
+  width: auto;
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.scanner-analysis-result {
+  margin-top: 22px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.scanner-analysis-result-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.scanner-analysis-result-header > strong {
+  color: var(--acid);
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.scanner-analysis-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.scanner-analysis-stats > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.scanner-analysis-stats span,
+.scanner-analysis-timings,
+.scanner-plane-row small {
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.scanner-analysis-stats strong {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.scanner-analysis-timings {
+  margin-top: 12px;
+  line-height: 1.5;
+  text-transform: none;
+}
+
+.scanner-plane-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.scanner-plane-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border-left: 2px solid var(--acid);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.scanner-plane-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scanner-plane-row > span:last-child {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.scanner-plane-row strong {
+  color: var(--ink);
+  font-weight: 400;
+}
+
+.scanner-plane-row small {
+  text-transform: none;
+}
+
+.scanner-analysis-empty {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .scanner-preview-reset {
   width: auto;
   min-width: 0;
@@ -1872,6 +2058,30 @@
   .capability-tag {
     display: inline-block;
     margin-top: 14px;
+  }
+
+  .scanner-analysis-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .scanner-analysis-controls .scan-button {
+    width: 100%;
+  }
+
+  .scanner-plane-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .scanner-plane-row > span:last-child {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .scanner-scan-preview-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .capability-row {

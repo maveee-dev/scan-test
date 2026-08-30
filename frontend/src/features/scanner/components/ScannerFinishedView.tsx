@@ -1,4 +1,7 @@
+import { useEffect, useRef, useState } from 'react'
 import type { FinalizedSpatialScan } from '../types'
+import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
+import type { RoomAnalysisResult } from '../../room-analysis/types'
 import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
 
 interface ScannerFinishedViewProps {
@@ -28,6 +31,49 @@ function ScannerFinishedView({
   onStartNewScan,
   scan,
 }: ScannerFinishedViewProps) {
+  const [analysisService] = useState(() => new PlaneExtractionService())
+  const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const analysisTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+      if (analysisTimerRef.current !== null) {
+        window.clearTimeout(analysisTimerRef.current)
+      }
+    }
+  }, [])
+
+  const analyzeSurfaces = (): void => {
+    if (isAnalyzing) {
+      return
+    }
+
+    setIsAnalyzing(true)
+    setAnalysisError(null)
+    analysisTimerRef.current = window.setTimeout(() => {
+      if (!mountedRef.current) {
+        return
+      }
+
+      try {
+        setAnalysisResult(analysisService.analyze(scan))
+      } catch (error: unknown) {
+        setAnalysisError(
+          error instanceof Error
+            ? error.message
+            : 'Surface analysis could not be completed.',
+        )
+      } finally {
+        analysisTimerRef.current = null
+        setIsAnalyzing(false)
+      }
+    }, 0)
+  }
+
   return (
     <section className="scanner-complete" aria-labelledby="scanner-complete-title">
       <span className="scanner-eyebrow">Milestone 06 / Finalized spatial scan</span>
@@ -38,8 +84,26 @@ function ScannerFinishedView({
         Your captured spatial observations are ready for a later room-processing stage.
       </p>
 
+      <div className="scanner-analysis-controls">
+        <div>
+          <span className="scanner-analysis-label">Post-scan geometry analysis</span>
+          <span className="scanner-analysis-copy">
+            Extract bounded geometric plane candidates from finalized spatial data.
+          </span>
+        </div>
+        <button
+          type="button"
+          className="scan-button scan-button-secondary"
+          disabled={isAnalyzing}
+          onClick={analyzeSurfaces}
+        >
+          {isAnalyzing ? 'Analyzing...' : analysisResult ? 'Analyze Again' : 'Analyze Surfaces'}
+        </button>
+      </div>
+      {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
+
       {scan.coverage.length > 0 ? (
-        <FinalizedSpatialScanPreview scan={scan} />
+        <FinalizedSpatialScanPreview analysisResult={analysisResult} scan={scan} />
       ) : (
         <div className="scanner-complete-empty">
           <strong>No spatial surfaces were captured.</strong>
@@ -48,6 +112,66 @@ function ScannerFinishedView({
           </span>
         </div>
       )}
+
+      {analysisResult ? (
+        <section className="scanner-analysis-result" aria-labelledby="scanner-analysis-title">
+          <div className="scanner-analysis-result-header">
+            <div>
+              <span className="scanner-analysis-label" id="scanner-analysis-title">
+                Plane candidates
+              </span>
+              <span className="scanner-analysis-copy">
+                Geometric candidates only; no wall, floor, or ceiling classification is applied.
+              </span>
+            </div>
+            <strong>{analysisResult.stats.planeCount}</strong>
+          </div>
+          <div className="scanner-analysis-stats">
+            <div>
+              <span>Input points</span>
+              <strong>{analysisResult.stats.inputPoints}</strong>
+            </div>
+            <div>
+              <span>Filtered / downsampled</span>
+              <strong>{analysisResult.stats.filteredPoints} / {analysisResult.stats.downsampledPoints}</strong>
+            </div>
+            <div>
+              <span>Unassigned points</span>
+              <strong>{analysisResult.stats.rejectedPoints}</strong>
+            </div>
+            <div>
+              <span>Analysis time</span>
+              <strong>{analysisResult.timings.totalMs.toFixed(1)} ms</strong>
+            </div>
+          </div>
+          <div className="scanner-analysis-timings">
+            <span>
+              Preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms · downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms · extraction {analysisResult.timings.planeExtractionMs.toFixed(1)} ms
+            </span>
+          </div>
+          {analysisResult.planes.length > 0 ? (
+            <div className="scanner-plane-list">
+              {analysisResult.planes.map((plane) => (
+                <div className="scanner-plane-row" key={plane.id}>
+                  <span>
+                    <strong>{plane.id}</strong>
+                    <small>
+                      {plane.orientationCategory} · {plane.orientationAngleDegrees.toFixed(0)}° from world-up normal
+                    </small>
+                  </span>
+                  <span>
+                    {plane.supportPointCount} pts · {plane.areaEstimate.toFixed(2)} m² · RMS {plane.rmsError.toFixed(3)} m
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="scanner-analysis-empty">
+              Not enough stable spatial data to detect major surfaces.
+            </p>
+          )}
+        </section>
+      ) : null}
 
       <div className="scanner-complete-card">
         <div className="scanner-complete-summary">

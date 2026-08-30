@@ -385,6 +385,35 @@ An empty finalized scan should show an explanatory empty state instead of an emp
 
 Later processing will use the finalized spatial representation to identify major planes, walls, floor, ceiling, room boundaries, and dimensions, then generate a simplified editable room.
 
+## Post-scan plane extraction foundation
+
+The first room-understanding stage runs only after XR cleanup, against the
+serializable `FinalizedSpatialScan`:
+
+```text
+FinalizedSpatialScan
+        ↓
+quality filtering and spatial downsampling
+        ↓
+connected, approximately coplanar support groups
+        ↓
+PlaneCandidates
+        ↓
+room-structure interpretation
+```
+
+Plane candidates contain measured world-space geometry such as a fitted normal,
+centroid, plane equation, projected local bounds, support count, area estimate,
+and fitting error. They are geometric candidates rather than semantic labels:
+an orientation diagnostic such as horizontal-like or vertical-like does not
+yet claim that a candidate is a floor, wall, or ceiling.
+
+Extraction uses persistent finalized spatial data, not active XR sessions,
+temporary live-mask candidates, visual caches, or rendering resources. The
+analysis keeps disconnected parallel surfaces separate through local spatial
+connectivity and rejects unsupported or noisy points instead of fabricating a
+room shape.
+
 ## Technical direction
 
 The current browser technology direction is:
