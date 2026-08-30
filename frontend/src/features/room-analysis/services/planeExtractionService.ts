@@ -9,6 +9,8 @@ import type {
   PlaneOrientationCategory,
   PlaneRelationshipDiagnostic,
   RoomAnalysisResult,
+  SurfaceConsensusDiagnostic,
+  SurfaceConsensusPairDiagnostic,
   SurfaceFamilyDiagnostic,
 } from '../types'
 
@@ -76,6 +78,18 @@ export interface PlaneExtractionConfig {
   readonly surfaceFamilyMinimumAdjacentOverlapRatio: number
   readonly surfaceFamilyProjectedAdjacencyMeters: number
   readonly surfaceFamilySupportCellSizeMeters: number
+  /** Full-normal tolerance for final physical-surface consensus. */
+  readonly surfaceConsensusNormalAngleDegrees: number
+  /** Pairwise offset tolerance for ambiguous, near-parallel final families. */
+  readonly surfaceConsensusOffsetToleranceMeters: number
+  /** Maximum depth span allowed for one final physical-surface consensus. */
+  readonly surfaceConsensusMaximumThicknessMeters: number
+  /** Minimum occupied projected IoU for final-family consolidation. */
+  readonly surfaceConsensusMinimumProjectedIoU: number
+  /** Minimum projected coverage each family must have of the other. */
+  readonly surfaceConsensusMinimumCoverageRatio: number
+  /** Minimum relative occupied support area for consensus. */
+  readonly surfaceConsensusMinimumAreaRatio: number
 }
 
 /** Conservative defaults for major-surface candidates, not semantic labels. */
@@ -126,6 +140,12 @@ export const DEFAULT_PLANE_EXTRACTION_CONFIG: PlaneExtractionConfig = {
   surfaceFamilyMinimumAdjacentOverlapRatio: 0.05,
   surfaceFamilyProjectedAdjacencyMeters: 0.3,
   surfaceFamilySupportCellSizeMeters: 0.1,
+  surfaceConsensusNormalAngleDegrees: 8,
+  surfaceConsensusOffsetToleranceMeters: 0.16,
+  surfaceConsensusMaximumThicknessMeters: 0.32,
+  surfaceConsensusMinimumProjectedIoU: 0.35,
+  surfaceConsensusMinimumCoverageRatio: 0.55,
+  surfaceConsensusMinimumAreaRatio: 0.4,
 }
 
 interface AnalysisPoint {
@@ -182,6 +202,7 @@ interface CandidateGroup {
   /** Support associated with a physical surface family, when present. */
   ownershipSupport?: readonly number[]
   surfaceFamily?: SurfaceFamilyMetadata
+  surfaceConsensus?: SurfaceConsensusMetadata
 }
 
 interface ConsolidationDiagnostics {
@@ -197,6 +218,7 @@ interface OwnershipResult {
 }
 
 interface SurfaceFamilyMetadata {
+  familyId: string
   memberPlaneIds: readonly string[]
   representativePlaneId: string
   normalSpreadDegrees: number
@@ -224,6 +246,46 @@ interface SurfaceFamilyConsolidationDiagnostics {
 interface SurfaceFamilyConsolidationResult {
   groups: CandidateGroup[]
   diagnostics: SurfaceFamilyConsolidationDiagnostics
+}
+
+interface SurfaceConsensusMetadata {
+  consensusId: string
+  memberFamilyIds: readonly string[]
+  memberPlaneIds: readonly string[]
+  totalDepthSpanMeters: number
+  representativePlaneId: string
+  directRepresentativeSupport: number
+  absorbedLayerSupport: number
+}
+
+interface SurfaceConsensusCluster {
+  members: CandidateGroup[]
+  support: number[]
+  representative: CandidateGroup
+}
+
+interface SurfaceConsensusPairMetrics {
+  angularDifferenceDegrees: number
+  planeOffsetDifferenceMeters: number
+  intersectionCells: number
+  unionCells: number
+  projectedIoU: number
+  firstCoverageBySecond: number
+  secondCoverageByFirst: number
+  firstOccupiedArea: number
+  secondOccupiedArea: number
+  separationMeters: number
+}
+
+interface SurfaceConsensusResult {
+  groups: CandidateGroup[]
+  diagnostics: {
+    preConsensusSurfaceFamilyCount: number
+    finalConsensusSurfaceCount: number
+    consensusPairTests: number
+    consensusMerges: number
+    pairs: SurfaceConsensusPairDiagnostic[]
+  }
 }
 
 interface CanonicalPlane {
@@ -1135,6 +1197,22 @@ function getProjectedOccupiedCells(
   return cells
 }
 
+function getOccupiedProjectedArea(
+  points: readonly AnalysisPoint[],
+  support: readonly number[],
+  candidate: PlaneCandidate,
+  cellSize: number,
+): number {
+  return getProjectedOccupiedCells(
+    points,
+    support,
+    candidate.centroid,
+    candidate.tangentU,
+    candidate.tangentV,
+    cellSize,
+  ).size * cellSize ** 2
+}
+
 function getOccupiedCellOverlapRatio(first: Set<string>, second: Set<string>): number {
   const smaller = first.size <= second.size ? first : second
   const larger = first.size <= second.size ? second : first
@@ -1271,6 +1349,7 @@ function createSurfaceFamilyMetadata(
   cluster: SurfaceFamilyCluster,
   points: readonly AnalysisPoint[],
   config: PlaneExtractionConfig,
+  familyId: string,
 ): SurfaceFamilyMetadata {
   const reference = cluster.representative.candidate
   const offsets = cluster.members.map((member) => getAlignedPlaneOffset(member.candidate, reference.normal))
@@ -1292,6 +1371,7 @@ function createSurfaceFamilyMetadata(
   const maximumPlaneOffset = Math.max(...offsets)
   const combinedSupport = cluster.support.length
   return {
+    familyId,
     memberPlaneIds: cluster.members.map((member) => member.candidate.id),
     representativePlaneId: cluster.representative.candidate.id,
     normalSpreadDegrees,
@@ -1384,13 +1464,344 @@ function consolidateSurfaceFamilies(
   }
 
   diagnostics.surfaceFamilyClusterCount = clusters.length
-  const groups = clusters.map((cluster) => ({
-    candidate: cluster.representative.candidate,
+  const groups = clusters.map((cluster, index) => ({
+    candidate: {
+      ...cluster.representative.candidate,
+      areaEstimate: getOccupiedProjectedArea(
+        points,
+        cluster.support,
+        cluster.representative.candidate,
+        config.projectedAreaCellSizeMeters,
+      ),
+    },
     support: cluster.representative.support,
     ownershipSupport: cluster.support,
-    surfaceFamily: createSurfaceFamilyMetadata(cluster, points, config),
+    surfaceFamily: createSurfaceFamilyMetadata(cluster, points, config, `surface-family-${index + 1}`),
   }))
   return { groups, diagnostics }
+}
+
+function getOwnedSupport(group: CandidateGroup): readonly number[] {
+  return group.ownershipSupport ?? group.support
+}
+
+function getConsensusProjectedCells(
+  points: readonly AnalysisPoint[],
+  support: readonly number[],
+  candidate: PlaneCandidate,
+  cellSize: number,
+): Set<string> {
+  return getProjectedOccupiedCells(
+    points,
+    support,
+    candidate.centroid,
+    candidate.tangentU,
+    candidate.tangentV,
+    cellSize,
+  )
+}
+
+function countCellIntersection(first: Set<string>, second: Set<string>): number {
+  const smaller = first.size <= second.size ? first : second
+  const larger = first.size <= second.size ? second : first
+  let intersection = 0
+  for (const key of smaller) {
+    if (larger.has(key)) {
+      intersection += 1
+    }
+  }
+  return intersection
+}
+
+function getConsensusPairMetrics(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): SurfaceConsensusPairMetrics {
+  const relation = getPlaneRelation(first.candidate, second.candidate)
+  const reference = first.candidate
+  const firstCells = getConsensusProjectedCells(
+    points,
+    getOwnedSupport(first),
+    reference,
+    config.surfaceFamilySupportCellSizeMeters,
+  )
+  const secondCells = getConsensusProjectedCells(
+    points,
+    getOwnedSupport(second),
+    reference,
+    config.surfaceFamilySupportCellSizeMeters,
+  )
+  const intersectionCells = countCellIntersection(firstCells, secondCells)
+  const unionCells = firstCells.size + secondCells.size - intersectionCells
+  const cellArea = config.surfaceFamilySupportCellSizeMeters ** 2
+  return {
+    angularDifferenceDegrees: relation.angularDifferenceDegrees,
+    planeOffsetDifferenceMeters: relation.planeOffsetDifferenceMeters,
+    intersectionCells,
+    unionCells,
+    projectedIoU: unionCells > 0 ? intersectionCells / unionCells : 0,
+    firstCoverageBySecond: firstCells.size > 0 ? intersectionCells / firstCells.size : 0,
+    secondCoverageByFirst: secondCells.size > 0 ? intersectionCells / secondCells.size : 0,
+    firstOccupiedArea: firstCells.size * cellArea,
+    secondOccupiedArea: secondCells.size * cellArea,
+    separationMeters: relation.planeOffsetDifferenceMeters,
+  }
+}
+
+function getConsensusSupportGroup(
+  cluster: SurfaceConsensusCluster,
+  candidate: PlaneCandidate,
+): CandidateGroup {
+  return {
+    candidate,
+    support: cluster.support,
+  }
+}
+
+function getConsensusPlaneOffsetCompatibility(
+  first: SurfaceConsensusCluster,
+  second: SurfaceConsensusCluster,
+  config: PlaneExtractionConfig,
+): boolean {
+  return first.members.some((firstMember) => second.members.some((secondMember) =>
+    getPlaneRelation(firstMember.candidate, secondMember.candidate).planeOffsetDifferenceMeters <=
+      config.surfaceConsensusOffsetToleranceMeters))
+}
+
+function getConsensusRejectReason(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  metrics: SurfaceConsensusPairMetrics,
+  config: PlaneExtractionConfig,
+  skipOffsetCheck = false,
+): string | null {
+  if (metrics.angularDifferenceDegrees > config.surfaceConsensusNormalAngleDegrees) {
+    return 'full normal angle'
+  }
+  if (!skipOffsetCheck && metrics.planeOffsetDifferenceMeters > config.surfaceConsensusOffsetToleranceMeters) {
+    return 'plane offset'
+  }
+  if (metrics.projectedIoU < config.surfaceConsensusMinimumProjectedIoU) {
+    return 'projected IoU'
+  }
+  if (metrics.firstCoverageBySecond < config.surfaceConsensusMinimumCoverageRatio ||
+    metrics.secondCoverageByFirst < config.surfaceConsensusMinimumCoverageRatio) {
+    return 'asymmetric projected support'
+  }
+  const largerArea = Math.max(metrics.firstOccupiedArea, metrics.secondOccupiedArea)
+  const areaRatio = largerArea > 0
+    ? Math.min(metrics.firstOccupiedArea, metrics.secondOccupiedArea) / largerArea
+    : 0
+  if (areaRatio < config.surfaceConsensusMinimumAreaRatio) {
+    return 'different occupied extent'
+  }
+  if (getOwnedSupport(first).length === 0 || getOwnedSupport(second).length === 0) {
+    return 'empty support'
+  }
+  return null
+}
+
+function selectSurfaceConsensusRepresentative(members: readonly CandidateGroup[]): CandidateGroup {
+  let best = members[0]
+  let bestScore = Number.POSITIVE_INFINITY
+  for (const member of members) {
+    let disagreement = 0
+    let comparisonWeight = 0
+    for (const other of members) {
+      if (other === member) {
+        continue
+      }
+      const relation = getPlaneRelation(member.candidate, other.candidate)
+      const weight = Math.max(1, getOwnedSupport(other).length)
+      disagreement += weight * (relation.planeOffsetDifferenceMeters +
+        (relation.angularDifferenceDegrees * Math.PI) / 180 * 0.05)
+      comparisonWeight += weight
+    }
+    const weightedDisagreement = comparisonWeight > 0 ? disagreement / comparisonWeight : 0
+    const score = weightedDisagreement + member.candidate.rmsError * 0.1 -
+      getOwnedSupport(member).length * 1e-5 - member.candidate.confidence * 0.001
+    if (score < bestScore) {
+      best = member
+      bestScore = score
+    }
+  }
+  return best
+}
+
+function getConsensusClusterThickness(
+  first: SurfaceConsensusCluster,
+  second: SurfaceConsensusCluster,
+): number {
+  const referenceNormal = first.representative.candidate.normal
+  const offsets = getConsensusClusterOffsets(first, referenceNormal)
+  offsets.push(...getConsensusClusterOffsets(second, referenceNormal))
+  return Math.max(...offsets) - Math.min(...offsets)
+}
+
+function getConsensusClusterOffsets(
+  cluster: SurfaceConsensusCluster,
+  referenceNormal: SpatialPoint,
+): number[] {
+  const offsets: number[] = []
+  for (const member of cluster.members) {
+    const family = member.surfaceFamily
+    if (!family) {
+      offsets.push(getAlignedPlaneOffset(member.candidate, referenceNormal))
+      continue
+    }
+    const direction = dot(referenceNormal, member.candidate.normal) < 0 ? -1 : 1
+    offsets.push(family.minimumPlaneOffset * direction, family.maximumPlaneOffset * direction)
+  }
+  return offsets
+}
+
+function areSurfaceConsensusClustersCompatible(
+  first: SurfaceConsensusCluster,
+  second: SurfaceConsensusCluster,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): boolean {
+  const representativePair = getConsensusPairMetrics(
+    getConsensusSupportGroup(first, first.representative.candidate),
+    getConsensusSupportGroup(second, second.representative.candidate),
+    points,
+    config,
+  )
+  if (representativePair.angularDifferenceDegrees > config.surfaceConsensusNormalAngleDegrees ||
+    !getConsensusPlaneOffsetCompatibility(first, second, config) ||
+    getConsensusClusterThickness(first, second) > config.surfaceConsensusMaximumThicknessMeters) {
+    return false
+  }
+  const rejectReason = getConsensusRejectReason(
+    getConsensusSupportGroup(first, first.representative.candidate),
+    getConsensusSupportGroup(second, second.representative.candidate),
+    representativePair,
+    config,
+    true,
+  )
+  return rejectReason === null
+}
+
+function createSurfaceConsensusMetadata(
+  cluster: SurfaceConsensusCluster,
+  consensusId: string,
+): SurfaceConsensusMetadata {
+  const reference = cluster.representative.candidate
+  const offsets = getConsensusClusterOffsets(cluster, reference.normal)
+  const memberPlaneIds = cluster.members.flatMap((member) => member.surfaceFamily?.memberPlaneIds ?? [member.candidate.id])
+  const memberFamilyIds = cluster.members.map((member) => member.surfaceFamily?.familyId ?? member.candidate.id)
+  const representativeFamily = cluster.representative.surfaceFamily
+  return {
+    consensusId,
+    memberFamilyIds,
+    memberPlaneIds,
+    totalDepthSpanMeters: Math.max(...offsets) - Math.min(...offsets),
+    representativePlaneId: reference.id,
+    directRepresentativeSupport: representativeFamily?.directRepresentativeSupport ?? cluster.representative.support.length,
+    absorbedLayerSupport: Math.max(0, cluster.support.length -
+      (representativeFamily?.directRepresentativeSupport ?? cluster.representative.support.length)),
+  }
+}
+
+function consolidateSurfaceConsensus(
+  familyGroups: readonly CandidateGroup[],
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): SurfaceConsensusResult {
+  const pairs: SurfaceConsensusPairDiagnostic[] = []
+  for (let firstIndex = 0; firstIndex < familyGroups.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < familyGroups.length; secondIndex += 1) {
+      const first = familyGroups[firstIndex]
+      const second = familyGroups[secondIndex]
+      const metrics = getConsensusPairMetrics(first, second, points, config)
+      const rejectReason = getConsensusRejectReason(first, second, metrics, config)
+      const pairThickness = getConsensusClusterThickness(
+        { members: [first], support: [], representative: first },
+        { members: [second], support: [], representative: second },
+      )
+      pairs.push({
+        firstFamilyId: first.surfaceFamily?.familyId ?? first.candidate.id,
+        secondFamilyId: second.surfaceFamily?.familyId ?? second.candidate.id,
+        angularDifferenceDegrees: metrics.angularDifferenceDegrees,
+        planeOffsetDifferenceMeters: metrics.planeOffsetDifferenceMeters,
+        intersectionCells: metrics.intersectionCells,
+        unionCells: metrics.unionCells,
+        projectedIoU: metrics.projectedIoU,
+        firstCoverageBySecondPercentage: metrics.firstCoverageBySecond * 100,
+        secondCoverageByFirstPercentage: metrics.secondCoverageByFirst * 100,
+        firstOccupiedArea: metrics.firstOccupiedArea,
+        secondOccupiedArea: metrics.secondOccupiedArea,
+        separationMeters: metrics.separationMeters,
+        merged: rejectReason === null && pairThickness <= config.surfaceConsensusMaximumThicknessMeters,
+        rejectReason: rejectReason ?? (pairThickness > config.surfaceConsensusMaximumThicknessMeters
+          ? 'surface-family thickness'
+          : null),
+      })
+    }
+  }
+
+  let clusters = familyGroups.map((group) => ({
+    members: [group],
+    support: [...getOwnedSupport(group)],
+    representative: group,
+  }))
+  let consensusPairTests = 0
+  for (let pass = 0; pass < config.maximumConsolidationPasses; pass += 1) {
+    let mergedThisPass = false
+    for (let firstIndex = 0; firstIndex < clusters.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < clusters.length; secondIndex += 1) {
+        consensusPairTests += 1
+        if (!areSurfaceConsensusClustersCompatible(clusters[firstIndex], clusters[secondIndex], points, config)) {
+          continue
+        }
+        const members = [...clusters[firstIndex].members, ...clusters[secondIndex].members]
+        clusters[firstIndex] = {
+          members,
+          support: Array.from(new Set([...clusters[firstIndex].support, ...clusters[secondIndex].support])),
+          representative: selectSurfaceConsensusRepresentative(members),
+        }
+        clusters.splice(secondIndex, 1)
+        mergedThisPass = true
+        break
+      }
+      if (mergedThisPass) {
+        break
+      }
+    }
+    if (!mergedThisPass) {
+      break
+    }
+  }
+
+  const groups = clusters.map((cluster, index) => {
+    const metadata = createSurfaceConsensusMetadata(cluster, `surface-consensus-${index + 1}`)
+    return {
+      candidate: {
+        ...cluster.representative.candidate,
+        areaEstimate: getOccupiedProjectedArea(
+          points,
+          cluster.support,
+          cluster.representative.candidate,
+          config.projectedAreaCellSizeMeters,
+        ),
+      },
+      support: cluster.representative.support,
+      ownershipSupport: cluster.support,
+      surfaceConsensus: metadata,
+    }
+  })
+  return {
+    groups,
+    diagnostics: {
+      preConsensusSurfaceFamilyCount: familyGroups.length,
+      finalConsensusSurfaceCount: clusters.length,
+      consensusPairTests: pairs.length + consensusPairTests,
+      consensusMerges: Math.max(0, familyGroups.length - clusters.length),
+      pairs,
+    },
+  }
 }
 
 function getPlaneSeedCompatibility(
@@ -1899,6 +2310,7 @@ function assignPointOwnership(
       candidate,
       support,
       surfaceFamily: group.surfaceFamily,
+      surfaceConsensus: group.surfaceConsensus,
     })
     assignedPointCount += support.length
   })
@@ -2467,11 +2879,29 @@ export class PlaneExtractionService {
     const consolidationStartedAt = getTimestamp()
     const surfaceFamilies = consolidateSurfaceFamilies(ransac.groups, prepared.points, this.config)
     const consolidationFinishedAt = getTimestamp()
+    const consensusStartedAt = getTimestamp()
+    const surfaceConsensus = consolidateSurfaceConsensus(
+      surfaceFamilies.groups,
+      prepared.points,
+      this.config,
+    )
+    const consensusFinishedAt = getTimestamp()
     const ownershipStartedAt = getTimestamp()
-    const owned = assignPointOwnership(prepared.points, surfaceFamilies.groups, this.config)
+    const owned = assignPointOwnership(prepared.points, surfaceConsensus.groups, this.config)
     const ownershipFinishedAt = getTimestamp()
     const rankedGroups = owned.groups
-      .slice()
+      .map((group) => ({
+        ...group,
+        candidate: {
+          ...group.candidate,
+          areaEstimate: getOccupiedProjectedArea(
+            prepared.points,
+            group.support,
+            group.candidate,
+            this.config.projectedAreaCellSizeMeters,
+          ),
+        },
+      }))
       .sort((left, right) => right.candidate.areaEstimate - left.candidate.areaEstimate)
     const planes = rankedGroups
       .map((group) => group.candidate)
@@ -2492,15 +2922,28 @@ export class PlaneExtractionService {
       ? (rankedGroups.slice(0, 3).reduce((total, group) => total + group.support.length, 0) /
         owned.assignedPointCount) * 100
       : 0
+    const unassignedPointCount = Math.max(0, prepared.points.length - owned.assignedPointCount)
+    const ownedSupportCount = rankedGroups.reduce((total, group) => total + group.support.length, 0)
+    const supportAccountingConsistent = ownedSupportCount + unassignedPointCount === prepared.points.length &&
+      owned.assignedPointCount === ownedSupportCount
     const planeRelationships = createPlaneRelationshipDiagnostics(planes)
-    const surfaceFamilyDiagnostics: SurfaceFamilyDiagnostic[] = rankedGroups.flatMap((group, index) => {
+    const surfaceFamilyDiagnostics: SurfaceFamilyDiagnostic[] = surfaceFamilies.groups.flatMap((group) => {
       if (!group.surfaceFamily) {
         return []
       }
       const family = group.surfaceFamily
+      const finalGroupIndex = rankedGroups.findIndex((finalGroup) =>
+        finalGroup.surfaceConsensus?.memberFamilyIds.includes(family.familyId) === true)
+      const familySupport = getOwnedSupport(group)
+      const familyArea = getOccupiedProjectedArea(
+        prepared.points,
+        familySupport,
+        group.candidate,
+        this.config.projectedAreaCellSizeMeters,
+      )
       return [{
-        familyId: `surface-family-${index + 1}`,
-        finalPlaneId: `plane-${index + 1}`,
+        familyId: family.familyId,
+        finalPlaneId: finalGroupIndex >= 0 ? `plane-${finalGroupIndex + 1}` : 'unassigned',
         memberPlaneIds: [...family.memberPlaneIds],
         representativePlaneId: family.representativePlaneId,
         normalSpreadDegrees: family.normalSpreadDegrees,
@@ -2510,10 +2953,30 @@ export class PlaneExtractionService {
         projectedSupportOverlapPercentage: family.projectedSupportOverlapPercentage,
         directRepresentativeSupport: family.directRepresentativeSupport,
         absorbedDuplicateLayerSupport: family.absorbedDuplicateLayerSupport,
-        combinedPhysicalSupport: group.support.length,
+        combinedPhysicalSupport: familySupport.length,
         combinedSupportPercentage: owned.assignedPointCount > 0
-          ? (group.support.length / owned.assignedPointCount) * 100
+          ? (familySupport.length / owned.assignedPointCount) * 100
           : 0,
+        finalOwnedAreaEstimate: familyArea,
+      }]
+    })
+    const surfaceConsensusDiagnostics: SurfaceConsensusDiagnostic[] = rankedGroups.flatMap((group, index) => {
+      if (!group.surfaceConsensus) {
+        return []
+      }
+      const consensus = group.surfaceConsensus
+      return [{
+        consensusId: consensus.consensusId,
+        finalPlaneId: `plane-${index + 1}`,
+        memberFamilyIds: [...consensus.memberFamilyIds],
+        memberPlaneIds: [...consensus.memberPlaneIds],
+        totalDepthSpanMeters: consensus.totalDepthSpanMeters,
+        representativePlaneId: consensus.representativePlaneId,
+        directRepresentativeSupport: consensus.directRepresentativeSupport,
+        absorbedLayerSupport: consensus.absorbedLayerSupport,
+        finalOwnedSupport: group.support.length,
+        finalOwnedAreaEstimate: group.candidate.areaEstimate,
+        representativeRmsError: group.candidate.rmsError,
       }]
     })
 
@@ -2534,11 +2997,16 @@ export class PlaneExtractionService {
         surfaceFamilyPairsTested: surfaceFamilies.diagnostics.surfaceFamilyPairsTested,
         surfaceFamilyMerges: surfaceFamilies.diagnostics.surfaceFamilyMerges,
         finalConsolidatedPlaneCount: planes.length,
+        preConsensusSurfaceFamilyCount: surfaceConsensus.diagnostics.preConsensusSurfaceFamilyCount,
+        finalConsensusSurfaceCount: surfaceConsensus.diagnostics.finalConsensusSurfaceCount,
+        consensusPairTests: surfaceConsensus.diagnostics.consensusPairTests,
+        consensusMerges: surfaceConsensus.diagnostics.consensusMerges,
         planeCount: planes.length,
         assignedPoints: owned.assignedPointCount,
-        unassignedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
+        unassignedPoints: unassignedPointCount,
         assignedPercentage,
-        rejectedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
+        supportAccountingConsistent,
+        rejectedPoints: unassignedPointCount,
         candidatePairsTested: legacyConsolidationDiagnostics.candidatePairsTested,
         highOverlapCandidatePairs: legacyConsolidationDiagnostics.highOverlapCandidatePairs,
         candidatesMerged: legacyConsolidationDiagnostics.candidatesMerged,
@@ -2563,10 +3031,10 @@ export class PlaneExtractionService {
         refinedRmsError: ransac.diagnostics.refinedRmsError,
         refinedOccupiedArea: ransac.diagnostics.refinedOccupiedArea,
         acceptedDominantPlaneCount: ransac.diagnostics.acceptedDominantPlanes,
-        largestPlaneSupportPointCount: largestPlane?.supportPointCount ?? 0,
+        largestPlaneSupportPointCount: largestGroup?.support.length ?? 0,
         largestPlaneOccupiedArea: largestPlane?.areaEstimate ?? 0,
         largestPlaneRmsError: largestPlane?.rmsError ?? 0,
-        secondLargestPlaneSupportPointCount: secondLargestPlane?.supportPointCount ?? 0,
+        secondLargestPlaneSupportPointCount: rankedGroups[1]?.support.length ?? 0,
         secondLargestPlaneOccupiedArea: secondLargestPlane?.areaEstimate ?? 0,
         secondLargestPlaneRmsError: secondLargestPlane?.rmsError ?? 0,
         largestPlaneSupportPercentage,
@@ -2584,6 +3052,8 @@ export class PlaneExtractionService {
       },
       planeRelationships: Object.freeze(planeRelationships),
       surfaceFamilies: Object.freeze(surfaceFamilyDiagnostics),
+      surfaceConsensus: Object.freeze(surfaceConsensusDiagnostics),
+      surfaceConsensusPairs: Object.freeze(surfaceConsensus.diagnostics.pairs),
       ransacIterationsPerPlane: Object.freeze([...ransac.diagnostics.iterationsPerAcceptedPlane]),
       timings: {
         inputPreparationMs: prepared.inputPreparationMs,
@@ -2591,6 +3061,7 @@ export class PlaneExtractionService {
         initialExtractionMs: ransac.diagnostics.ransacMs,
         consolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
         surfaceFamilyConsolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
+        surfaceConsensusMs: Math.max(0, consensusFinishedAt - consensusStartedAt),
         ransacMs: ransac.diagnostics.ransacMs,
         refinementMs: ransac.diagnostics.refinementMs,
         globalReassemblyMs: ransac.diagnostics.refinementMs,

@@ -39,7 +39,7 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
             Geometric candidates only; no wall, floor, or ceiling classification is applied.
           </span>
         </div>
-        <strong>{analysisResult.stats.finalConsolidatedPlaneCount}</strong>
+          <strong>{analysisResult.stats.finalConsensusSurfaceCount}</strong>
       </div>
       <div className="scanner-analysis-timings">
         <span>Analysis method: Global dominant planes (position-first, deterministic RANSAC)</span>
@@ -62,12 +62,12 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
           <strong>{analysisResult.stats.rawRansacPlaneCount}</strong>
         </div>
         <div>
-          <span>Surface families</span>
+          <span>Initial surface families</span>
           <strong>{analysisResult.stats.surfaceFamilyClusterCount}</strong>
         </div>
         <div>
-          <span>Final surface planes</span>
-          <strong>{analysisResult.stats.finalConsolidatedPlaneCount}</strong>
+          <span>Final consensus surfaces</span>
+          <strong>{analysisResult.stats.finalConsensusSurfaceCount}</strong>
         </div>
         <div>
           <span>Assigned points</span>
@@ -80,7 +80,7 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
       </div>
       <div className="scanner-analysis-timings">
         <span>
-          Timing: preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms | downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms | RANSAC {analysisResult.timings.ransacMs.toFixed(1)} ms | consolidation {analysisResult.timings.surfaceFamilyConsolidationMs.toFixed(1)} ms | ownership {analysisResult.timings.ownershipMs.toFixed(1)} ms | total {analysisResult.timings.totalMs.toFixed(1)} ms
+          Timing: preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms | downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms | RANSAC {analysisResult.timings.ransacMs.toFixed(1)} ms | layer consolidation {analysisResult.timings.surfaceFamilyConsolidationMs.toFixed(1)} ms | final consensus {analysisResult.timings.surfaceConsensusMs.toFixed(1)} ms | ownership {analysisResult.timings.ownershipMs.toFixed(1)} ms | total {analysisResult.timings.totalMs.toFixed(1)} ms
         </span>
       </div>
       <div className="scanner-analysis-timings">
@@ -90,7 +90,12 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
       </div>
       <div className="scanner-analysis-timings">
         <span>
-          Surface-family pairs {analysisResult.stats.surfaceFamilyPairsTested} | merges {analysisResult.stats.surfaceFamilyMerges}
+          Layer-family pairs {analysisResult.stats.surfaceFamilyPairsTested} | layer merges {analysisResult.stats.surfaceFamilyMerges} | consensus pairs {analysisResult.stats.consensusPairTests} | consensus merges {analysisResult.stats.consensusMerges}
+        </span>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Final support accounting: {analysisResult.stats.supportAccountingConsistent ? 'consistent' : 'inconsistent'} | assigned {analysisResult.stats.assignedPoints} | unassigned {analysisResult.stats.unassignedPoints}
         </span>
       </div>
       {analysisResult.planeRelationships.length > 0 ? (
@@ -103,25 +108,42 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
       {analysisResult.surfaceFamilies.map((family) => (
         <div className="scanner-analysis-timings" key={family.familyId}>
           <span>
-            {family.familyId} -&gt; {family.memberPlaneIds.join(', ')} | normal spread {family.normalSpreadDegrees.toFixed(1)} deg | d {family.minimumPlaneOffset.toFixed(3)} to {family.maximumPlaneOffset.toFixed(3)} m | thickness {family.clusterThicknessMeters.toFixed(3)} m | projected overlap {family.projectedSupportOverlapPercentage.toFixed(1)}% | direct {family.directRepresentativeSupport} | duplicate layer {family.absorbedDuplicateLayerSupport} | combined {family.combinedPhysicalSupport} ({family.combinedSupportPercentage.toFixed(1)}%)
+            {family.familyId} -&gt; {family.memberPlaneIds.join(', ')} | normal spread {family.normalSpreadDegrees.toFixed(1)} deg | d {family.minimumPlaneOffset.toFixed(3)} to {family.maximumPlaneOffset.toFixed(3)} m | thickness {family.clusterThicknessMeters.toFixed(3)} m | projected overlap {family.projectedSupportOverlapPercentage.toFixed(1)}% | direct {family.directRepresentativeSupport} | duplicate layer {family.absorbedDuplicateLayerSupport} | combined {family.combinedPhysicalSupport} ({family.combinedSupportPercentage.toFixed(1)}%) | family occupied area {family.finalOwnedAreaEstimate.toFixed(2)} m2
+          </span>
+        </div>
+      ))}
+      {analysisResult.surfaceConsensusPairs.slice(0, 8).map((pair) => (
+        <div className="scanner-analysis-timings" key={`${pair.firstFamilyId}-${pair.secondFamilyId}`}>
+          <span>
+            Consensus {pair.firstFamilyId}/{pair.secondFamilyId} | angle {pair.angularDifferenceDegrees.toFixed(1)} deg | delta d {pair.planeOffsetDifferenceMeters.toFixed(3)} m | IoU {pair.projectedIoU.toFixed(2)} | A by B {pair.firstCoverageBySecondPercentage.toFixed(1)}% | B by A {pair.secondCoverageByFirstPercentage.toFixed(1)}% | areas {pair.firstOccupiedArea.toFixed(2)} / {pair.secondOccupiedArea.toFixed(2)} m2 | separation {pair.separationMeters.toFixed(3)} m | {pair.merged ? 'merged' : `kept separate (${pair.rejectReason ?? 'ambiguous'})`}
+          </span>
+        </div>
+      ))}
+      {analysisResult.surfaceConsensus.map((consensus) => (
+        <div className="scanner-analysis-timings" key={consensus.consensusId}>
+          <span>
+            {consensus.consensusId} | families {consensus.memberFamilyIds.join(', ')} | representative {consensus.representativePlaneId} | depth span {consensus.totalDepthSpanMeters.toFixed(3)} m | direct {consensus.directRepresentativeSupport} | absorbed layers {consensus.absorbedLayerSupport} | final owned {consensus.finalOwnedSupport} | final area {consensus.finalOwnedAreaEstimate.toFixed(2)} m2 | RMS {consensus.representativeRmsError.toFixed(3)} m
           </span>
         </div>
       ))}
       {analysisResult.planes.length > 0 ? (
         <div className="scanner-plane-list">
-          {analysisResult.planes.map((plane) => (
-            <div className="scanner-plane-row" key={plane.id}>
-              <span>
-                <strong>{plane.id}</strong>
-                <small>
-                  {plane.orientationCategory} | {plane.orientationAngleDegrees.toFixed(0)} deg from world-up | normal ({plane.normal.x.toFixed(2)}, {plane.normal.y.toFixed(2)}, {plane.normal.z.toFixed(2)}) | d {(-plane.planeConstant).toFixed(3)}
-                </small>
-              </span>
-              <span>
-                {plane.supportPointCount} pts | {plane.areaEstimate.toFixed(2)} m2 | RMS {plane.rmsError.toFixed(3)} m
-              </span>
-            </div>
-          ))}
+          {analysisResult.planes.map((plane) => {
+            const consensus = analysisResult.surfaceConsensus.find((item) => item.finalPlaneId === plane.id)
+            return (
+              <div className="scanner-plane-row" key={plane.id}>
+                <span>
+                  <strong>{plane.id}</strong>
+                  <small>
+                    {plane.orientationCategory} | {plane.orientationAngleDegrees.toFixed(0)} deg from world-up | normal ({plane.normal.x.toFixed(2)}, {plane.normal.y.toFixed(2)}, {plane.normal.z.toFixed(2)}) | d {(-plane.planeConstant).toFixed(3)}
+                  </small>
+                </span>
+                <span>
+                  Final owned support {consensus?.finalOwnedSupport ?? plane.supportPointCount} | final family area {consensus?.finalOwnedAreaEstimate.toFixed(2) ?? plane.areaEstimate.toFixed(2)} m2 | RMS {plane.rmsError.toFixed(3)} m
+                </span>
+              </div>
+            )
+          })}
         </div>
       ) : (
         <p className="scanner-analysis-empty">
@@ -324,23 +346,23 @@ function ScannerFinishedView({
           </div>
           <div className="scanner-analysis-timings">
             <span>
-              Global reassembly {analysisResult.timings.globalReassemblyMs.toFixed(1)} ms Â· parameter clusters {analysisResult.stats.planeParameterClusterCount} Â· seeds {analysisResult.stats.globalPlanesAttempted} Â· accepted {analysisResult.stats.globalPlanesAccepted} Â· absorbed points {analysisResult.stats.globalPointsAbsorbed} Â· absorbed fragments {analysisResult.stats.globalFragmentsAbsorbed} Â· passes {analysisResult.stats.globalExpansionPasses} Â· refits {analysisResult.stats.globalPlaneRefits}
+              Global reassembly {analysisResult.timings.globalReassemblyMs.toFixed(1)} ms | parameter clusters {analysisResult.stats.planeParameterClusterCount} | seeds {analysisResult.stats.globalPlanesAttempted} | accepted {analysisResult.stats.globalPlanesAccepted} | absorbed points {analysisResult.stats.globalPointsAbsorbed} | absorbed fragments {analysisResult.stats.globalFragmentsAbsorbed} | passes {analysisResult.stats.globalExpansionPasses} | refits {analysisResult.stats.globalPlaneRefits}
             </span>
           </div>
           <div className="scanner-analysis-timings">
             <span>
-              Global support rejects: residual {analysisResult.stats.globalResidualRejects} Â· normal {analysisResult.stats.globalNormalRejects} Â· projected support {analysisResult.stats.globalSupportRejects}
+              Global support rejects: residual {analysisResult.stats.globalResidualRejects} | normal {analysisResult.stats.globalNormalRejects} | projected support {analysisResult.stats.globalSupportRejects}
             </span>
           </div>
           <div className="scanner-analysis-timings">
             <span>
-              Largest support {analysisResult.stats.largestPlaneSupportPercentage.toFixed(1)}% Â· second support {analysisResult.stats.secondLargestPlaneSupportPercentage.toFixed(1)}% Â· top 3 support {analysisResult.stats.topThreePlaneSupportPercentage.toFixed(1)}% of assigned points
+              Largest support {analysisResult.stats.largestPlaneSupportPercentage.toFixed(1)}% | second support {analysisResult.stats.secondLargestPlaneSupportPercentage.toFixed(1)}% | top 3 support {analysisResult.stats.topThreePlaneSupportPercentage.toFixed(1)}% of assigned points
             </span>
           </div>
           {analysisResult.planeRelationships.length > 0 ? (
             <div className="scanner-analysis-timings">
               <span>
-                Top plane relations: {analysisResult.planeRelationships.map((relationship) => `${relationship.firstPlaneId}/${relationship.secondPlaneId} ${relationship.angularDifferenceDegrees.toFixed(1)}° / Δd ${relationship.planeOffsetDifferenceMeters.toFixed(3)} m`).join(' Â· ')}
+                Top plane relations: {analysisResult.planeRelationships.map((relationship) => `${relationship.firstPlaneId}/${relationship.secondPlaneId} ${relationship.angularDifferenceDegrees.toFixed(1)} deg / delta d ${relationship.planeOffsetDifferenceMeters.toFixed(3)} m`).join(' | ')}
               </span>
             </div>
           ) : null}

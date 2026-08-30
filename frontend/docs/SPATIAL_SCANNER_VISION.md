@@ -458,6 +458,14 @@ surfaces such as opposite walls or separate object faces. The representative
 plane remains a real fitted layer; duplicate-layer support is tracked
 separately for ownership and diagnostics.
 
+The resulting surface families then pass through a small final physical-surface
+consensus stage. It compares sign-aligned full normals, canonical plane
+separation, occupied projected support overlap, spatial extent, and bounded
+depth span to suppress alternate nearby measurements of the same surface. A
+consensus surface retains a real representative layer and tracks absorbed
+duplicate-layer support separately; it does not average arbitrary parallel
+geometry or merge disconnected physical surfaces without supporting evidence.
+
 ## Technical direction
 
 The current browser technology direction is:

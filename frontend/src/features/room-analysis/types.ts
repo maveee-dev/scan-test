@@ -37,6 +37,7 @@ export interface RoomAnalysisTimings {
   readonly initialExtractionMs: number
   readonly consolidationMs: number
   readonly surfaceFamilyConsolidationMs: number
+  readonly surfaceConsensusMs: number
   readonly ransacMs: number
   readonly refinementMs: number
   readonly globalReassemblyMs: number
@@ -66,6 +67,38 @@ export interface SurfaceFamilyDiagnostic {
   readonly absorbedDuplicateLayerSupport: number
   readonly combinedPhysicalSupport: number
   readonly combinedSupportPercentage: number
+  readonly finalOwnedAreaEstimate: number
+}
+
+export interface SurfaceConsensusPairDiagnostic {
+  readonly firstFamilyId: string
+  readonly secondFamilyId: string
+  readonly angularDifferenceDegrees: number
+  readonly planeOffsetDifferenceMeters: number
+  readonly intersectionCells: number
+  readonly unionCells: number
+  readonly projectedIoU: number
+  readonly firstCoverageBySecondPercentage: number
+  readonly secondCoverageByFirstPercentage: number
+  readonly firstOccupiedArea: number
+  readonly secondOccupiedArea: number
+  readonly separationMeters: number
+  readonly merged: boolean
+  readonly rejectReason: string | null
+}
+
+export interface SurfaceConsensusDiagnostic {
+  readonly consensusId: string
+  readonly finalPlaneId: string
+  readonly memberFamilyIds: readonly string[]
+  readonly memberPlaneIds: readonly string[]
+  readonly totalDepthSpanMeters: number
+  readonly representativePlaneId: string
+  readonly directRepresentativeSupport: number
+  readonly absorbedLayerSupport: number
+  readonly finalOwnedSupport: number
+  readonly finalOwnedAreaEstimate: number
+  readonly representativeRmsError: number
 }
 
 export interface RoomAnalysisResult {
@@ -85,10 +118,15 @@ export interface RoomAnalysisResult {
     readonly surfaceFamilyPairsTested: number
     readonly surfaceFamilyMerges: number
     readonly finalConsolidatedPlaneCount: number
+    readonly preConsensusSurfaceFamilyCount: number
+    readonly finalConsensusSurfaceCount: number
+    readonly consensusPairTests: number
+    readonly consensusMerges: number
     readonly planeCount: number
     readonly assignedPoints: number
     readonly unassignedPoints: number
     readonly assignedPercentage: number
+    readonly supportAccountingConsistent: boolean
     readonly rejectedPoints: number
     readonly candidatePairsTested: number
     readonly highOverlapCandidatePairs: number
@@ -135,6 +173,8 @@ export interface RoomAnalysisResult {
   }
   readonly planeRelationships: readonly PlaneRelationshipDiagnostic[]
   readonly surfaceFamilies: readonly SurfaceFamilyDiagnostic[]
+  readonly surfaceConsensus: readonly SurfaceConsensusDiagnostic[]
+  readonly surfaceConsensusPairs: readonly SurfaceConsensusPairDiagnostic[]
   readonly ransacIterationsPerPlane: readonly number[]
   readonly timings: RoomAnalysisTimings
 }
