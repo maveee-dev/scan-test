@@ -4,6 +4,7 @@ import type {
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
   SpatialPointDebug,
+  DenseMaskStabilizationOptions,
   XRPresentationStatus,
   ViewerPoseDebug,
   ViewerDirection,
@@ -27,7 +28,13 @@ import {
 import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
-const DENSE_MASK_UPDATE_INTERVAL_MS = 140
+// Keep XR pose/render callbacks at the browser's cadence while rebuilding the
+// dense depth mask at a bounded ~5.6 Hz on mobile hardware.
+const DENSE_MASK_UPDATE_INTERVAL_MS = 180
+
+function getPerformanceTimestamp(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
 
 export type XRSessionEndReason = 'stopped' | 'finished' | 'external'
 
@@ -201,6 +208,10 @@ export class XRSessionService {
 
   public setDebugGeometryVisible(visible: boolean): void {
     this.spatialCoverageRenderService.setDebugGeometryVisible(visible)
+  }
+
+  public setDenseMaskStabilizationOptions(options: DenseMaskStabilizationOptions): void {
+    this.denseSurfaceMaskService.setStabilizationOptions(options)
   }
 
   public async stop(): Promise<void> {
@@ -466,6 +477,7 @@ export class XRSessionService {
         pose?.views[0] &&
         time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS
       ) {
+        const depthReconstructionStartedAt = getPerformanceTimestamp()
         const denseDepthObservation = this.depthService.inspectDenseFrame(
           frame,
           pose.views[0],
@@ -475,6 +487,10 @@ export class XRSessionService {
         if (denseDepthObservation) {
           const densePointFrame = this.spatialPointService.processDenseFrame(
             denseDepthObservation,
+          )
+          const depthReconstructionDurationMs = Math.max(
+            0,
+            getPerformanceTimestamp() - depthReconstructionStartedAt,
           )
           this.spatialCoverageService.processDenseFrame(
             densePointFrame,
@@ -488,12 +504,12 @@ export class XRSessionService {
             densePointFrame,
             this.spatialCoverageService,
             time,
+            depthReconstructionDurationMs,
           )
           this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
           this.lastDenseMaskUpdatedAt = time
         } else {
           const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(
-            this.spatialCoverageService,
             time,
           )
           this.spatialCoverageRenderService.updateDenseMesh(cachedDenseMesh)

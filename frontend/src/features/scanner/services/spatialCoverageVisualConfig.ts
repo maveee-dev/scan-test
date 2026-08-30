@@ -1,4 +1,4 @@
-import type { CoverageCellState } from '../types'
+import type { CoverageCellState, DenseMaskStabilizationOptions } from '../types'
 
 /** Logical persistence uses 5 cm cells; rendered patches remain subtly inset. */
 export const COVERAGE_VISUAL_PATCH_SIZE_METERS = 0.085
@@ -23,7 +23,9 @@ export const COVERAGE_VISUAL_COLORS: Record<CoverageCellState, readonly [number,
 /** Short-lived presentation-only stabilization; never enters persistent scan data. */
 export const DENSE_VISUAL_STABILIZATION_CONFIG = {
   cacheLifetimeMs: 220,
-  maxCacheEntries: 6_000,
+  // One shared world-space sample cache is capped at 3,000 entries so visual
+  // continuity cannot create unbounded mobile-memory or matching work.
+  maxCacheEntries: 3_000,
   smoothingAlpha: 0.35,
   smoothingMaxDistanceMeters: 0.06,
   smoothingMaxPointToPlaneMeters: 0.035,
@@ -32,3 +34,10 @@ export const DENSE_VISUAL_STABILIZATION_CONFIG = {
   holeFillMaxDepthSpreadMeters: 0.12,
   holeFillMaxNeighborSpanMeters: 0.16,
 } as const
+
+export const DEFAULT_DENSE_MASK_STABILIZATION_OPTIONS: DenseMaskStabilizationOptions = {
+  cacheEnabled: true,
+  smoothingEnabled: true,
+  holeFillEnabled: true,
+  hysteresisEnabled: true,
+}

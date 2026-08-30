@@ -116,6 +116,8 @@ export class SpatialCoverageRenderService {
 
   private denseVertexCount = 0
 
+  private denseBufferCapacityBytes = 0
+
   private denseAppliedRevision = -1
 
   private debugGeometryVisible = false
@@ -174,11 +176,26 @@ export class SpatialCoverageRenderService {
 
     try {
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.denseBuffer)
-      this.gl.bufferData(this.gl.ARRAY_BUFFER, mesh.vertexData, this.gl.DYNAMIC_DRAW)
+      const uploadStartedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (mesh.vertexData.byteLength > this.denseBufferCapacityBytes) {
+        const nextCapacityBytes = Math.max(
+          mesh.vertexData.byteLength,
+          Math.ceil(Math.max(1, this.denseBufferCapacityBytes) * 1.5),
+        )
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, nextCapacityBytes, this.gl.DYNAMIC_DRAW)
+        this.denseBufferCapacityBytes = nextCapacityBytes
+      }
+      if (mesh.vertexData.byteLength > 0) {
+        this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, mesh.vertexData)
+      }
       this.denseVertexCount = mesh.vertexCount
       this.denseAppliedRevision = mesh.revision
       this.diagnostics.denseVertexCount = mesh.vertexCount
       this.diagnostics.denseRenderUpdateCount += 1
+      this.diagnostics.gpuBufferUploadDurationMs = Math.max(
+        0,
+        (typeof performance === 'undefined' ? Date.now() : performance.now()) - uploadStartedAt,
+      )
     } catch {
       this.diagnostics.status = 'failed'
     }
@@ -263,6 +280,7 @@ export class SpatialCoverageRenderService {
     this.target = null
     this.gl = null
     this.denseVertexCount = 0
+    this.denseBufferCapacityBytes = 0
     this.denseAppliedRevision = -1
     this.debugGeometryVisible = false
     this.diagnostics = this.createInitialDiagnostics()
@@ -278,6 +296,7 @@ export class SpatialCoverageRenderService {
       capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
       denseVertexCount: 0,
       denseRenderUpdateCount: 0,
+      gpuBufferUploadDurationMs: 0,
     }
   }
 

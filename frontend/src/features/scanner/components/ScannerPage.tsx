@@ -4,6 +4,7 @@ import type {
   ScannerCapabilities,
   ScannerCheckStatus,
   ScannerSessionState,
+  DenseMaskStabilizationOptions,
   SpatialGeometrySource,
 } from '../types'
 import '../../../App.css'
@@ -19,6 +20,7 @@ interface ScannerPageProps {
   sessionState: ScannerSessionState
   onStartScan: () => void
   onDebugGeometryToggle: (visible: boolean) => void
+  onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onCancelScan: () => void
   onFinishScan: () => void
   onStartNewScan: () => void
@@ -113,6 +115,7 @@ function ScannerPage({
   canStartScan,
   onCancelScan,
   onDebugGeometryToggle,
+  onDenseMaskStabilizationOptionsChange,
   onDiscardScan,
   onFinishScan,
   onStartScan,
@@ -182,6 +185,7 @@ function ScannerPage({
         <ScannerDomOverlay
           onCancelScan={onCancelScan}
           onDebugGeometryToggle={onDebugGeometryToggle}
+          onDenseMaskStabilizationOptionsChange={onDenseMaskStabilizationOptionsChange}
           onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}
           sessionState={sessionState}

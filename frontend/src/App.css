@@ -1291,6 +1291,41 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
+.xr-dom-overlay-dense-toggles {
+  grid-column: 1 / -1;
+}
+
+.xr-dom-overlay-dense-toggles > span {
+  margin-bottom: 8px;
+}
+
+.xr-dom-overlay-dense-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-transform: none;
+  white-space: normal;
+}
+
+.xr-dom-overlay-dense-toggles label span {
+  display: inline;
+  overflow: visible;
+  color: var(--ink);
+  font-size: 9px;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+}
+
+.xr-dom-overlay-dense-toggles input {
+  flex: 0 0 auto;
+  accent-color: var(--acid);
+}
+
 .xr-dom-overlay-coverage-meta span {
   display: block;
   overflow: hidden;

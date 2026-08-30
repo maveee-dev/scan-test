@@ -2,6 +2,7 @@ import { useState, type RefObject } from 'react'
 import type {
   CoverageRenderStatus,
   CoverageGuidance,
+  DenseMaskStabilizationOptions,
   DepthAcquisitionStatus,
   DepthSensingStatus,
   ReferenceSpaceStatus,
@@ -16,6 +17,7 @@ import type {
 
 interface ScannerDomOverlayProps {
   onCancelScan: () => void
+  onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onDebugGeometryToggle: (visible: boolean) => void
   onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
@@ -187,6 +189,7 @@ function formatCoverageRenderStatus(status: CoverageRenderStatus): string {
 
 function ScannerDomOverlay({
   onCancelScan,
+  onDenseMaskStabilizationOptionsChange,
   onDebugGeometryToggle,
   onFinishScan,
   pointPreviewCanvasRef,
@@ -194,6 +197,9 @@ function ScannerDomOverlay({
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
+  const [stabilizationOptions, setStabilizationOptions] = useState<DenseMaskStabilizationOptions>(
+    () => ({ ...sessionState.debug.coverage.dense.stabilizationOptions }),
+  )
   const isStarting = sessionState.status === 'starting'
   const isFinishing = sessionState.status === 'finishing'
   const isCancelling = sessionState.status === 'cancelling'
@@ -229,6 +235,17 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     onDebugGeometryToggle(false)
+  }
+
+  function handleStabilizationToggle(
+    option: keyof DenseMaskStabilizationOptions,
+  ): void {
+    const nextOptions = {
+      ...stabilizationOptions,
+      [option]: !stabilizationOptions[option],
+    }
+    setStabilizationOptions(nextOptions)
+    onDenseMaskStabilizationOptionsChange(nextOptions)
   }
 
   return (
@@ -568,6 +585,24 @@ function ScannerDomOverlay({
               <strong>{formatCoveragePercentage(coverage.currentViewCoverage)}</strong>
             </div>
             <div className="xr-dom-overlay-coverage-meta">
+              <div className="xr-dom-overlay-dense-toggles">
+                <span>Dense stabilization test toggles</span>
+                {([
+                  ['cacheEnabled', 'Temporal visual cache'],
+                  ['smoothingEnabled', 'Temporal smoothing'],
+                  ['holeFillEnabled', 'Visual hole filling'],
+                  ['hysteresisEnabled', 'Reveal hysteresis'],
+                ] as const).map(([option, label]) => (
+                  <label key={option}>
+                    <input
+                      type="checkbox"
+                      checked={stabilizationOptions[option]}
+                      onChange={() => handleStabilizationToggle(option)}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
               <div>
                 <span>Coverage cell size</span>
                 <strong>{coverage.cellSizeMeters.toFixed(2)} m</strong>
@@ -803,6 +838,34 @@ function ScannerDomOverlay({
               <div>
                 <span>Dense mask processing</span>
                 <strong>{coverage.dense.processingDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Depth reconstruction</span>
+                <strong>{coverage.dense.depthReconstructionDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Coverage lookup</span>
+                <strong>{coverage.dense.coverageLookupDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Visual cache</span>
+                <strong>{coverage.dense.visualCacheDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Hole filling</span>
+                <strong>{coverage.dense.holeFillDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Smoothing</span>
+                <strong>{coverage.dense.smoothingDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Triangle generation</span>
+                <strong>{coverage.dense.triangleGenerationDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>GPU buffer upload</span>
+                <strong>{coverage.render.gpuBufferUploadDurationMs.toFixed(1)} ms</strong>
               </div>
               <div>
                 <span>Visual cache entries</span>

@@ -18,6 +18,7 @@ function ScannerPageContainer() {
       pointPreviewCanvasRef={pointPreviewCanvasRef}
       onStartScan={sessionController.startScan}
       onDebugGeometryToggle={sessionController.setDebugGeometryVisible}
+      onDenseMaskStabilizationOptionsChange={sessionController.setDenseMaskStabilizationOptions}
       onCancelScan={sessionController.cancelScan}
       onFinishScan={sessionController.finishScan}
       onStartNewScan={sessionController.startNewScan}

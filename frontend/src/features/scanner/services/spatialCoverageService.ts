@@ -80,6 +80,7 @@ function createInitialRenderDebug(): SpatialCoverageRenderDebug {
     capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
     denseVertexCount: 0,
     denseRenderUpdateCount: 0,
+    gpuBufferUploadDurationMs: 0,
   }
 }
 
@@ -107,6 +108,19 @@ function createInitialDenseDebug(): SpatialCoverageDenseDebug {
     updateCount: 0,
     updateRateHz: 0,
     processingDurationMs: 0,
+    totalProcessingDurationMs: 0,
+    depthReconstructionDurationMs: 0,
+    coverageLookupDurationMs: 0,
+    visualCacheDurationMs: 0,
+    holeFillDurationMs: 0,
+    smoothingDurationMs: 0,
+    triangleGenerationDurationMs: 0,
+    stabilizationOptions: {
+      cacheEnabled: true,
+      smoothingEnabled: true,
+      holeFillEnabled: true,
+      hysteresisEnabled: true,
+    },
     visualCacheEntryCount: 0,
     visualCacheMaxEntries: DENSE_VISUAL_STABILIZATION_CONFIG.maxCacheEntries,
     visualCacheHitCount: 0,
@@ -329,14 +343,21 @@ function getSurfaceNormal(
     return { normal: null, rejectionReason: 'invalid' }
   }
 
-  const neighborDepths = [left, right, up, down]
-  const hasDepthDiscontinuity = neighborDepths.some(
-    (neighbor) =>
-      Math.abs(neighbor.depthMeters - center.depthMeters) >
-      MAX_NORMAL_DEPTH_DISCONTINUITY_METERS,
-  )
-  const horizontal = subtractPoints(right.point, left.point)
-  const vertical = subtractPoints(down.point, up.point)
+  const hasDepthDiscontinuity =
+    Math.abs(left.depthMeters - center.depthMeters) > MAX_NORMAL_DEPTH_DISCONTINUITY_METERS ||
+    Math.abs(right.depthMeters - center.depthMeters) > MAX_NORMAL_DEPTH_DISCONTINUITY_METERS ||
+    Math.abs(up.depthMeters - center.depthMeters) > MAX_NORMAL_DEPTH_DISCONTINUITY_METERS ||
+    Math.abs(down.depthMeters - center.depthMeters) > MAX_NORMAL_DEPTH_DISCONTINUITY_METERS
+  const horizontal = {
+    x: right.point.x - left.point.x,
+    y: right.point.y - left.point.y,
+    z: right.point.z - left.point.z,
+  }
+  const vertical = {
+    x: down.point.x - up.point.x,
+    y: down.point.y - up.point.y,
+    z: down.point.z - up.point.z,
+  }
 
   if (
     hasDepthDiscontinuity ||
@@ -367,8 +388,12 @@ function getCellCoordinates(point: SpatialPoint): { x: number; y: number; z: num
   }
 }
 
+function getCellKeyFromCoordinates(x: number, y: number, z: number): string {
+  return `${x}:${y}:${z}`
+}
+
 function getCellKey(coordinates: { x: number; y: number; z: number }): string {
-  return `${coordinates.x}:${coordinates.y}:${coordinates.z}`
+  return getCellKeyFromCoordinates(coordinates.x, coordinates.y, coordinates.z)
 }
 
 function getCellCenter(coordinates: { x: number; y: number; z: number }): SpatialPoint {
@@ -510,11 +535,11 @@ function findCompatibleCell(
         zOffset += 1
       ) {
         const candidate = cells.get(
-          getCellKey({
-            x: coordinates.x + xOffset,
-            y: coordinates.y + yOffset,
-            z: coordinates.z + zOffset,
-          }),
+          getCellKeyFromCoordinates(
+            coordinates.x + xOffset,
+            coordinates.y + yOffset,
+            coordinates.z + zOffset,
+          ),
         )
         if (!candidate) {
           continue
@@ -579,6 +604,19 @@ function findCompatibleCell(
 export class SpatialCoverageService {
   private readonly cells = new Map<string, CoverageCell>()
 
+  private readonly mappingObservations: SpatialPointObservation[] = []
+
+  private mappingObservationCursor = 0
+
+  private readonly observationsByGridIndex = new Map<number, SpatialPointObservation>()
+
+  private readonly currentGridKeys = new Map<number, string>()
+
+  private readonly currentFrameKeys = new Set<string>()
+
+  /** One raw 5 cm world bucket is considered at most once per mapping update. */
+  private readonly currentMappingCellKeys = new Set<string>()
+
   private diagnostics = createInitialCoverageDebug()
 
   private lastProcessedAt = Number.NEGATIVE_INFINITY
@@ -597,7 +635,7 @@ export class SpatialCoverageService {
     phase: number,
   ): void {
     const normalizedPhase = ((phase % MAPPING_PHASE_COUNT) + MAPPING_PHASE_COUNT) % MAPPING_PHASE_COUNT
-    const mappingObservations: SpatialPointObservation[] = []
+    this.mappingObservationCursor = 0
 
     // Rotate traversal order between phases so a cell receiving several
     // samples does not always choose the same dense-grid representative.
@@ -610,24 +648,39 @@ export class SpatialCoverageService {
         const sourceIndex = row * denseFrame.columns + column
 
         if (denseFrame.valid[sourceIndex] === 1) {
-          mappingObservations.push({
-            normalizedX: denseFrame.normalizedX[sourceIndex],
-            normalizedY: denseFrame.normalizedY[sourceIndex],
-            depthMeters: denseFrame.distancesMeters[sourceIndex],
-            point: {
-              x: denseFrame.points[sourceIndex * 3],
-              y: denseFrame.points[sourceIndex * 3 + 1],
-              z: denseFrame.points[sourceIndex * 3 + 2],
-            },
-          })
+          const pointOffset = sourceIndex * 3
+          const observationIndex = this.mappingObservationCursor
+          const observation = this.mappingObservations[observationIndex]
+          this.mappingObservationCursor += 1
+          if (observation) {
+            observation.normalizedX = denseFrame.normalizedX[sourceIndex]
+            observation.normalizedY = denseFrame.normalizedY[sourceIndex]
+            observation.depthMeters = denseFrame.distancesMeters[sourceIndex]
+            observation.point.x = denseFrame.points[pointOffset]
+            observation.point.y = denseFrame.points[pointOffset + 1]
+            observation.point.z = denseFrame.points[pointOffset + 2]
+          } else {
+            this.mappingObservations.push({
+              normalizedX: denseFrame.normalizedX[sourceIndex],
+              normalizedY: denseFrame.normalizedY[sourceIndex],
+              depthMeters: denseFrame.distancesMeters[sourceIndex],
+              point: {
+                x: denseFrame.points[pointOffset],
+                y: denseFrame.points[pointOffset + 1],
+                z: denseFrame.points[pointOffset + 2],
+              },
+            })
+          }
         }
       }
     }
 
+    this.mappingObservations.length = this.mappingObservationCursor
+
     this.diagnostics.mappingPhase = normalizedPhase
     const mappingStartedAt = getPerformanceTimestamp()
     if (this.processFrame(
-      mappingObservations,
+      this.mappingObservations,
       cameraPosition,
       cameraDirection,
       timestamp,
@@ -668,7 +721,8 @@ export class SpatialCoverageService {
       this.transitionRateStartedAt = timestamp
     }
 
-    const observationsByGridIndex = new Map<number, SpatialPointObservation>()
+    const observationsByGridIndex = this.observationsByGridIndex
+    observationsByGridIndex.clear()
     for (const observation of observations) {
       if (isFinitePointObservation(observation)) {
         observationsByGridIndex.set(
@@ -683,8 +737,12 @@ export class SpatialCoverageService {
       }
     }
 
-    const currentGridKeys = new Map<number, string>()
-    const currentFrameKeys = new Set<string>()
+    const currentGridKeys = this.currentGridKeys
+    currentGridKeys.clear()
+    const currentFrameKeys = this.currentFrameKeys
+    currentFrameKeys.clear()
+    const currentMappingCellKeys = this.currentMappingCellKeys
+    currentMappingCellKeys.clear()
 
     for (const observation of observationsByGridIndex.values()) {
       const gridIndex = getGridIndex(
@@ -693,6 +751,13 @@ export class SpatialCoverageService {
         gridColumns,
         gridRows,
       )
+      const coordinates = getCellCoordinates(observation.point)
+      const mappingCellKey = getCellKey(coordinates)
+      if (currentMappingCellKeys.has(mappingCellKey)) {
+        this.diagnostics.rejectedDuplicateObservationCount += 1
+        continue
+      }
+      currentMappingCellKeys.add(mappingCellKey)
       const normalResult = getSurfaceNormal(
         observation,
         observationsByGridIndex,
@@ -734,7 +799,6 @@ export class SpatialCoverageService {
         this.diagnostics.rejectedDuplicateObservationCount += 1
         continue
       }
-      const coordinates = getCellCoordinates(observation.point)
       const key = surfaceMatch.cell?.key ?? getCellKey(coordinates)
       currentGridKeys.set(gridIndex, key)
 
@@ -816,9 +880,13 @@ export class SpatialCoverageService {
     }
 
     this.diagnostics.currentValidSamples = currentGridKeys.size
-    this.diagnostics.currentCapturedSamples = Array.from(currentGridKeys.values()).filter(
-      (key) => this.cells.get(key)?.state === 'captured',
-    ).length
+    let currentCapturedSamples = 0
+    for (const key of currentGridKeys.values()) {
+      if (this.cells.get(key)?.state === 'captured') {
+        currentCapturedSamples += 1
+      }
+    }
+    this.diagnostics.currentCapturedSamples = currentCapturedSamples
     this.diagnostics.currentViewCoverage =
       this.diagnostics.currentValidSamples > 0
         ? (this.diagnostics.currentCapturedSamples / this.diagnostics.currentValidSamples) * 100
@@ -845,7 +913,9 @@ export class SpatialCoverageService {
     }
 
     const coordinates = getCellCoordinates(point)
-    const exactCell = this.cells.get(getCellKey(coordinates))
+    const exactCell = this.cells.get(
+      getCellKeyFromCoordinates(coordinates.x, coordinates.y, coordinates.z),
+    )
     if (exactCell) {
       return { state: exactCell.state, kind: 'exact' }
     }
@@ -872,11 +942,11 @@ export class SpatialCoverageService {
           }
 
           const candidate = this.cells.get(
-            getCellKey({
-              x: coordinates.x + xOffset,
-              y: coordinates.y + yOffset,
-              z: coordinates.z + zOffset,
-            }),
+            getCellKeyFromCoordinates(
+              coordinates.x + xOffset,
+              coordinates.y + yOffset,
+              coordinates.z + zOffset,
+            ),
           )
           if (!candidate) {
             continue
@@ -940,6 +1010,12 @@ export class SpatialCoverageService {
 
   public reset(): void {
     this.cells.clear()
+    this.mappingObservations.length = 0
+    this.mappingObservationCursor = 0
+    this.observationsByGridIndex.clear()
+    this.currentGridKeys.clear()
+    this.currentFrameKeys.clear()
+    this.currentMappingCellKeys.clear()
     this.lastProcessedAt = Number.NEGATIVE_INFINITY
     this.transitionRateStartedAt = null
     this.diagnostics = createInitialCoverageDebug()

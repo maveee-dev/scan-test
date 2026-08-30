@@ -220,6 +220,91 @@ function unprojectDepthSample(
   })
 }
 
+/** Dense path variant that writes directly into a reusable point buffer. */
+function writeUnprojectedDepthSample(
+  inverseProjectionMatrix: Float32Array,
+  transformMatrix: Float32Array,
+  normalizedX: number,
+  normalizedY: number,
+  depthMeters: number,
+  target: Float32Array,
+  targetOffset: number,
+): boolean {
+  if (!isValidNormalizedCoordinate(normalizedX) || !isValidNormalizedCoordinate(normalizedY)) {
+    return false
+  }
+  if (!isValidDepth(depthMeters)) {
+    return false
+  }
+
+  const ndcX = 2 * normalizedX - 1
+  const ndcY = 1 - 2 * normalizedY
+  const nearX = inverseProjectionMatrix[0] * ndcX +
+    inverseProjectionMatrix[4] * ndcY -
+    inverseProjectionMatrix[8] +
+    inverseProjectionMatrix[12]
+  const nearY = inverseProjectionMatrix[1] * ndcX +
+    inverseProjectionMatrix[5] * ndcY -
+    inverseProjectionMatrix[9] +
+    inverseProjectionMatrix[13]
+  const nearZ = inverseProjectionMatrix[2] * ndcX +
+    inverseProjectionMatrix[6] * ndcY -
+    inverseProjectionMatrix[10] +
+    inverseProjectionMatrix[14]
+  const nearW = inverseProjectionMatrix[3] * ndcX +
+    inverseProjectionMatrix[7] * ndcY -
+    inverseProjectionMatrix[11] +
+    inverseProjectionMatrix[15]
+  if (!Number.isFinite(nearW) || Math.abs(nearW) <= MATRIX_EPSILON) {
+    return false
+  }
+
+  const rayX = nearX / nearW
+  const rayY = nearY / nearW
+  const rayZ = nearZ / nearW
+  if (!Number.isFinite(rayZ) || rayZ >= -MATRIX_EPSILON) {
+    return false
+  }
+  const scale = depthMeters / -rayZ
+  if (!Number.isFinite(scale) || scale <= 0) {
+    return false
+  }
+
+  const viewX = rayX * scale
+  const viewY = rayY * scale
+  const viewZ = rayZ * scale
+  const worldX = transformMatrix[0] * viewX +
+    transformMatrix[4] * viewY +
+    transformMatrix[8] * viewZ +
+    transformMatrix[12]
+  const worldY = transformMatrix[1] * viewX +
+    transformMatrix[5] * viewY +
+    transformMatrix[9] * viewZ +
+    transformMatrix[13]
+  const worldZ = transformMatrix[2] * viewX +
+    transformMatrix[6] * viewY +
+    transformMatrix[10] * viewZ +
+    transformMatrix[14]
+  const worldW = transformMatrix[3] * viewX +
+    transformMatrix[7] * viewY +
+    transformMatrix[11] * viewZ +
+    transformMatrix[15]
+  if (!Number.isFinite(worldW) || Math.abs(worldW) <= MATRIX_EPSILON) {
+    return false
+  }
+
+  const x = worldX / worldW
+  const y = worldY / worldW
+  const z = worldZ / worldW
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    return false
+  }
+  target[targetOffset] = x
+  target[targetOffset + 1] = y
+  target[targetOffset + 2] = z
+  return true
+}
+
 function isValidNormalizedCoordinate(value: number): boolean {
   return Number.isFinite(value) && value >= 0 && value <= 1
 }
@@ -275,6 +360,12 @@ function selectMatrix(
  */
 export class SpatialPointService {
   private diagnostics = createEmptySpatialPointDebug()
+
+  private densePoints = new Float32Array(0)
+
+  private denseValid = new Uint8Array(0)
+
+  private denseBufferSampleCount = 0
 
   public processFrame(
     observation: DepthFrameObservation | null,
@@ -372,8 +463,14 @@ export class SpatialPointService {
   /** Converts a fixed dense depth grid while retaining invalid neighbor slots. */
   public processDenseFrame(observation: DenseDepthFrameObservation): DenseSpatialPointFrame {
     const sampleCount = observation.columns * observation.rows
-    const points = new Float32Array(sampleCount * 3)
-    const valid = new Uint8Array(sampleCount)
+    if (this.denseBufferSampleCount !== sampleCount) {
+      this.densePoints = new Float32Array(sampleCount * 3)
+      this.denseValid = new Uint8Array(sampleCount)
+      this.denseBufferSampleCount = sampleCount
+    }
+    const points = this.densePoints
+    const valid = this.denseValid
+    valid.fill(0)
     const projection = selectMatrix(
       observation.depthProjectionMatrix,
       observation.viewProjectionMatrix,
@@ -402,21 +499,19 @@ export class SpatialPointService {
         continue
       }
 
-      const point = unprojectDepthSample(
+      if (!writeUnprojectedDepthSample(
         inverseProjectionMatrix,
         transform.matrix,
         observation.normalizedX[index],
         observation.normalizedY[index],
         observation.distancesMeters[index],
-      )
-      if (!point) {
+        points,
+        index * 3,
+      )) {
         continue
       }
 
       valid[index] = 1
-      points[index * 3] = point.x
-      points[index * 3 + 1] = point.y
-      points[index * 3 + 2] = point.z
       validPointCount += 1
     }
 
@@ -450,5 +545,8 @@ export class SpatialPointService {
 
   public reset(): void {
     this.diagnostics = createEmptySpatialPointDebug()
+    this.densePoints = new Float32Array(0)
+    this.denseValid = new Uint8Array(0)
+    this.denseBufferSampleCount = 0
   }
 }

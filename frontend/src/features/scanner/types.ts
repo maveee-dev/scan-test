@@ -247,6 +247,14 @@ export interface SpatialCoverageRenderDebug {
   capturedOpacity: number
   denseVertexCount: number
   denseRenderUpdateCount: number
+  gpuBufferUploadDurationMs: number
+}
+
+export interface DenseMaskStabilizationOptions {
+  cacheEnabled: boolean
+  smoothingEnabled: boolean
+  holeFillEnabled: boolean
+  hysteresisEnabled: boolean
 }
 
 export interface SpatialCoverageDenseDebug {
@@ -272,6 +280,14 @@ export interface SpatialCoverageDenseDebug {
   updateCount: number
   updateRateHz: number
   processingDurationMs: number
+  totalProcessingDurationMs: number
+  depthReconstructionDurationMs: number
+  coverageLookupDurationMs: number
+  visualCacheDurationMs: number
+  holeFillDurationMs: number
+  smoothingDurationMs: number
+  triangleGenerationDurationMs: number
+  stabilizationOptions: DenseMaskStabilizationOptions
   visualCacheEntryCount: number
   visualCacheMaxEntries: number
   visualCacheHitCount: number

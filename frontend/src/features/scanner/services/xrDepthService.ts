@@ -206,6 +206,20 @@ export class XRDepthService {
 
   private lastDepthSampler: DepthSampler | null = null
 
+  private denseBufferSampleCount = 0
+
+  private denseBufferColumns = 0
+
+  private denseBufferRows = 0
+
+  private denseValid = new Uint8Array(0)
+
+  private denseNormalizedX = new Float32Array(0)
+
+  private denseNormalizedY = new Float32Array(0)
+
+  private denseDistancesMeters = new Float32Array(0)
+
   public initialize(session: XRSession): void {
     this.session = session
     this.probeFrameCount = 0
@@ -374,20 +388,40 @@ export class XRDepthService {
     }
 
     const attemptedSampleCount = columns * rows
-    const valid = new Uint8Array(attemptedSampleCount)
-    const normalizedX = new Float32Array(attemptedSampleCount)
-    const normalizedY = new Float32Array(attemptedSampleCount)
-    const distancesMeters = new Float32Array(attemptedSampleCount)
+    if (
+      this.denseBufferSampleCount !== attemptedSampleCount ||
+      this.denseBufferColumns !== columns ||
+      this.denseBufferRows !== rows
+    ) {
+      this.denseBufferSampleCount = attemptedSampleCount
+      this.denseBufferColumns = columns
+      this.denseBufferRows = rows
+      this.denseValid = new Uint8Array(attemptedSampleCount)
+      this.denseNormalizedX = new Float32Array(attemptedSampleCount)
+      this.denseNormalizedY = new Float32Array(attemptedSampleCount)
+      this.denseDistancesMeters = new Float32Array(attemptedSampleCount)
+      for (let row = 0; row < rows; row += 1) {
+        const y = (row + 0.5) / rows
+        for (let column = 0; column < columns; column += 1) {
+          const index = row * columns + column
+          this.denseNormalizedX[index] = (column + 0.5) / columns
+          this.denseNormalizedY[index] = y
+        }
+      }
+    }
+    const valid = this.denseValid
+    const normalizedX = this.denseNormalizedX
+    const normalizedY = this.denseNormalizedY
+    const distancesMeters = this.denseDistancesMeters
+    valid.fill(0)
     let validSampleCount = 0
     let rejectedSampleCount = 0
 
     for (let row = 0; row < rows; row += 1) {
-      const y = (row + 0.5) / rows
       for (let column = 0; column < columns; column += 1) {
         const index = row * columns + column
-        const x = (column + 0.5) / columns
-        normalizedX[index] = x
-        normalizedY[index] = y
+        const x = normalizedX[index]
+        const y = normalizedY[index]
 
         try {
           const distance = this.lastDepthSampler(x, y)
@@ -435,6 +469,13 @@ export class XRDepthService {
     this.session = null
     this.probeFrameCount = 0
     this.clearLastDepthFrame()
+    this.denseBufferSampleCount = 0
+    this.denseBufferColumns = 0
+    this.denseBufferRows = 0
+    this.denseValid = new Uint8Array(0)
+    this.denseNormalizedX = new Float32Array(0)
+    this.denseNormalizedY = new Float32Array(0)
+    this.denseDistancesMeters = new Float32Array(0)
     this.diagnostics = createInitialDepthDebug()
   }
 

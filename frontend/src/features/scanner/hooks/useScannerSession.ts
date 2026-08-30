@@ -9,6 +9,7 @@ import { createInitialSpatialPointDebug } from '../services/spatialPointService'
 import { createInitialSpatialCoverageDebug } from '../services/spatialCoverageService'
 import type {
   FinalizedSpatialScan,
+  DenseMaskStabilizationOptions,
   ScanSessionStatus,
   ScannerSessionState,
   ViewerPoseDebug,
@@ -57,6 +58,7 @@ export interface ScannerSessionController {
   cancelScan: () => void
   finishScan: () => void
   setDebugGeometryVisible: (visible: boolean) => void
+  setDenseMaskStabilizationOptions: (options: DenseMaskStabilizationOptions) => void
   startNewScan: () => void
   discardScan: () => void
 }
@@ -306,6 +308,10 @@ export function useScannerSession(
     service.setDebugGeometryVisible(visible)
   }, [service])
 
+  const setDenseMaskStabilizationOptions = useCallback((options: DenseMaskStabilizationOptions) => {
+    service.setDenseMaskStabilizationOptions(options)
+  }, [service])
+
   const startNewScan = useCallback(() => {
     if (statusRef.current !== 'finished') {
       return
@@ -330,6 +336,7 @@ export function useScannerSession(
     cancelScan,
     finishScan,
     setDebugGeometryVisible,
+    setDenseMaskStabilizationOptions,
     startNewScan,
     discardScan,
   }
