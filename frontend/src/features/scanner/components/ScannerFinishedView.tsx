@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { BUILD_INFO } from '../../../config/buildInfo'
 import type { FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
 import type { RoomAnalysisResult } from '../../room-analysis/types'
@@ -188,6 +189,10 @@ function ScannerFinishedView({
       <p className="scanner-description">
         Your captured spatial observations are ready for a later room-processing stage.
       </p>
+      <div className="scanner-build-info" aria-label="Scanner build information">
+        <span>Scanner Build: {BUILD_INFO.scannerMilestone}</span>
+        <span>Commit: {BUILD_INFO.commit}</span>
+      </div>
 
       <div className="scanner-analysis-controls">
         <div>

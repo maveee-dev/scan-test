@@ -182,6 +182,18 @@
   max-width: 520px;
 }
 
+.scanner-build-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .scanner-scan-preview {
   margin-top: 28px;
   overflow: hidden;
