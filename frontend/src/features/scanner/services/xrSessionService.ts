@@ -18,9 +18,15 @@ import { SpatialPointService } from './spatialPointService'
 import { SpatialPointPreviewService } from './spatialPointPreviewService'
 import { SpatialCoverageService } from './spatialCoverageService'
 import { SpatialCoverageRenderService } from './spatialCoverageRenderService'
+import { DenseSurfaceMaskService } from './denseSurfaceMaskService'
+import {
+  DENSE_MASK_COLUMNS,
+  DENSE_MASK_ROWS,
+} from './spatialCoverageVisualConfig'
 import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
+const DENSE_MASK_UPDATE_INTERVAL_MS = 125
 
 export type XRSessionEndReason = 'stopped' | 'finished' | 'external'
 
@@ -112,6 +118,8 @@ export class XRSessionService {
 
   private readonly spatialCoverageRenderService = new SpatialCoverageRenderService()
 
+  private readonly denseSurfaceMaskService = new DenseSurfaceMaskService()
+
   private readonly finalizedSpatialScanService = new FinalizedSpatialScanService()
 
   private referenceSpace: XRReferenceSpace | null = null
@@ -135,6 +143,10 @@ export class XRSessionService {
   private scanStartedAt: number | null = null
 
   private lastPublishedAt = Number.NEGATIVE_INFINITY
+
+  private lastDenseMaskUpdatedAt = Number.NEGATIVE_INFINITY
+
+  private mappingPhase = 0
 
   private trackingActive = false
 
@@ -255,6 +267,7 @@ export class XRSessionService {
     this.spatialPointPreviewService.dispose()
     this.spatialCoverageService.dispose()
     this.spatialCoverageRenderService.dispose()
+    this.denseSurfaceMaskService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -427,8 +440,36 @@ export class XRSessionService {
         ? this.depthService.inspectFrame(frame, pose.views[0])
         : null
       const spatialObservations = this.spatialPointService.processFrame(depthObservation)
-      this.spatialCoverageService.processFrame(spatialObservations, this.position, time)
-      this.spatialCoverageRenderService.update(this.spatialCoverageService.getRenderSnapshot())
+
+      if (
+        pose?.views[0] &&
+        time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS
+      ) {
+        const denseDepthObservation = this.depthService.inspectDenseFrame(
+          frame,
+          pose.views[0],
+          DENSE_MASK_COLUMNS,
+          DENSE_MASK_ROWS,
+        )
+        if (denseDepthObservation) {
+          const densePointFrame = this.spatialPointService.processDenseFrame(
+            denseDepthObservation,
+          )
+          this.spatialCoverageService.processDenseFrame(
+            densePointFrame,
+            this.position,
+            time,
+            this.mappingPhase,
+          )
+          this.mappingPhase = (this.mappingPhase + 1) % 4
+          const denseMesh = this.denseSurfaceMaskService.build(
+            densePointFrame,
+            this.spatialCoverageService,
+          )
+          this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
+          this.lastDenseMaskUpdatedAt = time
+        }
+      }
       this.spatialCoverageRenderService.render(pose?.views ?? [])
 
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
@@ -481,6 +522,7 @@ export class XRSessionService {
       spatial: this.getSpatialPointDiagnostics(),
       coverage: this.spatialCoverageService.getDiagnostics(
         this.spatialCoverageRenderService.getDiagnostics(),
+        this.denseSurfaceMaskService.getDiagnostics(),
       ),
     })
   }
@@ -502,11 +544,13 @@ export class XRSessionService {
     this.referenceSpace = null
     this.referenceSpaceType = null
     this.spatialCoverageRenderService.dispose()
+    this.denseSurfaceMaskService.dispose()
     this.presentationService.dispose()
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()
     this.spatialCoverageService.reset()
+    this.denseSurfaceMaskService.reset()
     this.frameRequestId = null
     this.scanStartedAt = null
     this.isEnding = false
@@ -576,6 +620,8 @@ export class XRSessionService {
     this.xrFrameCount = 0
     this.poseSampleCount = 0
     this.lastPublishedAt = Number.NEGATIVE_INFINITY
+    this.lastDenseMaskUpdatedAt = Number.NEGATIVE_INFINITY
+    this.mappingPhase = 0
     this.trackingActive = false
     this.position = null
     this.scanStartedAt = null
@@ -585,6 +631,7 @@ export class XRSessionService {
     this.spatialPointPreviewService.dispose()
     this.spatialCoverageService.reset()
     this.spatialCoverageRenderService.dispose()
+    this.denseSurfaceMaskService.dispose()
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -609,6 +656,7 @@ export class XRSessionService {
       spatial: this.getSpatialPointDiagnostics(),
       coverage: this.spatialCoverageService.getDiagnostics(
         this.spatialCoverageRenderService.getDiagnostics(),
+        this.denseSurfaceMaskService.getDiagnostics(),
       ),
     })
   }

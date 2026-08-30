@@ -517,6 +517,22 @@ function ScannerDomOverlay({
                 <strong>{coverage.cellSizeMeters.toFixed(2)} m</strong>
               </div>
               <div>
+                <span>Mapping samples</span>
+                <strong>{coverage.mappingColumns} x {coverage.mappingRows}</strong>
+              </div>
+              <div>
+                <span>Mapping rate</span>
+                <strong>{coverage.mappingUpdateRateHz.toFixed(1)} Hz</strong>
+              </div>
+              <div>
+                <span>Mapping phase</span>
+                <strong>{coverage.mappingPhase} / 4</strong>
+              </div>
+              <div>
+                <span>Mapping updates</span>
+                <strong>{coverage.mappingUpdateCount}</strong>
+              </div>
+              <div>
                 <span>Total unique cells</span>
                 <strong>{coverage.totalUniqueCells}</strong>
               </div>
@@ -565,10 +581,6 @@ function ScannerDomOverlay({
                 <strong>{formatCoverageRenderStatus(coverage.render.status)}</strong>
               </div>
               <div>
-                <span>Rendered world tiles</span>
-                <strong>{coverage.render.renderedTiles}</strong>
-              </div>
-              <div>
                 <span>Invalid normals rejected</span>
                 <strong>{coverage.rejectedInvalidNormalCount}</strong>
               </div>
@@ -597,12 +609,52 @@ function ScannerDomOverlay({
                 <strong>{coverage.render.capturedOpacity.toFixed(2)}</strong>
               </div>
               <div>
-                <span>Render updates</span>
-                <strong>{coverage.render.renderUpdateCount}</strong>
+                <span>Dense mask target</span>
+                <strong>{coverage.dense.columns} x {coverage.dense.rows}</strong>
               </div>
               <div>
-                <span>Render capacity</span>
-                <strong>{coverage.render.renderedTiles} / {coverage.render.renderCapacity}</strong>
+                <span>Dense samples</span>
+                <strong>{coverage.dense.validSampleCount} / {coverage.dense.attemptedSampleCount}</strong>
+              </div>
+              <div>
+                <span>Dense triangles</span>
+                <strong>{coverage.dense.generatedTriangleCount}</strong>
+              </div>
+              <div>
+                <span>Dense invalid rejects</span>
+                <strong>{coverage.dense.rejectedInvalidSampleCount}</strong>
+              </div>
+              <div>
+                <span>Dense discontinuities</span>
+                <strong>{coverage.dense.rejectedDepthDiscontinuityCount}</strong>
+              </div>
+              <div>
+                <span>Unknown mask samples</span>
+                <strong>{coverage.dense.unknownMaskSampleCount}</strong>
+              </div>
+              <div>
+                <span>Observed mask samples</span>
+                <strong>{coverage.dense.observedMaskSampleCount}</strong>
+              </div>
+              <div>
+                <span>Partial mask samples</span>
+                <strong>{coverage.dense.partialMaskSampleCount}</strong>
+              </div>
+              <div>
+                <span>Captured / transparent samples</span>
+                <strong>{coverage.dense.capturedMaskSampleCount}</strong>
+              </div>
+              <div>
+                <span>Dense mask updates</span>
+                <strong>{coverage.dense.updateCount}</strong>
+              </div>
+              <div>
+                <span>Dense vertices uploaded</span>
+                <strong>{coverage.render.denseVertexCount}</strong>
+              </div>
+              <div>
+                <span>Dense render updates</span>
+                <strong>{coverage.render.denseRenderUpdateCount}</strong>
               </div>
             </div>
             {coverage.statisticsInvariantError ? (

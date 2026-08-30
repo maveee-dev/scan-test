@@ -1,4 +1,5 @@
 import type { FinalizedSpatialScan } from '../types'
+import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
 
 interface ScannerFinishedViewProps {
   scan: FinalizedSpatialScan
@@ -36,6 +37,17 @@ function ScannerFinishedView({
       <p className="scanner-description">
         Your captured spatial observations are ready for a later room-processing stage.
       </p>
+
+      {scan.coverage.length > 0 ? (
+        <FinalizedSpatialScanPreview scan={scan} />
+      ) : (
+        <div className="scanner-complete-empty">
+          <strong>No spatial surfaces were captured.</strong>
+          <span>
+            Start another scan and move slowly across physical surfaces before finishing.
+          </span>
+        </div>
+      )}
 
       <div className="scanner-complete-card">
         <div className="scanner-complete-summary">

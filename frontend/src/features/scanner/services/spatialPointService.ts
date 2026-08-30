@@ -1,4 +1,6 @@
 import type {
+  DenseDepthFrameObservation,
+  DenseSpatialPointFrame,
   DepthFrameObservation,
   SpatialBounds,
   SpatialGeometrySource,
@@ -186,6 +188,38 @@ function transformViewPoint(matrix: Float32Array, point: SpatialPoint): SpatialP
     : null
 }
 
+function unprojectDepthSample(
+  inverseProjectionMatrix: Float32Array,
+  transformMatrix: Float32Array,
+  normalizedX: number,
+  normalizedY: number,
+  depthMeters: number,
+): SpatialPoint | null {
+  if (!isValidNormalizedCoordinate(normalizedX) || !isValidNormalizedCoordinate(normalizedY)) {
+    return null
+  }
+
+  if (!isValidDepth(depthMeters)) {
+    return null
+  }
+
+  const rayView = getViewRay(inverseProjectionMatrix, normalizedX, normalizedY)
+  if (!rayView || !Number.isFinite(rayView.z) || rayView.z >= -MATRIX_EPSILON) {
+    return null
+  }
+
+  const scale = depthMeters / -rayView.z
+  if (!Number.isFinite(scale) || scale <= 0) {
+    return null
+  }
+
+  return transformViewPoint(transformMatrix, {
+    x: rayView.x * scale,
+    y: rayView.y * scale,
+    z: rayView.z * scale,
+  })
+}
+
 function isValidNormalizedCoordinate(value: number): boolean {
   return Number.isFinite(value) && value >= 0 && value <= 1
 }
@@ -297,22 +331,13 @@ export class SpatialPointService {
         continue
       }
 
-      const rayView = getViewRay(inverseProjectionMatrix, normalizedX, normalizedY)
-      if (!rayView || !Number.isFinite(rayView.z) || rayView.z >= -MATRIX_EPSILON) {
-        continue
-      }
-
-      const scale = depthMeters / -rayView.z
-      if (!Number.isFinite(scale) || scale <= 0) {
-        continue
-      }
-
-      const pointView = {
-        x: rayView.x * scale,
-        y: rayView.y * scale,
-        z: rayView.z * scale,
-      }
-      const pointReference = transformViewPoint(transform.matrix, pointView)
+      const pointReference = unprojectDepthSample(
+        inverseProjectionMatrix,
+        transform.matrix,
+        normalizedX,
+        normalizedY,
+        depthMeters,
+      )
       if (!pointReference) {
         continue
       }
@@ -342,6 +367,71 @@ export class SpatialPointService {
     this.diagnostics.centerPoint = centerPoint
 
     return points
+  }
+
+  /** Converts a fixed dense depth grid while retaining invalid neighbor slots. */
+  public processDenseFrame(observation: DenseDepthFrameObservation): DenseSpatialPointFrame {
+    const sampleCount = observation.columns * observation.rows
+    const points = new Float32Array(sampleCount * 3)
+    const valid = new Uint8Array(sampleCount)
+    const projection = selectMatrix(
+      observation.depthProjectionMatrix,
+      observation.viewProjectionMatrix,
+    )
+    const transform = selectMatrix(observation.depthTransformMatrix, observation.viewTransformMatrix)
+    const inverseProjectionMatrix = projection.matrix ? invertMatrix(projection.matrix) : null
+
+    if (!inverseProjectionMatrix || !transform.matrix) {
+      return {
+        columns: observation.columns,
+        rows: observation.rows,
+        valid,
+        normalizedX: observation.normalizedX,
+        normalizedY: observation.normalizedY,
+        distancesMeters: observation.distancesMeters,
+        points,
+        attemptedSampleCount: observation.attemptedSampleCount,
+        validPointCount: 0,
+        rejectedPointCount: observation.attemptedSampleCount,
+      }
+    }
+
+    let validPointCount = 0
+    for (let index = 0; index < sampleCount; index += 1) {
+      if (observation.valid[index] !== 1) {
+        continue
+      }
+
+      const point = unprojectDepthSample(
+        inverseProjectionMatrix,
+        transform.matrix,
+        observation.normalizedX[index],
+        observation.normalizedY[index],
+        observation.distancesMeters[index],
+      )
+      if (!point) {
+        continue
+      }
+
+      valid[index] = 1
+      points[index * 3] = point.x
+      points[index * 3 + 1] = point.y
+      points[index * 3 + 2] = point.z
+      validPointCount += 1
+    }
+
+    return {
+      columns: observation.columns,
+      rows: observation.rows,
+      valid,
+      normalizedX: observation.normalizedX,
+      normalizedY: observation.normalizedY,
+      distancesMeters: observation.distancesMeters,
+      points,
+      attemptedSampleCount: observation.attemptedSampleCount,
+      validPointCount,
+      rejectedPointCount: observation.attemptedSampleCount - validPointCount,
+    }
   }
 
   public getDiagnostics(previewStatus: SpatialPreviewStatus): SpatialPointDebug {

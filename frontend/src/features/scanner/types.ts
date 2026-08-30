@@ -111,6 +111,23 @@ export interface DepthFrameObservation {
   viewTransformMatrix: Float32Array | null
 }
 
+/** A fixed-layout, current-frame depth grid used only by dense visualization. */
+export interface DenseDepthFrameObservation {
+  columns: number
+  rows: number
+  attemptedSampleCount: number
+  validSampleCount: number
+  rejectedSampleCount: number
+  valid: Uint8Array
+  normalizedX: Float32Array
+  normalizedY: Float32Array
+  distancesMeters: Float32Array
+  depthProjectionMatrix: Float32Array | null
+  depthTransformMatrix: Float32Array | null
+  viewProjectionMatrix: Float32Array | null
+  viewTransformMatrix: Float32Array | null
+}
+
 export interface XRDepthDebug {
   status: DepthSensingStatus
   dataType: DepthDataType
@@ -141,6 +158,20 @@ export interface SpatialPointObservation {
   normalizedY: number
   depthMeters: number
   point: SpatialPoint
+}
+
+/** Dense points retain grid slots so neighboring samples can form triangles. */
+export interface DenseSpatialPointFrame {
+  columns: number
+  rows: number
+  valid: Uint8Array
+  normalizedX: Float32Array
+  normalizedY: Float32Array
+  distancesMeters: Float32Array
+  points: Float32Array
+  attemptedSampleCount: number
+  validPointCount: number
+  rejectedPointCount: number
 }
 
 export interface SpatialBounds {
@@ -178,29 +209,41 @@ export interface CoverageCell {
   lastAcceptedCameraPosition: ViewerPosition
 }
 
-export interface CoverageRenderTile {
-  position: SpatialPoint
-  normal: SpatialPoint
-  coverageState: CoverageCellState
-  isCandidate: boolean
-}
-
 export type CoverageRenderStatus = 'idle' | 'ready' | 'failed'
 
 export interface SpatialCoverageRenderDebug {
   status: CoverageRenderStatus
-  renderedTiles: number
-  renderCapacity: number
-  renderUpdateCount: number
   visualPatchSizeMeters: number
   candidateOpacity: number
   observedOpacity: number
   partialOpacity: number
   capturedOpacity: number
+  denseVertexCount: number
+  denseRenderUpdateCount: number
+}
+
+export interface SpatialCoverageDenseDebug {
+  columns: number
+  rows: number
+  attemptedSampleCount: number
+  validSampleCount: number
+  generatedTriangleCount: number
+  rejectedInvalidSampleCount: number
+  rejectedDepthDiscontinuityCount: number
+  unknownMaskSampleCount: number
+  observedMaskSampleCount: number
+  partialMaskSampleCount: number
+  capturedMaskSampleCount: number
+  updateCount: number
 }
 
 export interface SpatialCoverageDebug {
   cellSizeMeters: number
+  mappingColumns: number
+  mappingRows: number
+  mappingUpdateRateHz: number
+  mappingPhase: number
+  mappingUpdateCount: number
   totalUniqueCells: number
   observedCells: number
   partialCells: number
@@ -218,6 +261,13 @@ export interface SpatialCoverageDebug {
   statisticsInvariantError: string | null
   guidance: CoverageGuidance
   render: SpatialCoverageRenderDebug
+  dense: SpatialCoverageDenseDebug
+}
+
+export interface DenseCoverageMesh {
+  revision: number
+  vertexData: Float32Array
+  vertexCount: number
 }
 
 export interface FinalizedCoverageCell {

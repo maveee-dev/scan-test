@@ -1,4 +1,5 @@
 import type {
+  DenseDepthFrameObservation,
   DepthDataType,
   DepthFrameObservation,
   DepthSample,
@@ -197,6 +198,14 @@ export class XRDepthService {
 
   private probeFrameCount = 0
 
+  private lastDepthFrame: XRFrame | null = null
+
+  private lastDepthView: XRView | null = null
+
+  private lastDepthInformation: XRCPUDepthInformation | null = null
+
+  private lastDepthSampler: DepthSampler | null = null
+
   public initialize(session: XRSession): void {
     this.session = session
     this.probeFrameCount = 0
@@ -211,6 +220,7 @@ export class XRDepthService {
     }
 
     if (this.diagnostics.session.usage === 'gpu-optimized') {
+      this.clearLastDepthFrame()
       this.diagnostics.status = 'gpu-selected'
       this.diagnostics.acquisition = {
         status: 'not-attempted',
@@ -222,6 +232,7 @@ export class XRDepthService {
     this.probeFrameCount += 1
 
     if (typeof frame.getDepthInformation !== 'function') {
+      this.clearLastDepthFrame()
       this.diagnostics.status = 'unavailable'
       this.diagnostics.acquisition = {
         status: 'unsupported',
@@ -234,6 +245,7 @@ export class XRDepthService {
     try {
       depthInformation = frame.getDepthInformation(view)
     } catch (error) {
+      this.clearLastDepthFrame()
       this.diagnostics.status = 'error'
       this.diagnostics.acquisition = {
         status: 'threw',
@@ -248,6 +260,7 @@ export class XRDepthService {
     }
 
     if (!depthInformation) {
+      this.clearLastDepthFrame()
       this.diagnostics.acquisition = {
         status: 'null',
         error: null,
@@ -271,6 +284,7 @@ export class XRDepthService {
       : null
 
     if (widthResult.error || heightResult.error) {
+      this.clearLastDepthFrame()
       this.diagnostics.metadataError = widthResult.error ?? heightResult.error
       this.diagnostics.status = 'error'
       this.diagnostics.error = 'XR depth metadata could not be read.'
@@ -278,6 +292,7 @@ export class XRDepthService {
     }
 
     if (!isValidResolution(widthResult.value) || !isValidResolution(heightResult.value)) {
+      this.clearLastDepthFrame()
       this.diagnostics.metadataError = {
         name: 'InvalidDepthMetadata',
         message: 'XR returned an invalid depth width or height.',
@@ -296,6 +311,7 @@ export class XRDepthService {
 
     const depthSamplerResult = readProperty(() => depthInformation.getDepthInMeters)
     if (depthSamplerResult.error || typeof depthSamplerResult.value !== 'function') {
+      this.clearLastDepthFrame()
       this.diagnostics.samplingError = depthSamplerResult.error ?? {
         name: 'DepthSamplingUnsupported',
         message: 'XR depth information did not expose getDepthInMeters().',
@@ -306,6 +322,10 @@ export class XRDepthService {
 
     this.diagnostics.samplingError = null
     const depthSampler = depthSamplerResult.value.bind(depthInformation)
+    this.lastDepthFrame = frame
+    this.lastDepthView = view
+    this.lastDepthInformation = depthInformation
+    this.lastDepthSampler = depthSampler
     this.readDepthSamples(depthSampler)
     return this.createFrameObservation(
       depthInformation,
@@ -329,10 +349,100 @@ export class XRDepthService {
     }
   }
 
+  /**
+   * Samples a fixed, dense layout from the CPU depth information acquired for
+   * the current XR frame. It intentionally does not create another frame loop.
+   */
+  public inspectDenseFrame(
+    frame: XRFrame,
+    view: XRView,
+    columns: number,
+    rows: number,
+  ): DenseDepthFrameObservation | null {
+    if (
+      this.diagnostics.session.usage !== 'cpu-optimized' ||
+      !this.lastDepthSampler ||
+      !this.lastDepthInformation ||
+      this.lastDepthFrame !== frame ||
+      this.lastDepthView !== view ||
+      !Number.isInteger(columns) ||
+      !Number.isInteger(rows) ||
+      columns < 2 ||
+      rows < 2
+    ) {
+      return null
+    }
+
+    const attemptedSampleCount = columns * rows
+    const valid = new Uint8Array(attemptedSampleCount)
+    const normalizedX = new Float32Array(attemptedSampleCount)
+    const normalizedY = new Float32Array(attemptedSampleCount)
+    const distancesMeters = new Float32Array(attemptedSampleCount)
+    let validSampleCount = 0
+    let rejectedSampleCount = 0
+
+    for (let row = 0; row < rows; row += 1) {
+      const y = (row + 0.5) / rows
+      for (let column = 0; column < columns; column += 1) {
+        const index = row * columns + column
+        const x = (column + 0.5) / columns
+        normalizedX[index] = x
+        normalizedY[index] = y
+
+        try {
+          const distance = this.lastDepthSampler(x, y)
+          if (isValidDistance(distance)) {
+            valid[index] = 1
+            distancesMeters[index] = distance
+            validSampleCount += 1
+          } else {
+            rejectedSampleCount += 1
+          }
+        } catch {
+          rejectedSampleCount += 1
+        }
+      }
+    }
+
+    const depthInformation = this.lastDepthInformation
+    if (!depthInformation) {
+      return null
+    }
+
+    const depthProjectionResult = readProperty(() => depthInformation.projectionMatrix)
+    const depthTransformResult = readProperty(() => depthInformation.transform?.matrix)
+    const viewProjectionResult = readProperty(() => view.projectionMatrix)
+    const viewTransformResult = readProperty(() => view.transform.matrix)
+
+    return {
+      columns,
+      rows,
+      attemptedSampleCount,
+      validSampleCount,
+      rejectedSampleCount,
+      valid,
+      normalizedX,
+      normalizedY,
+      distancesMeters,
+      depthProjectionMatrix: copyMatrix(depthProjectionResult.value),
+      depthTransformMatrix: copyMatrix(depthTransformResult.value),
+      viewProjectionMatrix: copyMatrix(viewProjectionResult.value),
+      viewTransformMatrix: copyMatrix(viewTransformResult.value),
+    }
+  }
+
   public dispose(): void {
     this.session = null
     this.probeFrameCount = 0
+    this.clearLastDepthFrame()
     this.diagnostics = createInitialDepthDebug()
+  }
+
+  private clearLastDepthFrame(): void {
+    this.lastDepthFrame = null
+    this.lastDepthView = null
+    this.lastDepthInformation = null
+    this.lastDepthSampler = null
   }
 
   private readSessionDiagnostics(session: XRSession): void {

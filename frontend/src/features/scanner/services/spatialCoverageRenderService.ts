@@ -1,6 +1,5 @@
 import type {
-  CoverageCellState,
-  CoverageRenderTile,
+  DenseCoverageMesh,
   SpatialCoverageRenderDebug,
 } from '../types'
 import type {
@@ -8,21 +7,12 @@ import type {
   XRWebGLContext,
 } from './xrPresentationService'
 import {
-  MAX_COVERAGE_CELLS,
-  type SpatialCoverageRenderSnapshot,
-} from './spatialCoverageService'
-import {
-  COVERAGE_VISUAL_COLORS,
   COVERAGE_VISUAL_OPACITY,
   COVERAGE_VISUAL_PATCH_SIZE_METERS,
 } from './spatialCoverageVisualConfig'
 
-const SURFACE_OFFSET_METERS = 0.002
-const MAX_RENDER_TILES = MAX_COVERAGE_CELLS
-const VERTICES_PER_TILE = 6
 const FLOATS_PER_VERTEX = 7
 const BYTES_PER_FLOAT = Float32Array.BYTES_PER_ELEMENT
-const VECTOR_EPSILON = 1e-6
 
 const VERTEX_SHADER_SOURCE = `
 attribute vec3 aPosition;
@@ -45,159 +35,6 @@ void main() {
   gl_FragColor = vColor;
 }
 `
-
-interface Vector3 {
-  x: number
-  y: number
-  z: number
-}
-
-function getVectorLength(vector: Vector3): number {
-  return Math.hypot(vector.x, vector.y, vector.z)
-}
-
-function normalizeVector(vector: Vector3): Vector3 | null {
-  const length = getVectorLength(vector)
-  if (!Number.isFinite(length) || length <= VECTOR_EPSILON) {
-    return null
-  }
-
-  return {
-    x: vector.x / length,
-    y: vector.y / length,
-    z: vector.z / length,
-  }
-}
-
-function crossVector(first: Vector3, second: Vector3): Vector3 {
-  return {
-    x: first.y * second.z - first.z * second.y,
-    y: first.z * second.x - first.x * second.z,
-    z: first.x * second.y - first.y * second.x,
-  }
-}
-
-function addVectors(first: Vector3, second: Vector3): Vector3 {
-  return {
-    x: first.x + second.x,
-    y: first.y + second.y,
-    z: first.z + second.z,
-  }
-}
-
-function scaleVector(vector: Vector3, scale: number): Vector3 {
-  return {
-    x: vector.x * scale,
-    y: vector.y * scale,
-    z: vector.z * scale,
-  }
-}
-
-function subtractVectors(first: Vector3, second: Vector3): Vector3 {
-  return {
-    x: first.x - second.x,
-    y: first.y - second.y,
-    z: first.z - second.z,
-  }
-}
-
-function getColor(
-  state: CoverageCellState,
-  isCandidate: boolean,
-): [number, number, number, number] {
-  if (isCandidate) {
-    return [
-      ...COVERAGE_VISUAL_COLORS.observed,
-      COVERAGE_VISUAL_OPACITY.candidate,
-    ]
-  }
-
-  switch (state) {
-    case 'captured':
-      return [
-        ...COVERAGE_VISUAL_COLORS.captured,
-        COVERAGE_VISUAL_OPACITY.captured,
-      ]
-    case 'partial':
-      return [
-        ...COVERAGE_VISUAL_COLORS.partial,
-        COVERAGE_VISUAL_OPACITY.partial,
-      ]
-    default:
-      return [
-        ...COVERAGE_VISUAL_COLORS.observed,
-        COVERAGE_VISUAL_OPACITY.observed,
-      ]
-  }
-}
-
-function getTileCorners(tile: CoverageRenderTile): [Vector3, Vector3, Vector3, Vector3] | null {
-  const normal = normalizeVector(tile.normal)
-  if (!normal) {
-    return null
-  }
-
-  const referenceAxis = Math.abs(normal.y) < 0.9
-    ? { x: 0, y: 1, z: 0 }
-    : { x: 1, y: 0, z: 0 }
-  const tangent = normalizeVector(crossVector(referenceAxis, normal))
-  if (!tangent) {
-    return null
-  }
-
-  const bitangent = normalizeVector(crossVector(normal, tangent))
-  if (!bitangent) {
-    return null
-  }
-
-  const surfaceCenter = addVectors(tile.position, scaleVector(normal, SURFACE_OFFSET_METERS))
-  const halfSize = COVERAGE_VISUAL_PATCH_SIZE_METERS / 2
-  const tangentOffset = scaleVector(tangent, halfSize)
-  const bitangentOffset = scaleVector(bitangent, halfSize)
-
-  return [
-    subtractVectors(subtractVectors(surfaceCenter, tangentOffset), bitangentOffset),
-    addVectors(subtractVectors(surfaceCenter, bitangentOffset), tangentOffset),
-    addVectors(surfaceCenter, addVectors(tangentOffset, bitangentOffset)),
-    addVectors(subtractVectors(surfaceCenter, tangentOffset), bitangentOffset),
-  ]
-}
-
-function appendVertex(
-  data: Float32Array,
-  offset: number,
-  position: Vector3,
-  color: readonly [number, number, number, number],
-): number {
-  data[offset] = position.x
-  data[offset + 1] = position.y
-  data[offset + 2] = position.z
-  data[offset + 3] = color[0]
-  data[offset + 4] = color[1]
-  data[offset + 5] = color[2]
-  data[offset + 6] = color[3]
-  return offset + FLOATS_PER_VERTEX
-}
-
-function appendTile(
-  data: Float32Array,
-  offset: number,
-  tile: CoverageRenderTile,
-): number | null {
-  const corners = getTileCorners(tile)
-  if (!corners) {
-    return null
-  }
-
-  const color = getColor(tile.coverageState, tile.isCandidate)
-  let nextOffset = appendVertex(data, offset, corners[0], color)
-  nextOffset = appendVertex(data, nextOffset, corners[1], color)
-  nextOffset = appendVertex(data, nextOffset, corners[2], color)
-  nextOffset = appendVertex(data, nextOffset, corners[0], color)
-  nextOffset = appendVertex(data, nextOffset, corners[2], color)
-  nextOffset = appendVertex(data, nextOffset, corners[3], color)
-  return nextOffset
-}
 
 function createShader(
   gl: XRWebGLContext,
@@ -256,8 +93,8 @@ function createProgram(gl: XRWebGLContext): WebGLProgram {
 }
 
 /**
- * Draws the bounded world-space coverage tile batch into the session's
- * XRWebGLLayer. It shares the XR presentation context and has no frame loop.
+ * Uploads the current dense world-space mask into the session's XRWebGLLayer.
+ * It shares the XR session's context and never owns a second animation loop.
  */
 export class SpatialCoverageRenderService {
   private target: XRPresentationRenderTarget | null = null
@@ -266,7 +103,7 @@ export class SpatialCoverageRenderService {
 
   private program: WebGLProgram | null = null
 
-  private buffer: WebGLBuffer | null = null
+  private denseBuffer: WebGLBuffer | null = null
 
   private positionAttribute = -1
 
@@ -276,23 +113,11 @@ export class SpatialCoverageRenderService {
 
   private viewUniform: WebGLUniformLocation | null = null
 
-  private vertexData = new Float32Array(0)
+  private denseVertexCount = 0
 
-  private vertexCount = 0
+  private denseAppliedRevision = -1
 
-  private appliedRevision = -1
-
-  private diagnostics: SpatialCoverageRenderDebug = {
-    status: 'idle',
-    renderedTiles: 0,
-    renderCapacity: MAX_RENDER_TILES,
-    renderUpdateCount: 0,
-    visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
-    candidateOpacity: COVERAGE_VISUAL_OPACITY.candidate,
-    observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
-    partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
-    capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
-  }
+  private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
 
   public initialize(target: XRPresentationRenderTarget | null): void {
     this.dispose()
@@ -306,9 +131,9 @@ export class SpatialCoverageRenderService {
       this.target = target
       this.gl = target.gl
       this.program = createProgram(target.gl)
-      this.buffer = target.gl.createBuffer()
-      if (!this.buffer) {
-        throw new Error('The coverage vertex buffer could not be created.')
+      this.denseBuffer = target.gl.createBuffer()
+      if (!this.denseBuffer) {
+        throw new Error('The dense coverage vertex buffer could not be created.')
       }
 
       this.positionAttribute = target.gl.getAttribLocation(this.program, 'aPosition')
@@ -334,43 +159,23 @@ export class SpatialCoverageRenderService {
     }
   }
 
-  public update(snapshot: SpatialCoverageRenderSnapshot): void {
+  public updateDenseMesh(mesh: DenseCoverageMesh): void {
     if (
       this.diagnostics.status !== 'ready' ||
       !this.gl ||
-      !this.buffer ||
-      this.appliedRevision === snapshot.revision
+      !this.denseBuffer ||
+      this.denseAppliedRevision === mesh.revision
     ) {
       return
     }
 
     try {
-      const tileCount = Math.min(snapshot.tiles.length, MAX_RENDER_TILES)
-      this.ensureVertexCapacity(tileCount)
-      let offset = 0
-      let renderedTiles = 0
-
-      for (let index = 0; index < tileCount; index += 1) {
-        const nextOffset = appendTile(this.vertexData, offset, snapshot.tiles[index])
-        if (nextOffset === null) {
-          continue
-        }
-
-        offset = nextOffset
-        renderedTiles += 1
-      }
-
-      const gl = this.gl
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
-      gl.bufferData(
-        gl.ARRAY_BUFFER,
-        this.vertexData.subarray(0, offset),
-        gl.DYNAMIC_DRAW,
-      )
-      this.vertexCount = renderedTiles * VERTICES_PER_TILE
-      this.appliedRevision = snapshot.revision
-      this.diagnostics.renderedTiles = renderedTiles
-      this.diagnostics.renderUpdateCount += 1
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.denseBuffer)
+      this.gl.bufferData(this.gl.ARRAY_BUFFER, mesh.vertexData, this.gl.DYNAMIC_DRAW)
+      this.denseVertexCount = mesh.vertexCount
+      this.denseAppliedRevision = mesh.revision
+      this.diagnostics.denseVertexCount = mesh.vertexCount
+      this.diagnostics.denseRenderUpdateCount += 1
     } catch {
       this.diagnostics.status = 'failed'
     }
@@ -382,10 +187,10 @@ export class SpatialCoverageRenderService {
       !this.target ||
       !this.gl ||
       !this.program ||
-      !this.buffer ||
+      !this.denseBuffer ||
       !this.projectionUniform ||
       !this.viewUniform ||
-      this.vertexCount === 0
+      this.denseVertexCount === 0
     ) {
       return
     }
@@ -394,7 +199,7 @@ export class SpatialCoverageRenderService {
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.baseLayer.framebuffer)
       gl.useProgram(this.program)
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer)
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.denseBuffer)
       gl.enableVertexAttribArray(this.positionAttribute)
       gl.enableVertexAttribArray(this.colorAttribute)
       gl.vertexAttribPointer(
@@ -429,7 +234,7 @@ export class SpatialCoverageRenderService {
         gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height)
         gl.uniformMatrix4fv(this.projectionUniform, false, view.projectionMatrix)
         gl.uniformMatrix4fv(this.viewUniform, false, view.transform.inverse.matrix)
-        gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount)
+        gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
       }
     } catch {
       this.diagnostics.status = 'failed'
@@ -447,33 +252,28 @@ export class SpatialCoverageRenderService {
     this.disposeResources()
     this.target = null
     this.gl = null
-    this.vertexData = new Float32Array(0)
-    this.vertexCount = 0
-    this.appliedRevision = -1
-    this.diagnostics = {
+    this.denseVertexCount = 0
+    this.denseAppliedRevision = -1
+    this.diagnostics = this.createInitialDiagnostics()
+  }
+
+  private createInitialDiagnostics(): SpatialCoverageRenderDebug {
+    return {
       status: 'idle',
-      renderedTiles: 0,
-      renderCapacity: MAX_RENDER_TILES,
-      renderUpdateCount: 0,
       visualPatchSizeMeters: COVERAGE_VISUAL_PATCH_SIZE_METERS,
       candidateOpacity: COVERAGE_VISUAL_OPACITY.candidate,
       observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
       partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
       capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
-    }
-  }
-
-  private ensureVertexCapacity(tileCount: number): void {
-    const requiredFloats = tileCount * VERTICES_PER_TILE * FLOATS_PER_VERTEX
-    if (this.vertexData.length < requiredFloats) {
-      this.vertexData = new Float32Array(requiredFloats)
+      denseVertexCount: 0,
+      denseRenderUpdateCount: 0,
     }
   }
 
   private disposeResources(): void {
     if (this.gl) {
-      if (this.buffer) {
-        this.gl.deleteBuffer(this.buffer)
+      if (this.denseBuffer) {
+        this.gl.deleteBuffer(this.denseBuffer)
       }
       if (this.program) {
         this.gl.deleteProgram(this.program)
@@ -481,7 +281,7 @@ export class SpatialCoverageRenderService {
     }
 
     this.program = null
-    this.buffer = null
+    this.denseBuffer = null
     this.positionAttribute = -1
     this.colorAttribute = -1
     this.projectionUniform = null
