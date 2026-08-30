@@ -149,6 +149,10 @@ function formatCoverageRatio(ratio: number | null): string {
     : `${Math.round(ratio * 100)}%`
 }
 
+function formatVisualConfidence(confidence: number): string {
+  return Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : 'N/A'
+}
+
 function formatMeterRange(value: number | null): string {
   return value !== null && Number.isFinite(value) ? `${value.toFixed(2)} m` : 'N/A'
 }
@@ -884,6 +888,50 @@ function ScannerDomOverlay({
                 <strong>{formatCoveragePercentage(coverage.dense.coverageLookupHitPercentage)}</strong>
               </div>
               <div>
+                <span>Direct persistent matches</span>
+                <strong>{coverage.dense.directPersistentMatchCount}</strong>
+              </div>
+              <div>
+                <span>Neighborhood confidence samples</span>
+                <strong>{coverage.dense.neighborhoodConfidenceSampleCount}</strong>
+              </div>
+              <div>
+                <span>Visual confidence unknown</span>
+                <strong>{coverage.dense.visualConfidenceUnknownCount}</strong>
+              </div>
+              <div>
+                <span>Avg compatible neighbors</span>
+                <strong>{coverage.dense.averageCompatibleNeighborCount.toFixed(2)}</strong>
+              </div>
+              <div>
+                <span>Average visual confidence</span>
+                <strong>{formatVisualConfidence(coverage.dense.averageVisualConfidence)}</strong>
+              </div>
+              <div>
+                <span>Captured direct matches</span>
+                <strong>{coverage.dense.capturedDirectMatchCount}</strong>
+              </div>
+              <div>
+                <span>Neighborhood high confidence</span>
+                <strong>{coverage.dense.neighborhoodHighConfidenceSampleCount}</strong>
+              </div>
+              <div>
+                <span>Visual normal rejects</span>
+                <strong>{coverage.dense.visualConfidenceNormalRejectCount}</strong>
+              </div>
+              <div>
+                <span>Visual point-plane rejects</span>
+                <strong>{coverage.dense.visualConfidencePointToPlaneRejectCount}</strong>
+              </div>
+              <div>
+                <span>Visual support radius</span>
+                <strong>{coverage.dense.visualConfidenceSupportRadiusMeters.toFixed(2)} m</strong>
+              </div>
+              <div>
+                <span>Visual candidate limit</span>
+                <strong>{coverage.dense.visualConfidenceCandidateLimit}</strong>
+              </div>
+              <div>
                 <span>Depth min / max</span>
                 <strong>{formatMeterRange(coverage.dense.depthMinMeters)} / {formatMeterRange(coverage.dense.depthMaxMeters)}</strong>
               </div>
@@ -950,6 +998,10 @@ function ScannerDomOverlay({
               <div>
                 <span>Coverage lookup</span>
                 <strong>{coverage.dense.coverageLookupDurationMs.toFixed(1)} ms</strong>
+              </div>
+              <div>
+                <span>Visual confidence</span>
+                <strong>{coverage.dense.visualConfidenceDurationMs.toFixed(1)} ms</strong>
               </div>
               <div>
                 <span>Visual cache</span>

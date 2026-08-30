@@ -187,6 +187,16 @@ export interface CoverageLookupResult {
   kind: CoverageLookupKind
 }
 
+export interface CoverageVisualConfidenceResult {
+  confidence: number
+  directState: CoverageCellState | null
+  directMatch: boolean
+  kind: CoverageLookupKind
+  compatibleNeighborCount: number
+  normalRejectedCount: number
+  pointToPlaneRejectedCount: number
+}
+
 export type DenseSpatialSampleLabel =
   | 'top-center'
   | 'center'
@@ -297,6 +307,18 @@ export interface SpatialCoverageDenseDebug {
   visualHoleFillSampleCount: number
   visualHoleFillRejectCount: number
   smoothedVisualFragmentCount: number
+  directPersistentMatchCount: number
+  neighborhoodConfidenceSampleCount: number
+  visualConfidenceUnknownCount: number
+  averageCompatibleNeighborCount: number
+  averageVisualConfidence: number
+  capturedDirectMatchCount: number
+  neighborhoodHighConfidenceSampleCount: number
+  visualConfidenceNormalRejectCount: number
+  visualConfidencePointToPlaneRejectCount: number
+  visualConfidenceDurationMs: number
+  visualConfidenceSupportRadiusMeters: number
+  visualConfidenceCandidateLimit: number
 }
 
 export interface SpatialCoverageDebug {

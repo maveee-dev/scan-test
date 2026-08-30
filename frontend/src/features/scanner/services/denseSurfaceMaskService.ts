@@ -1,6 +1,6 @@
 import type {
   CoverageCellState,
-  CoverageLookupResult,
+  CoverageVisualConfidenceResult,
   DenseCoverageMesh,
   DenseMaskStabilizationOptions,
   DenseSpatialDiagnosticSample,
@@ -10,6 +10,8 @@ import type {
 } from '../types'
 import {
   COVERAGE_VISUAL_COLORS,
+  COVERAGE_VISUAL_CONFIDENCE,
+  COVERAGE_VISUAL_CONFIDENCE_CONFIG,
   COVERAGE_VISUAL_OPACITY,
   DEFAULT_DENSE_MASK_STABILIZATION_OPTIONS,
   DENSE_MASK_COLUMNS,
@@ -42,6 +44,7 @@ interface VisualPointCacheEntry {
   point: SpatialPoint
   normal: SpatialPoint | null
   lastState: CoverageCellState | null
+  lastVisualConfidence: number
   lastSeenAt: number
   lastPreparedAt: number
 }
@@ -114,6 +117,19 @@ function createInitialDiagnostics(): SpatialCoverageDenseDebug {
     visualHoleFillSampleCount: 0,
     visualHoleFillRejectCount: 0,
     smoothedVisualFragmentCount: 0,
+    directPersistentMatchCount: 0,
+    neighborhoodConfidenceSampleCount: 0,
+    visualConfidenceUnknownCount: 0,
+    averageCompatibleNeighborCount: 0,
+    averageVisualConfidence: 0,
+    capturedDirectMatchCount: 0,
+    neighborhoodHighConfidenceSampleCount: 0,
+    visualConfidenceNormalRejectCount: 0,
+    visualConfidencePointToPlaneRejectCount: 0,
+    visualConfidenceDurationMs: 0,
+    visualConfidenceSupportRadiusMeters:
+      COVERAGE_VISUAL_CONFIDENCE_CONFIG.supportRadiusMeters,
+    visualConfidenceCandidateLimit: COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates,
   }
 }
 
@@ -414,8 +430,32 @@ function estimateHolePoint(
   )
 }
 
-function hasVisibleMask(first: CoverageCellState | null, second: CoverageCellState | null, third: CoverageCellState | null): boolean {
-  return first !== 'captured' || second !== 'captured' || third !== 'captured'
+function getStateForVisualConfidence(confidence: number): CoverageCellState | null {
+  if (confidence >= COVERAGE_VISUAL_CONFIDENCE.captured) {
+    return 'captured'
+  }
+  if (confidence >= COVERAGE_VISUAL_CONFIDENCE.partial) {
+    return 'partial'
+  }
+  if (confidence >= COVERAGE_VISUAL_CONFIDENCE.observed) {
+    return 'observed'
+  }
+  return null
+}
+
+function getOpacityForVisualConfidence(confidence: number): number {
+  const clampedConfidence = Math.max(0, Math.min(1, confidence))
+  return COVERAGE_VISUAL_OPACITY.candidate * (1 - clampedConfidence)
+}
+
+function hasVisibleMask(
+  firstOpacity: number,
+  secondOpacity: number,
+  thirdOpacity: number,
+): boolean {
+  return firstOpacity > Number.EPSILON ||
+    secondOpacity > Number.EPSILON ||
+    thirdOpacity > Number.EPSILON
 }
 
 function writeVertex(
@@ -424,16 +464,10 @@ function writeVertex(
   points: Float32Array,
   pointIndex: number,
   state: CoverageCellState | null,
+  opacity: number,
 ): void {
   const pointOffset = pointIndex * 3
   const color = state ? COVERAGE_VISUAL_COLORS[state] : COVERAGE_VISUAL_COLORS.observed
-  const opacity = state === 'captured'
-    ? COVERAGE_VISUAL_OPACITY.captured
-    : state === 'partial'
-      ? COVERAGE_VISUAL_OPACITY.partial
-      : state === 'observed'
-        ? COVERAGE_VISUAL_OPACITY.observed
-        : COVERAGE_VISUAL_OPACITY.candidate
   data[offset] = points[pointOffset]
   data[offset + 1] = points[pointOffset + 1]
   data[offset + 2] = points[pointOffset + 2]
@@ -469,13 +503,15 @@ export class DenseSurfaceMaskService {
   private readonly frameVisualMatchCache = new Map<string, VisualPointCacheEntry | null>()
 
   /** Reused only within one prepared frame; coverage cannot change mid-build. */
-  private readonly coverageLookupCache = new Map<string, CoverageLookupResult>()
+  private readonly coverageLookupCache = new Map<string, CoverageVisualConfidenceResult>()
 
   private cacheExpirationIterator: Iterator<[string, VisualPointCacheEntry]> | null = null
 
   private matchedCacheEntries: Array<VisualPointCacheEntry | null> = []
 
   private sampleStates: Array<CoverageCellState | null> = []
+
+  private sampleOpacities = new Float32Array(0)
 
   private readonly lookupPoint: SpatialPoint = { x: 0, y: 0, z: 0 }
 
@@ -549,39 +585,58 @@ export class DenseSurfaceMaskService {
     let depthMaxMeters = Number.NEGATIVE_INFINITY
     this.ensureSampleCapacity(frame.columns * frame.rows)
     this.sampleStates.fill(null, 0, frame.columns * frame.rows)
+    this.sampleOpacities.fill(0, 0, frame.columns * frame.rows)
     this.coverageLookupCache.clear()
 
     const lookupStartedAt = getPerformanceTimestamp()
+    const grid = this.grid as VisualSurfaceGrid
+    let visualConfidenceSampleCount = 0
+    let visualConfidenceSum = 0
+    let compatibleNeighborSum = 0
     for (let index = 0; index < frame.columns * frame.rows; index += 1) {
-      if (this.grid?.valid[index] !== 1) {
+      if (grid.valid[index] !== 1) {
         diagnostics.rejectedInvalidSampleCount += 1
         continue
       }
 
       const pointOffset = index * 3
-      this.lookupPoint.x = this.grid?.points[pointOffset] ?? 0
-      this.lookupPoint.y = this.grid?.points[pointOffset + 1] ?? 0
-      this.lookupPoint.z = this.grid?.points[pointOffset + 2] ?? 0
-      const lookupKey = getPersistentLookupKey(
+      this.lookupPoint.x = grid.points[pointOffset]
+      this.lookupPoint.y = grid.points[pointOffset + 1]
+      this.lookupPoint.z = grid.points[pointOffset + 2]
+      const normalKey = grid.normalValid[index] === 1
+        ? `${Math.round(grid.normals[pointOffset] * 10)}:${Math.round(grid.normals[pointOffset + 1] * 10)}:${Math.round(grid.normals[pointOffset + 2] * 10)}`
+        : 'none'
+      const lookupKey = `${getPersistentLookupKey(
         this.lookupPoint.x,
         this.lookupPoint.y,
         this.lookupPoint.z,
-      )
+      )}:${normalKey}`
       let lookup = this.coverageLookupCache.get(lookupKey)
       if (!lookup) {
-        lookup = coverageService.getCoverageLookupAtPoint(this.lookupPoint)
+        lookup = coverageService.getCoverageVisualConfidenceAtPoint(
+          this.lookupPoint,
+          grid.normalValid[index] === 1
+            ? {
+                x: grid.normals[pointOffset],
+                y: grid.normals[pointOffset + 1],
+                z: grid.normals[pointOffset + 2],
+              }
+            : null,
+        )
         this.coverageLookupCache.set(lookupKey, lookup)
       }
       const cacheEntry = this.matchedCacheEntries[index]
-      const state = lookup.state ?? (
+      const confidence = lookup.kind === 'miss' &&
         this.stabilizationOptions.cacheEnabled &&
         this.stabilizationOptions.hysteresisEnabled &&
-        cacheEntry?.lastState
-          ? cacheEntry.lastState
-          : null
-      )
+        cacheEntry
+        ? cacheEntry.lastVisualConfidence
+        : lookup.confidence
+      const state = getStateForVisualConfidence(confidence)
+      this.sampleOpacities[index] = getOpacityForVisualConfidence(confidence)
       this.sampleStates[index] = state
-      if (cacheEntry && state !== null) {
+      if (cacheEntry) {
+        cacheEntry.lastVisualConfidence = confidence
         cacheEntry.lastState = state
       }
 
@@ -600,6 +655,21 @@ export class DenseSurfaceMaskService {
       worldMaxZ = Math.max(worldMaxZ, framePointZ)
       depthMinMeters = Math.min(depthMinMeters, frame.distancesMeters[index])
       depthMaxMeters = Math.max(depthMaxMeters, frame.distancesMeters[index])
+      visualConfidenceSampleCount += 1
+      visualConfidenceSum += confidence
+      compatibleNeighborSum += lookup.compatibleNeighborCount
+      diagnostics.directPersistentMatchCount += lookup.directMatch ? 1 : 0
+      diagnostics.neighborhoodConfidenceSampleCount +=
+        !lookup.directMatch && lookup.compatibleNeighborCount > 0 ? 1 : 0
+      diagnostics.visualConfidenceNormalRejectCount += lookup.normalRejectedCount
+      diagnostics.visualConfidencePointToPlaneRejectCount +=
+        lookup.pointToPlaneRejectedCount
+      if (
+        !lookup.directMatch &&
+        confidence >= COVERAGE_VISUAL_CONFIDENCE.partial
+      ) {
+        diagnostics.neighborhoodHighConfidenceSampleCount += 1
+      }
 
       if (lookup.kind === 'exact') {
         diagnostics.exactCoverageLookupHitCount += 1
@@ -610,6 +680,7 @@ export class DenseSurfaceMaskService {
       }
       if (state === null) {
         diagnostics.unknownMaskSampleCount += 1
+        diagnostics.visualConfidenceUnknownCount += 1
       } else if (state === 'observed') {
         diagnostics.observedMaskSampleCount += 1
       } else if (state === 'partial') {
@@ -617,8 +688,22 @@ export class DenseSurfaceMaskService {
       } else {
         diagnostics.capturedMaskSampleCount += 1
       }
+
+      if (lookup.directState === 'captured') {
+        diagnostics.capturedDirectMatchCount += 1
+      }
     }
-    diagnostics.coverageLookupDurationMs = Math.max(0, getPerformanceTimestamp() - lookupStartedAt)
+    diagnostics.visualConfidenceDurationMs = Math.max(
+      0,
+      getPerformanceTimestamp() - lookupStartedAt,
+    )
+    diagnostics.coverageLookupDurationMs = diagnostics.visualConfidenceDurationMs
+    diagnostics.averageCompatibleNeighborCount = visualConfidenceSampleCount > 0
+      ? compatibleNeighborSum / visualConfidenceSampleCount
+      : 0
+    diagnostics.averageVisualConfidence = visualConfidenceSampleCount > 0
+      ? visualConfidenceSum / visualConfidenceSampleCount
+      : 0
     diagnostics.worldBounds = Number.isFinite(worldMinX)
       ? {
           min: { x: worldMinX, y: worldMinY, z: worldMinZ },
@@ -806,18 +891,29 @@ export class DenseSurfaceMaskService {
     const firstState = this.sampleStates[firstIndex]
     const secondState = this.sampleStates[secondIndex]
     const thirdState = this.sampleStates[thirdIndex]
-    if (!hasVisibleMask(firstState, secondState, thirdState)) {
+    const firstOpacity = this.sampleOpacities[firstIndex]
+    const secondOpacity = this.sampleOpacities[secondIndex]
+    const thirdOpacity = this.sampleOpacities[thirdIndex]
+    if (!hasVisibleMask(firstOpacity, secondOpacity, thirdOpacity)) {
       return offset
     }
 
     diagnostics.generatedTriangleCount += 1
-    writeVertex(this.vertexData, offset, grid.points, firstIndex, firstState)
+    writeVertex(
+      this.vertexData,
+      offset,
+      grid.points,
+      firstIndex,
+      firstState,
+      firstOpacity,
+    )
     writeVertex(
       this.vertexData,
       offset + FLOATS_PER_VERTEX,
       grid.points,
       secondIndex,
       secondState,
+      secondOpacity,
     )
     writeVertex(
       this.vertexData,
@@ -825,6 +921,7 @@ export class DenseSurfaceMaskService {
       grid.points,
       thirdIndex,
       thirdState,
+      thirdOpacity,
     )
     return offset + FLOATS_PER_VERTEX * 3
   }
@@ -909,6 +1006,7 @@ export class DenseSurfaceMaskService {
         point: { x: pointX, y: pointY, z: pointZ },
         normal: hasNormal ? { x: normalX, y: normalY, z: normalZ } : null,
         lastState: null,
+        lastVisualConfidence: 0,
         lastSeenAt: timestamp,
         lastPreparedAt: timestamp,
       })
@@ -1091,6 +1189,7 @@ export class DenseSurfaceMaskService {
     if (this.matchedCacheEntries.length < sampleCount) {
       this.matchedCacheEntries = new Array<VisualPointCacheEntry | null>(sampleCount).fill(null)
       this.sampleStates = new Array<CoverageCellState | null>(sampleCount).fill(null)
+      this.sampleOpacities = new Float32Array(sampleCount)
     }
   }
 
@@ -1153,6 +1252,7 @@ export class DenseSurfaceMaskService {
     this.cacheExpirationIterator = null
     this.matchedCacheEntries = []
     this.sampleStates = []
+    this.sampleOpacities = new Float32Array(0)
     this.holeFillDurationMs = 0
     this.visualCacheHitCount = 0
     this.visualCacheRefreshCount = 0

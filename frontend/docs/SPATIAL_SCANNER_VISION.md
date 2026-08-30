@@ -139,6 +139,8 @@ coverage confidence and spatial memory
 
 The live mask is generated from current measured depth geometry. It is not rendered directly from large persistent coverage cells and is not a fixed HTML, CSS, or screen-space effect.
 
+For visual continuity, live mask opacity may use local geometrically compatible persistent coverage confidence without changing persistent capture state. This interpolation is visualization-only and does not affect coverage statistics or `FinalizedSpatialScan`.
+
 Temporary visual geometry may be rebuilt or discarded as the current XR frame changes. It must not create persistent scan data, increase confidence, or become part of `FinalizedSpatialScan` unless supported by real spatial observations.
 
 ## Progressive reveal behavior

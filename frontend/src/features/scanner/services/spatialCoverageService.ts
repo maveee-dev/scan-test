@@ -2,6 +2,7 @@ import type {
   CoverageCell,
   CoverageCellState,
   CoverageLookupResult,
+  CoverageVisualConfidenceResult,
   CoverageGuidance,
   SpatialCoverageDebug,
   SpatialCoverageRenderDebug,
@@ -17,6 +18,8 @@ import {
   DENSE_MASK_ROWS,
   COVERAGE_VISUAL_OPACITY,
   COVERAGE_VISUAL_PATCH_SIZE_METERS,
+  COVERAGE_VISUAL_CONFIDENCE,
+  COVERAGE_VISUAL_CONFIDENCE_CONFIG,
   DENSE_VISUAL_STABILIZATION_CONFIG,
 } from './spatialCoverageVisualConfig'
 
@@ -169,6 +172,19 @@ function createInitialDenseDebug(): SpatialCoverageDenseDebug {
     visualHoleFillSampleCount: 0,
     visualHoleFillRejectCount: 0,
     smoothedVisualFragmentCount: 0,
+    directPersistentMatchCount: 0,
+    neighborhoodConfidenceSampleCount: 0,
+    visualConfidenceUnknownCount: 0,
+    averageCompatibleNeighborCount: 0,
+    averageVisualConfidence: 0,
+    capturedDirectMatchCount: 0,
+    neighborhoodHighConfidenceSampleCount: 0,
+    visualConfidenceNormalRejectCount: 0,
+    visualConfidencePointToPlaneRejectCount: 0,
+    visualConfidenceDurationMs: 0,
+    visualConfidenceSupportRadiusMeters:
+      COVERAGE_VISUAL_CONFIDENCE_CONFIG.supportRadiusMeters,
+    visualConfidenceCandidateLimit: COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates,
   }
 }
 
@@ -503,6 +519,65 @@ function getStateForObservationCount(observationCount: number): CoverageCellStat
   }
 
   return 'observed'
+}
+
+function getVisualConfidenceForState(state: CoverageCellState): number {
+  return COVERAGE_VISUAL_CONFIDENCE[state]
+}
+
+const VISUAL_COMPATIBILITY_NORMAL_REJECT = -1
+const VISUAL_COMPATIBILITY_POINT_TO_PLANE_REJECT = -2
+
+function getVisualRegionCompatibilityWeight(
+  region: CoverageRegion,
+  point: SpatialPoint,
+  normal: SpatialPoint | null,
+  direct: boolean,
+  distanceSquared: number,
+): number {
+  const supportRadius = COVERAGE_VISUAL_CONFIDENCE_CONFIG.supportRadiusMeters
+  const distanceWeight = Math.max(
+    0,
+    1 - Math.sqrt(distanceSquared) / supportRadius,
+  )
+  if (distanceWeight <= 0) {
+    return 0
+  }
+
+  let normalWeight = 1
+  if (normal && region.representativeNormal) {
+    const normalDot = Math.abs(dotPoints(normal, region.representativeNormal))
+    if (normalDot < COVERAGE_VISUAL_CONFIDENCE_CONFIG.minNormalDot) {
+      return VISUAL_COMPATIBILITY_NORMAL_REJECT
+    }
+    normalWeight = normalDot
+  } else if (!direct) {
+    // A neighborhood without two comparable normals is not strong enough to
+    // propagate reveal confidence across a possible surface boundary.
+    return VISUAL_COMPATIBILITY_NORMAL_REJECT
+  }
+
+  let pointToPlaneWeight = 1
+  if (region.representativeNormal) {
+    const delta = subtractPoints(region.representativePosition, point)
+    const pointToPlaneDistance = Math.abs(
+      dotPoints(delta, region.representativeNormal),
+    )
+    if (
+      pointToPlaneDistance >
+      COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxPointToPlaneMeters
+    ) {
+      return VISUAL_COMPATIBILITY_POINT_TO_PLANE_REJECT
+    }
+    pointToPlaneWeight = Math.max(
+      0,
+      1 -
+        pointToPlaneDistance /
+          COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxPointToPlaneMeters,
+    )
+  }
+
+  return distanceWeight * normalWeight * pointToPlaneWeight
 }
 
 function hasCameraMoved(
@@ -896,6 +971,17 @@ export class SpatialCoverageService {
   private normalCompatibilityPassCount = 0
 
   private normalAngleSumRadians = 0
+
+  private readonly visualConfidenceCandidates: Array<CoverageRegion | null> =
+    new Array<CoverageRegion | null>(COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates).fill(null)
+
+  private readonly visualConfidenceCandidateDistances = new Float64Array(
+    COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates,
+  )
+
+  private readonly visualConfidenceCandidateWeights = new Float64Array(
+    COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates,
+  )
 
   private diagnostics = createInitialCoverageDebug()
 
@@ -1533,6 +1619,216 @@ export class SpatialCoverageService {
     return nearestCell
       ? { state: this.getCoverageStateForCell(nearestCell), kind: 'neighbor' }
       : { state: null, kind: 'miss' }
+  }
+
+  /**
+   * Resolves continuous confidence for the live mask only. Persistent state
+   * is never changed here: direct fine-cell evidence is authoritative, while
+   * a small set of nearby coplanar regions only improves visual continuity.
+   */
+  public getCoverageVisualConfidenceAtPoint(
+    point: SpatialPoint,
+    normal: SpatialPoint | null,
+  ): CoverageVisualConfidenceResult {
+    if (
+      !Number.isFinite(point.x) ||
+      !Number.isFinite(point.y) ||
+      !Number.isFinite(point.z)
+    ) {
+      return {
+        confidence: COVERAGE_VISUAL_CONFIDENCE.unknown,
+        directState: null,
+        directMatch: false,
+        kind: 'miss',
+        compatibleNeighborCount: 0,
+        normalRejectedCount: 0,
+        pointToPlaneRejectedCount: 0,
+      }
+    }
+
+    const supportRadiusSquared =
+      COVERAGE_VISUAL_CONFIDENCE_CONFIG.supportRadiusMeters ** 2
+    const exactBucketKey = getCellKey(getCellCoordinates(point))
+    const visualBucketCoordinates = getCoverageRegionBucketCoordinates(point)
+    const exactCandidates = this.cellBuckets.get(exactBucketKey)
+    let directRegion: CoverageRegion | null = null
+    let directDistanceSquared = Number.POSITIVE_INFINITY
+    let directWeight = 0
+    let normalRejectedCount = 0
+    let pointToPlaneRejectedCount = 0
+
+    if (exactCandidates) {
+      for (const cell of exactCandidates) {
+        const region = this.coverageRegions.get(cell.coverageRegionKey)
+        if (!region) {
+          continue
+        }
+        const delta = subtractPoints(region.representativePosition, point)
+        const distanceSquared = dotPoints(delta, delta)
+        if (distanceSquared > supportRadiusSquared) {
+          continue
+        }
+        const weight = getVisualRegionCompatibilityWeight(
+          region,
+          point,
+          normal,
+          true,
+          distanceSquared,
+        )
+        if (weight === VISUAL_COMPATIBILITY_NORMAL_REJECT) {
+          normalRejectedCount += 1
+          continue
+        }
+        if (weight === VISUAL_COMPATIBILITY_POINT_TO_PLANE_REJECT) {
+          pointToPlaneRejectedCount += 1
+          continue
+        }
+        if (weight > 0 && distanceSquared < directDistanceSquared) {
+          directRegion = region
+          directDistanceSquared = distanceSquared
+          directWeight = weight
+        }
+      }
+    }
+
+    let candidateCount = 0
+    if (directRegion) {
+      this.visualConfidenceCandidates[0] = directRegion
+      this.visualConfidenceCandidateDistances[0] = directDistanceSquared
+      this.visualConfidenceCandidateWeights[0] =
+        directWeight * COVERAGE_VISUAL_CONFIDENCE_CONFIG.directEvidenceWeight
+      candidateCount = 1
+    }
+
+    let compatibleNeighborCount = 0
+    const maxNeighborCandidates = directRegion
+      ? COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates - 1
+      : COVERAGE_VISUAL_CONFIDENCE_CONFIG.maxCandidates
+
+    for (
+      let xOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+      xOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+      xOffset += 1
+    ) {
+      for (
+        let yOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+        yOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+        yOffset += 1
+      ) {
+        for (
+          let zOffset = -COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+          zOffset <= COVERAGE_REGION_LOOKUP_RADIUS_BUCKETS;
+          zOffset += 1
+        ) {
+          const bucket = this.coverageRegionBuckets.get(
+            getCoverageRegionBucketKey({
+              x: visualBucketCoordinates.x + xOffset,
+              y: visualBucketCoordinates.y + yOffset,
+              z: visualBucketCoordinates.z + zOffset,
+            }),
+          )
+          if (!bucket) {
+            continue
+          }
+
+          for (const region of bucket) {
+            if (region === directRegion) {
+              continue
+            }
+
+            const delta = subtractPoints(region.representativePosition, point)
+            const distanceSquared = dotPoints(delta, delta)
+            if (distanceSquared > supportRadiusSquared) {
+              continue
+            }
+            const weight = getVisualRegionCompatibilityWeight(
+              region,
+              point,
+              normal,
+              false,
+              distanceSquared,
+            )
+            if (weight === VISUAL_COMPATIBILITY_NORMAL_REJECT) {
+              normalRejectedCount += 1
+              continue
+            }
+            if (weight === VISUAL_COMPATIBILITY_POINT_TO_PLANE_REJECT) {
+              pointToPlaneRejectedCount += 1
+              continue
+            }
+            if (weight <= 0) {
+              continue
+            }
+
+            if (compatibleNeighborCount < maxNeighborCandidates) {
+              const candidateIndex = candidateCount
+              this.visualConfidenceCandidates[candidateIndex] = region
+              this.visualConfidenceCandidateDistances[candidateIndex] = distanceSquared
+              this.visualConfidenceCandidateWeights[candidateIndex] = weight
+              candidateCount += 1
+              compatibleNeighborCount += 1
+              continue
+            }
+
+            // Keep only the closest bounded support set. The direct match at
+            // index zero is never replaced by a propagated neighbor.
+            let farthestIndex = directRegion ? 1 : 0
+            for (
+              let candidateIndex = farthestIndex + 1;
+              candidateIndex < candidateCount;
+              candidateIndex += 1
+            ) {
+              if (
+                this.visualConfidenceCandidateDistances[candidateIndex] >
+                this.visualConfidenceCandidateDistances[farthestIndex]
+              ) {
+                farthestIndex = candidateIndex
+              }
+            }
+            if (
+              distanceSquared <
+              this.visualConfidenceCandidateDistances[farthestIndex]
+            ) {
+              this.visualConfidenceCandidates[farthestIndex] = region
+              this.visualConfidenceCandidateDistances[farthestIndex] = distanceSquared
+              this.visualConfidenceCandidateWeights[farthestIndex] = weight
+            }
+          }
+        }
+      }
+    }
+
+    let weightedConfidence = 0
+    let totalWeight = 0
+    for (let index = 0; index < candidateCount; index += 1) {
+      const region = this.visualConfidenceCandidates[index]
+      if (!region) {
+        continue
+      }
+      const weight = this.visualConfidenceCandidateWeights[index]
+      weightedConfidence += getVisualConfidenceForState(region.state) * weight
+      totalWeight += weight
+    }
+
+    let confidence = totalWeight > 0 ? weightedConfidence / totalWeight : 0
+    if (!directRegion && compatibleNeighborCount === 1) {
+      confidence *= COVERAGE_VISUAL_CONFIDENCE_CONFIG.singleNeighborConfidenceFactor
+    }
+    confidence = Math.max(0, Math.min(1, confidence))
+
+    return {
+      confidence,
+      directState: directRegion?.state ?? null,
+      directMatch: directRegion !== null,
+      kind: directRegion
+        ? 'exact'
+        : compatibleNeighborCount > 0
+          ? 'neighbor'
+          : 'miss',
+      compatibleNeighborCount,
+      normalRejectedCount,
+      pointToPlaneRejectedCount,
+    }
   }
 
   public getCoverageStateAtPoint(point: SpatialPoint): CoverageCellState | null {

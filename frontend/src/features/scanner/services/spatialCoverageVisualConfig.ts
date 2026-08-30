@@ -14,6 +14,24 @@ export const COVERAGE_VISUAL_OPACITY = {
   captured: 0,
 } as const
 
+/** Continuous live-mask confidence; persistent states remain discrete. */
+export const COVERAGE_VISUAL_CONFIDENCE = {
+  unknown: 0,
+  observed: 1 / 3,
+  partial: 2 / 3,
+  captured: 1,
+} as const
+
+/** Bounded, stricter support used only to smooth live-mask appearance. */
+export const COVERAGE_VISUAL_CONFIDENCE_CONFIG = {
+  supportRadiusMeters: 0.12,
+  maxPointToPlaneMeters: 0.035,
+  minNormalDot: Math.cos((30 * Math.PI) / 180),
+  maxCandidates: 6,
+  directEvidenceWeight: 3,
+  singleNeighborConfidenceFactor: 0.5,
+} as const
+
 export const COVERAGE_VISUAL_COLORS: Record<CoverageCellState, readonly [number, number, number]> = {
   observed: [0.22, 0.62, 0.86],
   partial: [0.38, 0.78, 0.94],
