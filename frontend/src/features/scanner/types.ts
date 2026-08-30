@@ -117,7 +117,7 @@ export interface DepthFrameObservation {
   viewTransformMatrix: Float32Array | null
 }
 
-/** A fixed-layout, current-frame depth grid used only by dense visualization. */
+/** A fixed-layout, current-frame world-point grid used by live reconstruction and debug visualization. */
 export interface DenseDepthFrameObservation {
   columns: number
   rows: number
@@ -256,8 +256,13 @@ export interface SpatialCoverageRenderDebug {
   observedOpacity: number
   partialOpacity: number
   capturedOpacity: number
+  persistentVertexCount: number
+  persistentRenderUpdateCount: number
+  persistentSurfelCount: number
   denseVertexCount: number
   denseRenderUpdateCount: number
+  rawCurrentDepthVisible: boolean
+  persistentSurfelDebugVisible: boolean
   gpuBufferUploadDurationMs: number
 }
 
@@ -319,6 +324,37 @@ export interface SpatialCoverageDenseDebug {
   visualConfidenceDurationMs: number
   visualConfidenceSupportRadiusMeters: number
   visualConfidenceCandidateLimit: number
+}
+
+export type LiveSurfaceGeometryState = 'new' | 'confirmed' | 'stable'
+
+export interface PersistentLiveSurfaceDebug {
+  incomingMeasuredPointCount: number
+  surfelCount: number
+  surfelCapacity: number
+  spatialBucketCount: number
+  newSurfelCount: number
+  fusedSurfelCount: number
+  fusionRate: number | null
+  fusionRejectCount: number
+  distanceRejectedCount: number
+  pointToPlaneRejectedCount: number
+  normalRejectedCount: number
+  averageCandidatesPerPoint: number
+  weakSurfelCount: number
+  confirmedSurfelCount: number
+  stableSurfelCount: number
+  removedSurfelCount: number
+  candidateCheckCount: number
+  renderedSurfelCount: number
+  updateCount: number
+  updateRateHz: number
+  processingDurationMs: number
+  footprintRadiusMeters: number
+  maxFusionDistanceMeters: number
+  maxPointToPlaneMeters: number
+  minNormalDot: number
+  capacityReached: boolean
 }
 
 export interface SpatialCoverageDebug {
@@ -386,6 +422,7 @@ export interface SpatialCoverageDebug {
   guidance: CoverageGuidance
   render: SpatialCoverageRenderDebug
   dense: SpatialCoverageDenseDebug
+  liveSurface: PersistentLiveSurfaceDebug
 }
 
 export interface DenseCoverageMesh {

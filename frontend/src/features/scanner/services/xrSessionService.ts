@@ -21,6 +21,7 @@ import { SpatialPointPreviewService } from './spatialPointPreviewService'
 import { SpatialCoverageService } from './spatialCoverageService'
 import { SpatialCoverageRenderService } from './spatialCoverageRenderService'
 import { DenseSurfaceMaskService } from './denseSurfaceMaskService'
+import { PersistentLiveSurfaceService } from './persistentLiveSurfaceService'
 import {
   DENSE_MASK_COLUMNS,
   DENSE_MASK_ROWS,
@@ -139,6 +140,8 @@ export class XRSessionService {
 
   private readonly denseSurfaceMaskService = new DenseSurfaceMaskService()
 
+  private readonly persistentLiveSurfaceService = new PersistentLiveSurfaceService()
+
   private readonly finalizedSpatialScanService = new FinalizedSpatialScanService()
 
   private referenceSpace: XRReferenceSpace | null = null
@@ -172,6 +175,10 @@ export class XRSessionService {
   private position: ViewerPosition | null = null
 
   private viewerDirection: ViewerDirection | null = null
+
+  private rawCurrentDepthVisible = false
+
+  private persistentSurfelDebugVisible = false
 
   private glContextStatus: XRPresentationStatus = 'unknown'
 
@@ -207,7 +214,16 @@ export class XRSessionService {
   }
 
   public setDebugGeometryVisible(visible: boolean): void {
+    this.rawCurrentDepthVisible = visible
     this.spatialCoverageRenderService.setDebugGeometryVisible(visible)
+  }
+
+  public setPersistentSurfelDebugVisible(visible: boolean): void {
+    this.persistentSurfelDebugVisible = visible
+    this.spatialCoverageRenderService.setPersistentSurfelDebugVisible(visible)
+    this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
+      this.persistentLiveSurfaceService.rebuildForDebugVisibility(visible),
+    )
   }
 
   public setDenseMaskStabilizationOptions(options: DenseMaskStabilizationOptions): void {
@@ -297,6 +313,7 @@ export class XRSessionService {
     this.spatialCoverageService.dispose()
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
+    this.persistentLiveSurfaceService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -500,19 +517,35 @@ export class XRSessionService {
             this.mappingPhase,
           )
           this.mappingPhase = (this.mappingPhase + 1) % 4
-          const denseMesh = this.denseSurfaceMaskService.build(
+          const persistentSurfaceMesh = this.persistentLiveSurfaceService.processFrame(
             densePointFrame,
-            this.spatialCoverageService,
+            this.position,
             time,
-            depthReconstructionDurationMs,
+            this.spatialCoverageService,
+            this.persistentSurfelDebugVisible,
           )
-          this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
+          this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
+            persistentSurfaceMesh,
+          )
+          if (this.rawCurrentDepthVisible) {
+            const denseMesh = this.denseSurfaceMaskService.build(
+              densePointFrame,
+              this.spatialCoverageService,
+              time,
+              depthReconstructionDurationMs,
+            )
+            this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
+          } else {
+            this.spatialCoverageRenderService.clearDenseMesh()
+          }
           this.lastDenseMaskUpdatedAt = time
         } else {
-          const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(
-            time,
-          )
-          this.spatialCoverageRenderService.updateDenseMesh(cachedDenseMesh)
+          if (this.rawCurrentDepthVisible) {
+            const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(time)
+            this.spatialCoverageRenderService.updateDenseMesh(cachedDenseMesh)
+          } else {
+            this.spatialCoverageRenderService.clearDenseMesh()
+          }
           this.lastDenseMaskUpdatedAt = time
         }
       }
@@ -569,6 +602,7 @@ export class XRSessionService {
       coverage: this.spatialCoverageService.getDiagnostics(
         this.spatialCoverageRenderService.getDiagnostics(),
         this.denseSurfaceMaskService.getDiagnostics(),
+        this.persistentLiveSurfaceService.getDiagnostics(),
       ),
     })
   }
@@ -591,17 +625,21 @@ export class XRSessionService {
     this.referenceSpaceType = null
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
+    this.persistentLiveSurfaceService.dispose()
     this.presentationService.dispose()
     this.depthService.dispose()
     this.spatialPointService.reset()
     this.spatialPointPreviewService.dispose()
     this.spatialCoverageService.reset()
     this.denseSurfaceMaskService.reset()
+    this.persistentLiveSurfaceService.reset()
     this.frameRequestId = null
     this.scanStartedAt = null
     this.trackingActive = false
     this.position = null
     this.viewerDirection = null
+    this.rawCurrentDepthVisible = false
+    this.persistentSurfelDebugVisible = false
     this.isEnding = false
 
     const callback = this.callbacks?.onSessionEnded
@@ -674,6 +712,8 @@ export class XRSessionService {
     this.trackingActive = false
     this.position = null
     this.viewerDirection = null
+    this.rawCurrentDepthVisible = false
+    this.persistentSurfelDebugVisible = false
     this.scanStartedAt = null
     this.requestedEndReason = null
     this.depthService.dispose()
@@ -682,6 +722,7 @@ export class XRSessionService {
     this.spatialCoverageService.reset()
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
+    this.persistentLiveSurfaceService.dispose()
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -707,6 +748,7 @@ export class XRSessionService {
       coverage: this.spatialCoverageService.getDiagnostics(
         this.spatialCoverageRenderService.getDiagnostics(),
         this.denseSurfaceMaskService.getDiagnostics(),
+        this.persistentLiveSurfaceService.getDiagnostics(),
       ),
     })
   }

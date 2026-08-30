@@ -20,6 +20,7 @@ interface ScannerPageProps {
   sessionState: ScannerSessionState
   onStartScan: () => void
   onDebugGeometryToggle: (visible: boolean) => void
+  onPersistentSurfelDebugToggle: (visible: boolean) => void
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onCancelScan: () => void
   onFinishScan: () => void
@@ -115,6 +116,7 @@ function ScannerPage({
   canStartScan,
   onCancelScan,
   onDebugGeometryToggle,
+  onPersistentSurfelDebugToggle,
   onDenseMaskStabilizationOptionsChange,
   onDiscardScan,
   onFinishScan,
@@ -185,6 +187,7 @@ function ScannerPage({
         <ScannerDomOverlay
           onCancelScan={onCancelScan}
           onDebugGeometryToggle={onDebugGeometryToggle}
+          onPersistentSurfelDebugToggle={onPersistentSurfelDebugToggle}
           onDenseMaskStabilizationOptionsChange={onDenseMaskStabilizationOptionsChange}
           onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}

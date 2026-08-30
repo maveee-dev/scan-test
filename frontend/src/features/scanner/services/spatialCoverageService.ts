@@ -7,6 +7,7 @@ import type {
   SpatialCoverageDebug,
   SpatialCoverageRenderDebug,
   SpatialCoverageDenseDebug,
+  PersistentLiveSurfaceDebug,
   DenseSpatialPointFrame,
   SpatialPoint,
   SpatialPointObservation,
@@ -21,6 +22,7 @@ import {
   COVERAGE_VISUAL_CONFIDENCE,
   COVERAGE_VISUAL_CONFIDENCE_CONFIG,
   DENSE_VISUAL_STABILIZATION_CONFIG,
+  LIVE_SURFACE_CONFIG,
 } from './spatialCoverageVisualConfig'
 
 /** A 5 cm cell gives the persistent mask enough spatial detail for fine reveal. */
@@ -121,8 +123,13 @@ function createInitialRenderDebug(): SpatialCoverageRenderDebug {
     observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
     partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
     capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
+    persistentVertexCount: 0,
+    persistentRenderUpdateCount: 0,
+    persistentSurfelCount: 0,
     denseVertexCount: 0,
     denseRenderUpdateCount: 0,
+    rawCurrentDepthVisible: false,
+    persistentSurfelDebugVisible: false,
     gpuBufferUploadDurationMs: 0,
   }
 }
@@ -254,6 +261,38 @@ function createInitialCoverageDebug(): SpatialCoverageDebug {
     statisticsInvariantError: null,
     render: createInitialRenderDebug(),
     dense: createInitialDenseDebug(),
+    liveSurface: createInitialLiveSurfaceDebug(),
+  }
+}
+
+function createInitialLiveSurfaceDebug(): PersistentLiveSurfaceDebug {
+  return {
+    incomingMeasuredPointCount: 0,
+    surfelCount: 0,
+    surfelCapacity: LIVE_SURFACE_CONFIG.maxSurfels,
+    spatialBucketCount: 0,
+    newSurfelCount: 0,
+    fusedSurfelCount: 0,
+    fusionRate: null,
+    fusionRejectCount: 0,
+    distanceRejectedCount: 0,
+    pointToPlaneRejectedCount: 0,
+    normalRejectedCount: 0,
+    averageCandidatesPerPoint: 0,
+    weakSurfelCount: 0,
+    confirmedSurfelCount: 0,
+    stableSurfelCount: 0,
+    removedSurfelCount: 0,
+    candidateCheckCount: 0,
+    renderedSurfelCount: 0,
+    updateCount: 0,
+    updateRateHz: 0,
+    processingDurationMs: 0,
+    footprintRadiusMeters: LIVE_SURFACE_CONFIG.footprintRadiusMeters,
+    maxFusionDistanceMeters: LIVE_SURFACE_CONFIG.maxFusionDistanceMeters,
+    maxPointToPlaneMeters: LIVE_SURFACE_CONFIG.maxPointToPlaneMeters,
+    minNormalDot: LIVE_SURFACE_CONFIG.minNormalDot,
+    capacityReached: false,
   }
 }
 
@@ -1853,6 +1892,7 @@ export class SpatialCoverageService {
   public getDiagnostics(
     render: SpatialCoverageRenderDebug,
     dense: SpatialCoverageDenseDebug,
+    liveSurface: PersistentLiveSurfaceDebug,
   ): SpatialCoverageDebug {
     const totalUniqueCells = this.cells.size
     let surfelsWithOneObservation = 0
@@ -1900,6 +1940,7 @@ export class SpatialCoverageService {
       statisticsInvariantError,
       render: { ...render },
       dense: { ...dense },
+      liveSurface: { ...liveSurface },
     }
   }
 

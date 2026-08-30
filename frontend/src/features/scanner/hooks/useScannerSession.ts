@@ -58,6 +58,7 @@ export interface ScannerSessionController {
   cancelScan: () => void
   finishScan: () => void
   setDebugGeometryVisible: (visible: boolean) => void
+  setPersistentSurfelDebugVisible: (visible: boolean) => void
   setDenseMaskStabilizationOptions: (options: DenseMaskStabilizationOptions) => void
   startNewScan: () => void
   discardScan: () => void
@@ -308,6 +309,10 @@ export function useScannerSession(
     service.setDebugGeometryVisible(visible)
   }, [service])
 
+  const setPersistentSurfelDebugVisible = useCallback((visible: boolean) => {
+    service.setPersistentSurfelDebugVisible(visible)
+  }, [service])
+
   const setDenseMaskStabilizationOptions = useCallback((options: DenseMaskStabilizationOptions) => {
     service.setDenseMaskStabilizationOptions(options)
   }, [service])
@@ -336,6 +341,7 @@ export function useScannerSession(
     cancelScan,
     finishScan,
     setDebugGeometryVisible,
+    setPersistentSurfelDebugVisible,
     setDenseMaskStabilizationOptions,
     startNewScan,
     discardScan,

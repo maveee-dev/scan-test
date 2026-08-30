@@ -106,6 +106,8 @@ export class SpatialCoverageRenderService {
 
   private denseBuffer: WebGLBuffer | null = null
 
+  private persistentSurfaceBuffer: WebGLBuffer | null = null
+
   private positionAttribute = -1
 
   private colorAttribute = -1
@@ -116,11 +118,19 @@ export class SpatialCoverageRenderService {
 
   private denseVertexCount = 0
 
+  private persistentSurfaceVertexCount = 0
+
   private denseBufferCapacityBytes = 0
+
+  private persistentSurfaceBufferCapacityBytes = 0
 
   private denseAppliedRevision = -1
 
+  private persistentSurfaceAppliedRevision = -1
+
   private debugGeometryVisible = false
+
+  private persistentSurfelDebugVisible = false
 
   private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
 
@@ -139,6 +149,10 @@ export class SpatialCoverageRenderService {
       this.denseBuffer = target.gl.createBuffer()
       if (!this.denseBuffer) {
         throw new Error('The dense coverage vertex buffer could not be created.')
+      }
+      this.persistentSurfaceBuffer = target.gl.createBuffer()
+      if (!this.persistentSurfaceBuffer) {
+        throw new Error('The persistent surface vertex buffer could not be created.')
       }
 
       this.positionAttribute = target.gl.getAttribLocation(this.program, 'aPosition')
@@ -201,8 +215,58 @@ export class SpatialCoverageRenderService {
     }
   }
 
+  public updatePersistentSurfaceMesh(mesh: DenseCoverageMesh): void {
+    if (
+      this.diagnostics.status !== 'ready' ||
+      !this.gl ||
+      !this.persistentSurfaceBuffer ||
+      this.persistentSurfaceAppliedRevision === mesh.revision
+    ) {
+      return
+    }
+
+    try {
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.persistentSurfaceBuffer)
+      const uploadStartedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (mesh.vertexData.byteLength > this.persistentSurfaceBufferCapacityBytes) {
+        const nextCapacityBytes = Math.max(
+          mesh.vertexData.byteLength,
+          Math.ceil(Math.max(1, this.persistentSurfaceBufferCapacityBytes) * 1.5),
+        )
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, nextCapacityBytes, this.gl.DYNAMIC_DRAW)
+        this.persistentSurfaceBufferCapacityBytes = nextCapacityBytes
+      }
+      if (mesh.vertexData.byteLength > 0) {
+        this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, mesh.vertexData)
+      }
+      this.persistentSurfaceVertexCount = mesh.vertexCount
+      this.persistentSurfaceAppliedRevision = mesh.revision
+      this.diagnostics.persistentVertexCount = mesh.vertexCount
+      this.diagnostics.persistentSurfelCount = Math.floor(mesh.vertexCount / 6)
+      this.diagnostics.persistentRenderUpdateCount += 1
+      this.diagnostics.gpuBufferUploadDurationMs = Math.max(
+        0,
+        (typeof performance === 'undefined' ? Date.now() : performance.now()) - uploadStartedAt,
+      )
+    } catch {
+      this.diagnostics.status = 'failed'
+    }
+  }
+
+  public clearDenseMesh(): void {
+    this.denseVertexCount = 0
+    this.denseAppliedRevision = -1
+    this.diagnostics.denseVertexCount = 0
+  }
+
   public setDebugGeometryVisible(visible: boolean): void {
     this.debugGeometryVisible = visible
+    this.diagnostics.rawCurrentDepthVisible = visible
+  }
+
+  public setPersistentSurfelDebugVisible(visible: boolean): void {
+    this.persistentSurfelDebugVisible = visible
+    this.diagnostics.persistentSurfelDebugVisible = visible
   }
 
   public render(views: readonly XRView[]): void {
@@ -212,9 +276,10 @@ export class SpatialCoverageRenderService {
       !this.gl ||
       !this.program ||
       !this.denseBuffer ||
+      !this.persistentSurfaceBuffer ||
       !this.projectionUniform ||
       !this.viewUniform ||
-      this.denseVertexCount === 0
+      (this.denseVertexCount === 0 && this.persistentSurfaceVertexCount === 0)
     ) {
       return
     }
@@ -223,31 +288,13 @@ export class SpatialCoverageRenderService {
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER, target.baseLayer.framebuffer)
       gl.useProgram(this.program)
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.denseBuffer)
       gl.enableVertexAttribArray(this.positionAttribute)
       gl.enableVertexAttribArray(this.colorAttribute)
-      gl.vertexAttribPointer(
-        this.positionAttribute,
-        3,
-        gl.FLOAT,
-        false,
-        FLOATS_PER_VERTEX * BYTES_PER_FLOAT,
-        0,
-      )
-      gl.vertexAttribPointer(
-        this.colorAttribute,
-        4,
-        gl.FLOAT,
-        false,
-        FLOATS_PER_VERTEX * BYTES_PER_FLOAT,
-        3 * BYTES_PER_FLOAT,
-      )
       gl.enable(gl.BLEND)
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
       gl.enable(gl.DEPTH_TEST)
       gl.depthFunc(gl.LEQUAL)
       gl.depthMask(false)
-      gl.disable(gl.CULL_FACE)
 
       for (const view of views) {
         const viewport = target.baseLayer.getViewport(view)
@@ -258,8 +305,23 @@ export class SpatialCoverageRenderService {
         gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height)
         gl.uniformMatrix4fv(this.projectionUniform, false, view.projectionMatrix)
         gl.uniformMatrix4fv(this.viewUniform, false, view.transform.inverse.matrix)
-        gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
-        if (this.debugGeometryVisible) {
+
+        if (this.persistentSurfaceVertexCount > 0) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.persistentSurfaceBuffer)
+          this.configureVertexAttributes(gl)
+          gl.enable(gl.CULL_FACE)
+          gl.cullFace(gl.BACK)
+          gl.drawArrays(gl.TRIANGLES, 0, this.persistentSurfaceVertexCount)
+          if (this.persistentSurfelDebugVisible) {
+            gl.drawArrays(gl.POINTS, 0, this.persistentSurfaceVertexCount)
+          }
+        }
+
+        if (this.debugGeometryVisible && this.denseVertexCount > 0) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.denseBuffer)
+          this.configureVertexAttributes(gl)
+          gl.disable(gl.CULL_FACE)
+          gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
           gl.drawArrays(gl.POINTS, 0, this.denseVertexCount)
         }
       }
@@ -268,6 +330,7 @@ export class SpatialCoverageRenderService {
     } finally {
       gl.depthMask(true)
       gl.disable(gl.BLEND)
+      gl.disable(gl.CULL_FACE)
     }
   }
 
@@ -280,9 +343,13 @@ export class SpatialCoverageRenderService {
     this.target = null
     this.gl = null
     this.denseVertexCount = 0
+    this.persistentSurfaceVertexCount = 0
     this.denseBufferCapacityBytes = 0
+    this.persistentSurfaceBufferCapacityBytes = 0
     this.denseAppliedRevision = -1
+    this.persistentSurfaceAppliedRevision = -1
     this.debugGeometryVisible = false
+    this.persistentSurfelDebugVisible = false
     this.diagnostics = this.createInitialDiagnostics()
   }
 
@@ -294,8 +361,13 @@ export class SpatialCoverageRenderService {
       observedOpacity: COVERAGE_VISUAL_OPACITY.observed,
       partialOpacity: COVERAGE_VISUAL_OPACITY.partial,
       capturedOpacity: COVERAGE_VISUAL_OPACITY.captured,
+      persistentVertexCount: 0,
+      persistentRenderUpdateCount: 0,
+      persistentSurfelCount: 0,
       denseVertexCount: 0,
       denseRenderUpdateCount: 0,
+      rawCurrentDepthVisible: false,
+      persistentSurfelDebugVisible: false,
       gpuBufferUploadDurationMs: 0,
     }
   }
@@ -305,6 +377,9 @@ export class SpatialCoverageRenderService {
       if (this.denseBuffer) {
         this.gl.deleteBuffer(this.denseBuffer)
       }
+      if (this.persistentSurfaceBuffer) {
+        this.gl.deleteBuffer(this.persistentSurfaceBuffer)
+      }
       if (this.program) {
         this.gl.deleteProgram(this.program)
       }
@@ -312,9 +387,29 @@ export class SpatialCoverageRenderService {
 
     this.program = null
     this.denseBuffer = null
+    this.persistentSurfaceBuffer = null
     this.positionAttribute = -1
     this.colorAttribute = -1
     this.projectionUniform = null
     this.viewUniform = null
+  }
+
+  private configureVertexAttributes(gl: XRWebGLContext): void {
+    gl.vertexAttribPointer(
+      this.positionAttribute,
+      3,
+      gl.FLOAT,
+      false,
+      FLOATS_PER_VERTEX * BYTES_PER_FLOAT,
+      0,
+    )
+    gl.vertexAttribPointer(
+      this.colorAttribute,
+      4,
+      gl.FLOAT,
+      false,
+      FLOATS_PER_VERTEX * BYTES_PER_FLOAT,
+      3 * BYTES_PER_FLOAT,
+    )
   }
 }

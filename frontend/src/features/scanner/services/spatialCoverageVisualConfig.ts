@@ -53,6 +53,28 @@ export const DENSE_VISUAL_STABILIZATION_CONFIG = {
   holeFillMaxNeighborSpanMeters: 0.16,
 } as const
 
+/**
+ * Bounded live surface fusion configuration. Surfels are persistent for the
+ * active scan, while the existing coverage map remains the finalized data
+ * source. The 8.5 cm footprint is only rendered geometry, not a coverage
+ * cell or confidence radius.
+ */
+export const LIVE_SURFACE_CONFIG = {
+  spatialBucketSizeMeters: 0.05,
+  maxFusionDistanceMeters: 0.075,
+  maxPointToPlaneMeters: 0.04,
+  minNormalDot: Math.cos((42 * Math.PI) / 180),
+  maxNormalNeighborDepthDifferenceMeters: 0.35,
+  maxNormalNeighborSpanMeters: 0.45,
+  footprintRadiusMeters: 0.0425,
+  surfaceOffsetMeters: 0.001,
+  maxSurfels: 20_000,
+  maxCandidatesPerSample: 12,
+  maxObservationWeight: 16,
+  weakSurfelLifetimeMs: 10_000,
+  maxWeakSurfelsRemovedPerUpdate: 48,
+} as const
+
 export const DEFAULT_DENSE_MASK_STABILIZATION_OPTIONS: DenseMaskStabilizationOptions = {
   cacheEnabled: true,
   smoothingEnabled: true,

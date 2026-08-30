@@ -80,6 +80,19 @@ immersive-ar
 → persistent fused spatial observations
 ```
 
+During an active scan, measured depth also feeds a persistent live surface
+reconstruction:
+
+```text
+current WebXR depth measurements
+        ↓
+persistent fused live surface
+        ↓
+coverage/confidence
+        ↓
+world-anchored progressive visualization
+```
+
 ## Persistent scan representation
 
 Persistent scan data is a fused world-space surface representation. Conceptually:
@@ -117,16 +130,18 @@ The internal spatial grid or hash is implementation and data infrastructure. It 
 
 The internal index must not be presented as large visible squares, checkerboards, horizontal rows, a fixed display grid, or a screen-space progress meter. Repeated measurements of the same physical surface should be fused into stable nearby surface elements instead of becoming unrelated layers of XYZ cells.
 
-## Live visualization and persistent data are separate
+## Live visualization, persistent surface, and scan data are separate
 
-Live visualization intentionally has a different resolution and lifetime from persistent mapping:
+Raw current-frame depth geometry is sensor input, not the intended long-lived
+visible surface. Live visualization intentionally has a different resolution
+and lifetime from persistent mapping:
 
 ```text
 CURRENT WebXR depth
         ↓
-dense reconstructed surface geometry
+persistent fused live surfels
         ↓
-temporary world-anchored blue surface mask
+world-anchored progressive blue surface mask
 ```
 
 At the same time:
@@ -137,11 +152,20 @@ persistent fused spatial surfaces
 coverage confidence and spatial memory
 ```
 
-The live mask is generated from current measured depth geometry. It is not rendered directly from large persistent coverage cells and is not a fixed HTML, CSS, or screen-space effect.
+The persistent live surfel surface provides geometric continuity while current
+depth refines it. Coverage confidence remains separate from geometry
+stability: a geometrically stable surfel can still be blue when it has only
+been observed from one useful viewpoint. The mask is not rendered directly
+from large persistent coverage cells and is not a fixed HTML, CSS, or
+screen-space effect.
 
 For visual continuity, live mask opacity may use local geometrically compatible persistent coverage confidence without changing persistent capture state. This interpolation is visualization-only and does not affect coverage statistics or `FinalizedSpatialScan`.
 
-Temporary visual geometry may be rebuilt or discarded as the current XR frame changes. It must not create persistent scan data, increase confidence, or become part of `FinalizedSpatialScan` unless supported by real spatial observations.
+Temporary visual geometry, interpolation, and short-lived stabilization may be
+rebuilt or discarded as the current XR frame changes. They must not create
+persistent scan data, increase confidence, or become part of
+`FinalizedSpatialScan`. Only real measured spatial observations may update the
+persistent live surface or finalized scan data.
 
 ## Progressive reveal behavior
 

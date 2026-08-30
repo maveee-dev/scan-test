@@ -19,6 +19,7 @@ interface ScannerDomOverlayProps {
   onCancelScan: () => void
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onDebugGeometryToggle: (visible: boolean) => void
+  onPersistentSurfelDebugToggle: (visible: boolean) => void
   onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
@@ -201,12 +202,14 @@ function ScannerDomOverlay({
   onCancelScan,
   onDenseMaskStabilizationOptionsChange,
   onDebugGeometryToggle,
+  onPersistentSurfelDebugToggle,
   onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
+  const [isPersistentSurfelDebugVisible, setIsPersistentSurfelDebugVisible] = useState(false)
   const [stabilizationOptions, setStabilizationOptions] = useState<DenseMaskStabilizationOptions>(
     () => ({ ...sessionState.debug.coverage.dense.stabilizationOptions }),
   )
@@ -221,14 +224,18 @@ function ScannerDomOverlay({
   function handleCancelScan(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsPersistentSurfelDebugVisible(false)
     onDebugGeometryToggle(false)
+    onPersistentSurfelDebugToggle(false)
     onCancelScan()
   }
 
   function handleFinishScan(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsPersistentSurfelDebugVisible(false)
     onDebugGeometryToggle(false)
+    onPersistentSurfelDebugToggle(false)
     onFinishScan()
   }
 
@@ -237,14 +244,18 @@ function ScannerDomOverlay({
     setIsDebugOpen(nextOpen)
     if (!nextOpen) {
       setIsDenseGeometryVisible(false)
+      setIsPersistentSurfelDebugVisible(false)
       onDebugGeometryToggle(false)
+      onPersistentSurfelDebugToggle(false)
     }
   }
 
   function handleDebugClose(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsPersistentSurfelDebugVisible(false)
     onDebugGeometryToggle(false)
+    onPersistentSurfelDebugToggle(false)
   }
 
   function handleStabilizationToggle(
@@ -356,7 +367,19 @@ function ScannerDomOverlay({
               onDebugGeometryToggle(nextVisible)
             }}
           >
-            {isDenseGeometryVisible ? 'Hide World Points' : 'Show World Points'}
+            {isDenseGeometryVisible ? 'Hide Raw Depth' : 'Show Raw Depth'}
+          </button>
+          <button
+            type="button"
+            className="xr-scanner-debug-geometry"
+            aria-pressed={isPersistentSurfelDebugVisible}
+            onClick={() => {
+              const nextVisible = !isPersistentSurfelDebugVisible
+              setIsPersistentSurfelDebugVisible(nextVisible)
+              onPersistentSurfelDebugToggle(nextVisible)
+            }}
+          >
+            {isPersistentSurfelDebugVisible ? 'Hide Persistent Surfels' : 'Show Persistent Surfels'}
           </button>
           <button
             type="button"
@@ -786,6 +809,60 @@ function ScannerDomOverlay({
                 <strong>{coverage.surfelsWithThreeOrMoreObservations}</strong>
               </div>
               <div>
+                <span>Live surfels</span>
+                <strong>{coverage.liveSurface.surfelCount} / {coverage.liveSurface.surfelCapacity}</strong>
+              </div>
+              <div>
+                <span>Live surfel fusion</span>
+                <strong>{formatCoverageRatio(coverage.liveSurface.fusionRate)}</strong>
+              </div>
+              <div>
+                <span>Live surface created / fused</span>
+                <strong>{coverage.liveSurface.newSurfelCount} / {coverage.liveSurface.fusedSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Live surface buckets</span>
+                <strong>{coverage.liveSurface.spatialBucketCount}</strong>
+              </div>
+              <div>
+                <span>Live surface candidates</span>
+                <strong>{coverage.liveSurface.averageCandidatesPerPoint.toFixed(2)} avg / {coverage.liveSurface.candidateCheckCount} total</strong>
+              </div>
+              <div>
+                <span>Live fusion rejects</span>
+                <strong>{coverage.liveSurface.fusionRejectCount}</strong>
+              </div>
+              <div>
+                <span>Live reject distance / plane / normal</span>
+                <strong>
+                  {coverage.liveSurface.distanceRejectedCount} / {coverage.liveSurface.pointToPlaneRejectedCount} / {coverage.liveSurface.normalRejectedCount}
+                </strong>
+              </div>
+              <div>
+                <span>Live geometry new / confirmed / stable</span>
+                <strong>
+                  {coverage.liveSurface.weakSurfelCount} / {coverage.liveSurface.confirmedSurfelCount} / {coverage.liveSurface.stableSurfelCount}
+                </strong>
+              </div>
+              <div>
+                <span>Live surfels rendered</span>
+                <strong>{coverage.liveSurface.renderedSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Live reconstruction</span>
+                <strong>{coverage.liveSurface.processingDurationMs.toFixed(1)} ms / {coverage.liveSurface.updateRateHz.toFixed(1)} Hz</strong>
+              </div>
+              <div>
+                <span>Live footprint / fusion distance</span>
+                <strong>
+                  {coverage.liveSurface.footprintRadiusMeters.toFixed(3)} m / {coverage.liveSurface.maxFusionDistanceMeters.toFixed(3)} m
+                </strong>
+              </div>
+              <div>
+                <span>Live surface capacity</span>
+                <strong>{coverage.liveSurface.capacityReached ? 'Reached' : 'Available'}</strong>
+              </div>
+              <div>
                 <span>Coverage support</span>
                 <strong>{coverage.coverageRegionSupportMeters.toFixed(2)} m</strong>
               </div>
@@ -1058,6 +1135,14 @@ function ScannerDomOverlay({
               <div>
                 <span>Dense render updates</span>
                 <strong>{coverage.render.denseRenderUpdateCount}</strong>
+              </div>
+              <div>
+                <span>Persistent surface vertices</span>
+                <strong>{coverage.render.persistentVertexCount}</strong>
+              </div>
+              <div>
+                <span>Persistent surface updates</span>
+                <strong>{coverage.render.persistentRenderUpdateCount}</strong>
               </div>
             </div>
             <div className="xr-dom-overlay-dense-samples" aria-label="Dense world-point samples">
