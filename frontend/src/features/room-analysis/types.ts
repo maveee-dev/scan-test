@@ -87,6 +87,78 @@ export interface SurfaceConsensusPairDiagnostic {
   readonly rejectReason: string | null
 }
 
+export type StructuralSurfaceRole = 'wall' | 'floor' | 'ceiling' | 'other' | 'unknown'
+
+export type StructuralRelationshipType = 'parallel' | 'perpendicular-like' | 'other'
+
+export interface StructuralSurfaceEvidence {
+  readonly orientationScore: number
+  readonly sizeScore: number
+  readonly supportScore: number
+  readonly heightScore: number
+  readonly relationshipScore: number
+  readonly boundaryScore?: number
+}
+
+export interface StructuralSurfaceCandidate {
+  readonly planeId: string
+  readonly role: StructuralSurfaceRole
+  readonly confidence: number
+  readonly evidence: StructuralSurfaceEvidence
+  readonly centroid: SpatialPoint
+  readonly centroidHeight: number
+  readonly occupiedArea: number
+  readonly ownedSupport: number
+  readonly normal: SpatialPoint
+  readonly planeConstant: number
+  readonly bounds: {
+    readonly min: SpatialPoint
+    readonly max: SpatialPoint
+  }
+  readonly localBounds: PlaneLocalBounds
+  readonly tangentU: SpatialPoint
+  readonly tangentV: SpatialPoint
+}
+
+export interface StructuralSurfaceRelationship {
+  readonly firstPlaneId: string
+  readonly secondPlaneId: string
+  readonly normalAngleDegrees: number
+  readonly planeOffsetDifferenceMeters: number
+  readonly centroidDistanceMeters: number
+  readonly centroidHeightDifferenceMeters: number
+  readonly supportProximityMeters: number
+  readonly proximityScore: number
+  readonly relationshipType: StructuralRelationshipType
+  readonly planeIntersectionPossible: boolean
+  readonly verticalHorizontalEvidence: number
+}
+
+export interface RoomStructureInterpretationResult {
+  readonly sourceScanId: string
+  readonly referenceSpaceType: 'local-floor' | 'local'
+  readonly surfaces: readonly StructuralSurfaceCandidate[]
+  readonly likelyWalls: readonly StructuralSurfaceCandidate[]
+  readonly floorCandidate: StructuralSurfaceCandidate | null
+  readonly ceilingCandidate: StructuralSurfaceCandidate | null
+  readonly otherSurfaces: readonly StructuralSurfaceCandidate[]
+  readonly unknownSurfaces: readonly StructuralSurfaceCandidate[]
+  readonly relationships: readonly StructuralSurfaceRelationship[]
+  readonly stats: {
+    readonly inputSurfaceCount: number
+    readonly likelyWallCount: number
+    readonly floorCandidate: string | null
+    readonly ceilingCandidate: string | null
+    readonly otherCount: number
+    readonly unknownCount: number
+  }
+  readonly timings: {
+    readonly relationshipAnalysisMs: number
+    readonly interpretationMs: number
+    readonly totalMs: number
+  }
+}
+
 export interface SurfaceConsensusDiagnostic {
   readonly consensusId: string
   readonly finalPlaneId: string

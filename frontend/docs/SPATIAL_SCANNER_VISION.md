@@ -50,7 +50,9 @@ FinalizedSpatialScan (fused geometry + coverage metadata)
         ↓
 plane extraction
         ↓
-later room interpretation
+structural room-surface interpretation
+        â†“
+later room interpretation and reconstruction
 ```
 
 ```text
@@ -465,6 +467,33 @@ depth span to suppress alternate nearby measurements of the same surface. A
 consensus surface retains a real representative layer and tracks absorbed
 duplicate-layer support separately; it does not average arbitrary parallel
 geometry or merge disconnected physical surfaces without supporting evidence.
+
+Structural room-surface interpretation is the next post-scan stage. It reads
+the final geometric candidates and their bounded relationship graph to assign
+careful likely structural roles such as wall, floor, ceiling, other, or
+unknown. Orientation, size, support, height, and nearby perpendicular geometry
+are evidence rather than guarantees. This stage preserves uncertainty and
+does not yet create plane intersections, a room boundary, or a final room mesh.
+
+The longer-term post-scan direction is:
+
+```text
+FinalizedSpatialScan
+        â†“
+geometric plane extraction
+        â†“
+depth-layer surface-family consolidation
+        â†“
+final physical-surface consensus
+        â†“
+structural room-surface interpretation
+        â†“
+plane relationships and room envelope
+        â†“
+continuous editable 3D room
+        â†“
+first-person viewer
+```
 
 ## Technical direction
 

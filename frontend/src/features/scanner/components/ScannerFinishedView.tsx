@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { BUILD_INFO } from '../../../config/buildInfo'
 import type { FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
-import type { RoomAnalysisResult } from '../../room-analysis/types'
+import { StructuralSurfaceInterpretationService } from '../../room-analysis/services/structuralSurfaceInterpretationService'
+import type {
+  RoomAnalysisResult,
+  RoomStructureInterpretationResult,
+  StructuralSurfaceRole,
+} from '../../room-analysis/types'
 import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
 
 interface ScannerFinishedViewProps {
@@ -154,13 +159,112 @@ function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysi
   )
 }
 
+function getStructuralRoleLabel(role: StructuralSurfaceRole): string {
+  if (role === 'wall') {
+    return 'Likely Wall'
+  }
+  if (role === 'floor') {
+    return 'Likely Floor'
+  }
+  if (role === 'ceiling') {
+    return 'Likely Ceiling'
+  }
+  return role === 'other' ? 'Other' : 'Unknown'
+}
+
+function StructuralSurfaceSummary({
+  interpretation,
+}: {
+  interpretation: RoomStructureInterpretationResult
+}) {
+  const planeById = new Map(interpretation.surfaces.map((surface) => [surface.planeId, surface]))
+  const relevantRelationships = interpretation.relationships
+    .filter((relationship) => relationship.relationshipType !== 'other')
+    .sort((left, right) => right.verticalHorizontalEvidence - left.verticalHorizontalEvidence ||
+      right.proximityScore - left.proximityScore)
+    .slice(0, 6)
+
+  return (
+    <section className="scanner-analysis-result" aria-labelledby="structural-surfaces-title">
+      <div className="scanner-analysis-result-header">
+        <div>
+          <span className="scanner-analysis-label" id="structural-surfaces-title">
+            Structural surfaces
+          </span>
+          <span className="scanner-analysis-copy">
+            Geometry-based interpretation only; this does not construct a room mesh.
+          </span>
+        </div>
+        <strong>{interpretation.stats.inputSurfaceCount}</strong>
+      </div>
+      <div className="scanner-analysis-stats">
+        <div>
+          <span>Input final geometric surfaces</span>
+          <strong>{interpretation.stats.inputSurfaceCount}</strong>
+        </div>
+        <div>
+          <span>Likely walls</span>
+          <strong>{interpretation.stats.likelyWallCount}</strong>
+        </div>
+        <div>
+          <span>Floor candidate</span>
+          <strong>{interpretation.stats.floorCandidate ?? 'Not confidently observed'}</strong>
+        </div>
+        <div>
+          <span>Ceiling candidate</span>
+          <strong>{interpretation.stats.ceilingCandidate ?? 'Not confidently observed'}</strong>
+        </div>
+        <div>
+          <span>Other</span>
+          <strong>{interpretation.stats.otherCount}</strong>
+        </div>
+        <div>
+          <span>Unknown</span>
+          <strong>{interpretation.stats.unknownCount}</strong>
+        </div>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Reference space: {interpretation.referenceSpaceType} | relationships {interpretation.relationships.length} | timing relationships {interpretation.timings.relationshipAnalysisMs.toFixed(1)} ms | interpretation {interpretation.timings.interpretationMs.toFixed(1)} ms | total {interpretation.timings.totalMs.toFixed(1)} ms
+        </span>
+      </div>
+      <div className="scanner-plane-list">
+        {interpretation.surfaces.map((surface) => (
+          <div className="scanner-plane-row" key={surface.planeId}>
+            <span>
+              <strong>{surface.planeId}</strong>
+              <small>{getStructuralRoleLabel(surface.role)} | confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m</small>
+            </span>
+            <span>
+              area {surface.occupiedArea.toFixed(2)} m2 | support {surface.ownedSupport} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support score {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)}
+            </span>
+          </div>
+        ))}
+      </div>
+      {relevantRelationships.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Key relationships: {relevantRelationships.map((relationship) => {
+              const first = planeById.get(relationship.firstPlaneId)
+              const second = planeById.get(relationship.secondPlaneId)
+              return `${relationship.firstPlaneId} (${first ? getStructuralRoleLabel(first.role) : 'surface'}) / ${relationship.secondPlaneId} (${second ? getStructuralRoleLabel(second.role) : 'surface'}) ${relationship.relationshipType}, ${relationship.normalAngleDegrees.toFixed(1)} deg, proximity ${relationship.supportProximityMeters.toFixed(2)} m`
+            }).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
   scan,
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
+  const [interpretationService] = useState(() => new StructuralSurfaceInterpretationService())
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
+  const [interpretationResult, setInterpretationResult] = useState<RoomStructureInterpretationResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -182,13 +286,17 @@ function ScannerFinishedView({
 
     setIsAnalyzing(true)
     setAnalysisError(null)
+    setAnalysisResult(null)
+    setInterpretationResult(null)
     analysisTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) {
         return
       }
 
       try {
-        setAnalysisResult(analysisService.analyze(scan))
+        const nextAnalysisResult = analysisService.analyze(scan)
+        setAnalysisResult(nextAnalysisResult)
+        setInterpretationResult(interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType))
       } catch (error: unknown) {
         setAnalysisError(
           error instanceof Error
@@ -204,7 +312,7 @@ function ScannerFinishedView({
 
   return (
     <section className="scanner-complete" aria-labelledby="scanner-complete-title">
-      <span className="scanner-eyebrow">Milestone 06 / Finalized spatial scan</span>
+      <span className="scanner-eyebrow">Milestone 07 / Structural room interpretation</span>
       <h1 className="scanner-title" id="scanner-complete-title">
         Scan <em>complete.</em>
       </h1>
@@ -220,7 +328,7 @@ function ScannerFinishedView({
         <div>
           <span className="scanner-analysis-label">Post-scan geometry analysis</span>
           <span className="scanner-analysis-copy">
-            Extract bounded geometric plane candidates from finalized spatial data.
+            Extract geometric planes and interpret likely room-surface roles from finalized spatial data.
           </span>
         </div>
         <button
@@ -235,7 +343,11 @@ function ScannerFinishedView({
       {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
 
       {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
-        <FinalizedSpatialScanPreview analysisResult={analysisResult} scan={scan} />
+        <FinalizedSpatialScanPreview
+          analysisResult={analysisResult}
+          scan={scan}
+          structuralInterpretation={interpretationResult}
+        />
       ) : (
         <div className="scanner-complete-empty">
           <strong>No spatial surfaces were captured.</strong>
@@ -248,6 +360,7 @@ function ScannerFinishedView({
       {analysisResult ? (
         <>
           <AnalysisResultSummary analysisResult={analysisResult} />
+          {interpretationResult ? <StructuralSurfaceSummary interpretation={interpretationResult} /> : null}
           {analysisResult.stats.provisionalPlaneCount > 0 ? (
         <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">
           <div className="scanner-analysis-result-header">

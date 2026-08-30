@@ -2,11 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { CoverageCellState, FinalizedSpatialScan } from '../types'
-import type { PlaneCandidate, RoomAnalysisResult } from '../../room-analysis/types'
+import type {
+  PlaneCandidate,
+  RoomAnalysisResult,
+  RoomStructureInterpretationResult,
+} from '../../room-analysis/types'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
   analysisResult?: RoomAnalysisResult | null
+  structuralInterpretation?: RoomStructureInterpretationResult | null
 }
 
 const POINT_COLORS: Record<CoverageCellState, number> = {
@@ -20,8 +25,15 @@ const PLANE_COLORS = {
   'vertical-like': 0x76d3e8,
   other: 0xd2b8ff,
 } as const
+const STRUCTURAL_SURFACE_COLORS = {
+  wall: 0x72d7e8,
+  floor: 0x9de5b3,
+  ceiling: 0xd2b8ff,
+  other: 0xf0b36a,
+  unknown: 0x9da9b3,
+} as const
 
-type PreviewMode = 'coverage' | 'fused' | 'planes'
+type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -83,6 +95,46 @@ function addPlaneCandidates(
   return { geometries, materials }
 }
 
+function addStructuralSurfaces(
+  scene: THREE.Scene,
+  analysisResult: RoomAnalysisResult,
+  interpretation: RoomStructureInterpretationResult,
+): { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } {
+  const group = new THREE.Group()
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.Material[] = []
+
+  for (const surface of interpretation.surfaces) {
+    const plane = analysisResult.planes.find((candidate) => candidate.id === surface.planeId)
+    if (!plane) {
+      continue
+    }
+    const geometry = createPlaneGeometry(plane)
+    const color = STRUCTURAL_SURFACE_COLORS[surface.role]
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      depthWrite: false,
+      opacity: 0.16 + surface.confidence * 0.2,
+      side: THREE.DoubleSide,
+      transparent: true,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    const outlineGeometry = new THREE.EdgesGeometry(geometry)
+    const outlineMaterial = new THREE.LineBasicMaterial({
+      color,
+      opacity: 0.45 + surface.confidence * 0.35,
+      transparent: true,
+    })
+    const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial)
+    group.add(mesh, outline)
+    geometries.push(geometry, outlineGeometry)
+    materials.push(material, outlineMaterial)
+  }
+
+  scene.add(group)
+  return { geometries, materials }
+}
+
 function createFusedSurfaceGeometry(
   surfels: readonly FinalizedSpatialScan['fusedSurface'][number][],
 ): THREE.BufferGeometry {
@@ -126,7 +178,11 @@ function createFusedSurfaceGeometry(
   return geometry
 }
 
-function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialScanPreviewProps) {
+function FinalizedSpatialScanPreview({
+  analysisResult,
+  scan,
+  structuralInterpretation,
+}: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const resetViewRef = useRef<(() => void) | null>(null)
   const [mode, setMode] = useState<PreviewMode>('coverage')
@@ -180,9 +236,11 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
 
     })
 
-    const pointsForBounds = mode === 'fused'
+    let pointsForBounds = mode === 'fused'
       ? scan.fusedSurface.map((surfel) => surfel.position)
-      : scan.coverage.map((cell) => cell.position)
+      : mode === 'planes' || mode === 'structural'
+        ? analysisResult?.planes.flatMap((plane) => [plane.bounds.min, plane.bounds.max]) ?? []
+        : scan.coverage.map((cell) => cell.position)
     if (pointsForBounds.length === 0) {
       for (const surfel of scan.fusedSurface) {
         pointsForBounds.push(surfel.position)
@@ -203,6 +261,7 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
     let fusedMaterial: THREE.MeshBasicMaterial | null = null
     let fusedSurface: THREE.Mesh | null = null
     let planeResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+    let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
 
     if (mode === 'coverage') {
       coverageGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -227,8 +286,10 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
       })
       fusedSurface = new THREE.Mesh(fusedGeometry, fusedMaterial)
       scene.add(fusedSurface)
-    } else if (analysisResult) {
+    } else if (mode === 'planes' && analysisResult) {
       planeResources = addPlaneCandidates(scene, analysisResult)
+    } else if (mode === 'structural' && analysisResult && structuralInterpretation) {
+      structuralResources = addStructuralSurfaces(scene, analysisResult, structuralInterpretation)
     }
 
     const center = new THREE.Vector3(
@@ -289,6 +350,8 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
       fusedMaterial?.dispose()
       planeResources?.geometries.forEach((planeGeometry) => planeGeometry.dispose())
       planeResources?.materials.forEach((planeMaterial) => planeMaterial.dispose())
+      structuralResources?.geometries.forEach((surfaceGeometry) => surfaceGeometry.dispose())
+      structuralResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       renderer.dispose()
       if (pointCloud) {
         scene.remove(pointCloud)
@@ -297,7 +360,7 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
         scene.remove(fusedSurface)
       }
     }
-  }, [analysisResult, mode, scan])
+  }, [analysisResult, mode, scan, structuralInterpretation])
 
   return (
     <div className="scanner-scan-preview">
@@ -334,6 +397,16 @@ function FinalizedSpatialScanPreview({ analysisResult, scan }: FinalizedSpatialS
               onClick={() => setMode('planes')}
             >
               Plane Candidates
+            </button>
+          ) : null}
+          {structuralInterpretation ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'structural'}
+              onClick={() => setMode('structural')}
+            >
+              Structural Surfaces
             </button>
           ) : null}
         </div>
