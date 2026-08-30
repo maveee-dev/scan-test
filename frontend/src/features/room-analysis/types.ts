@@ -36,6 +36,7 @@ export interface RoomAnalysisTimings {
   readonly downsamplingMs: number
   readonly initialExtractionMs: number
   readonly consolidationMs: number
+  readonly surfaceFamilyConsolidationMs: number
   readonly ransacMs: number
   readonly refinementMs: number
   readonly globalReassemblyMs: number
@@ -51,6 +52,22 @@ export interface PlaneRelationshipDiagnostic {
   readonly planeOffsetDifferenceMeters: number
 }
 
+export interface SurfaceFamilyDiagnostic {
+  readonly familyId: string
+  readonly finalPlaneId: string
+  readonly memberPlaneIds: readonly string[]
+  readonly representativePlaneId: string
+  readonly normalSpreadDegrees: number
+  readonly minimumPlaneOffset: number
+  readonly maximumPlaneOffset: number
+  readonly clusterThicknessMeters: number
+  readonly projectedSupportOverlapPercentage: number
+  readonly directRepresentativeSupport: number
+  readonly absorbedDuplicateLayerSupport: number
+  readonly combinedPhysicalSupport: number
+  readonly combinedSupportPercentage: number
+}
+
 export interface RoomAnalysisResult {
   readonly sourceScanId: string
   readonly planes: readonly PlaneCandidate[]
@@ -63,6 +80,11 @@ export interface RoomAnalysisResult {
     readonly downsampledPoints: number
     readonly analysisDownsampledSurfelCount: number
     readonly provisionalPlaneCount: number
+    readonly rawRansacPlaneCount: number
+    readonly surfaceFamilyClusterCount: number
+    readonly surfaceFamilyPairsTested: number
+    readonly surfaceFamilyMerges: number
+    readonly finalConsolidatedPlaneCount: number
     readonly planeCount: number
     readonly assignedPoints: number
     readonly unassignedPoints: number
@@ -112,6 +134,7 @@ export interface RoomAnalysisResult {
     readonly expansionConnectivityRejects: number
   }
   readonly planeRelationships: readonly PlaneRelationshipDiagnostic[]
+  readonly surfaceFamilies: readonly SurfaceFamilyDiagnostic[]
   readonly ransacIterationsPerPlane: readonly number[]
   readonly timings: RoomAnalysisTimings
 }

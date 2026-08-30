@@ -450,6 +450,14 @@ hypothesis discovery. Unsupported or noisy points remain unassigned instead
 of fabricating a room shape; parallel surfaces with different offsets and
 surfaces with different full normal directions remain separate.
 
+After dominant-plane fitting, a bounded surface-family consolidation pass may
+group nearby depth layers that have compatible full normals, canonical plane
+offsets, and overlapping projected support. This suppresses duplicate
+measurements of one physical surface without merging arbitrary parallel
+surfaces such as opposite walls or separate object faces. The representative
+plane remains a real fitted layer; duplicate-layer support is tracked
+separately for ownership and diagnostics.
+
 ## Technical direction
 
 The current browser technology direction is:

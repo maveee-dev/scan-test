@@ -26,6 +26,111 @@ function formatCapturedShare(scan: FinalizedSpatialScan): string {
   return `${Math.round((scan.statistics.capturedCells / scan.statistics.uniqueCells) * 100)}%`
 }
 
+function AnalysisResultSummary({ analysisResult }: { analysisResult: RoomAnalysisResult }) {
+  return (
+    <section className="scanner-analysis-result" aria-labelledby="scanner-analysis-title">
+      <div className="scanner-analysis-result-header">
+        <div>
+          <span className="scanner-analysis-label" id="scanner-analysis-title">
+            Plane candidates
+          </span>
+          <span className="scanner-analysis-copy">
+            Geometric candidates only; no wall, floor, or ceiling classification is applied.
+          </span>
+        </div>
+        <strong>{analysisResult.stats.finalConsolidatedPlaneCount}</strong>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>Analysis method: Global dominant planes (position-first, deterministic RANSAC)</span>
+      </div>
+      <div className="scanner-analysis-stats">
+        <div>
+          <span>Fused analysis input</span>
+          <strong>{analysisResult.stats.inputPoints}</strong>
+        </div>
+        <div>
+          <span>Finalized fused surfels</span>
+          <strong>{analysisResult.stats.finalizedFusedSurfelCount}</strong>
+        </div>
+        <div>
+          <span>Analysis downsampled surfels</span>
+          <strong>{analysisResult.stats.analysisDownsampledSurfelCount}</strong>
+        </div>
+        <div>
+          <span>Raw RANSAC planes</span>
+          <strong>{analysisResult.stats.rawRansacPlaneCount}</strong>
+        </div>
+        <div>
+          <span>Surface families</span>
+          <strong>{analysisResult.stats.surfaceFamilyClusterCount}</strong>
+        </div>
+        <div>
+          <span>Final surface planes</span>
+          <strong>{analysisResult.stats.finalConsolidatedPlaneCount}</strong>
+        </div>
+        <div>
+          <span>Assigned points</span>
+          <strong>{analysisResult.stats.assignedPoints} ({analysisResult.stats.assignedPercentage.toFixed(1)}%)</strong>
+        </div>
+        <div>
+          <span>Unassigned points</span>
+          <strong>{analysisResult.stats.unassignedPoints}</strong>
+        </div>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Timing: preparation {analysisResult.timings.inputPreparationMs.toFixed(1)} ms | downsampling {analysisResult.timings.downsamplingMs.toFixed(1)} ms | RANSAC {analysisResult.timings.ransacMs.toFixed(1)} ms | consolidation {analysisResult.timings.surfaceFamilyConsolidationMs.toFixed(1)} ms | ownership {analysisResult.timings.ownershipMs.toFixed(1)} ms | total {analysisResult.timings.totalMs.toFixed(1)} ms
+        </span>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Largest support {analysisResult.stats.largestPlaneSupportPercentage.toFixed(1)}% | second {analysisResult.stats.secondLargestPlaneSupportPercentage.toFixed(1)}% | top 3 {analysisResult.stats.topThreePlaneSupportPercentage.toFixed(1)}% of assigned points
+        </span>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Surface-family pairs {analysisResult.stats.surfaceFamilyPairsTested} | merges {analysisResult.stats.surfaceFamilyMerges}
+        </span>
+      </div>
+      {analysisResult.planeRelationships.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Top plane relations: {analysisResult.planeRelationships.map((relationship) => `${relationship.firstPlaneId}/${relationship.secondPlaneId} ${relationship.angularDifferenceDegrees.toFixed(1)} deg / delta d ${relationship.planeOffsetDifferenceMeters.toFixed(3)} m`).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+      {analysisResult.surfaceFamilies.map((family) => (
+        <div className="scanner-analysis-timings" key={family.familyId}>
+          <span>
+            {family.familyId} -&gt; {family.memberPlaneIds.join(', ')} | normal spread {family.normalSpreadDegrees.toFixed(1)} deg | d {family.minimumPlaneOffset.toFixed(3)} to {family.maximumPlaneOffset.toFixed(3)} m | thickness {family.clusterThicknessMeters.toFixed(3)} m | projected overlap {family.projectedSupportOverlapPercentage.toFixed(1)}% | direct {family.directRepresentativeSupport} | duplicate layer {family.absorbedDuplicateLayerSupport} | combined {family.combinedPhysicalSupport} ({family.combinedSupportPercentage.toFixed(1)}%)
+          </span>
+        </div>
+      ))}
+      {analysisResult.planes.length > 0 ? (
+        <div className="scanner-plane-list">
+          {analysisResult.planes.map((plane) => (
+            <div className="scanner-plane-row" key={plane.id}>
+              <span>
+                <strong>{plane.id}</strong>
+                <small>
+                  {plane.orientationCategory} | {plane.orientationAngleDegrees.toFixed(0)} deg from world-up | normal ({plane.normal.x.toFixed(2)}, {plane.normal.y.toFixed(2)}, {plane.normal.z.toFixed(2)}) | d {(-plane.planeConstant).toFixed(3)}
+                </small>
+              </span>
+              <span>
+                {plane.supportPointCount} pts | {plane.areaEstimate.toFixed(2)} m2 | RMS {plane.rmsError.toFixed(3)} m
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="scanner-analysis-empty">
+          Not enough stable spatial data to detect major surfaces.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
@@ -114,11 +219,14 @@ function ScannerFinishedView({
       )}
 
       {analysisResult ? (
-        <section className="scanner-analysis-result" aria-labelledby="scanner-analysis-title">
+        <>
+          <AnalysisResultSummary analysisResult={analysisResult} />
+          {analysisResult.stats.provisionalPlaneCount > 0 ? (
+        <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">
           <div className="scanner-analysis-result-header">
             <div>
-              <span className="scanner-analysis-label" id="scanner-analysis-title">
-                Plane candidates
+              <span className="scanner-analysis-label" id="legacy-scanner-analysis-title">
+                Legacy analysis diagnostics
               </span>
               <span className="scanner-analysis-copy">
                 Geometric candidates only; no wall, floor, or ceiling classification is applied.
@@ -155,20 +263,16 @@ function ScannerFinishedView({
               <strong>{analysisResult.stats.filteredPoints} / {analysisResult.stats.downsampledPoints}</strong>
             </div>
             <div>
-              <span>Legacy provisional planes</span>
-              <strong>{analysisResult.stats.provisionalPlaneCount}</strong>
+              <span>Raw RANSAC planes</span>
+              <strong>{analysisResult.stats.rawRansacPlaneCount}</strong>
             </div>
             <div>
-              <span>Final dominant planes</span>
-              <strong>{analysisResult.stats.planeCount}</strong>
+              <span>Final surface planes</span>
+              <strong>{analysisResult.stats.finalConsolidatedPlaneCount}</strong>
             </div>
             <div>
-              <span>Plane-parameter clusters</span>
-              <strong>{analysisResult.stats.planeParameterClusterCount}</strong>
-            </div>
-            <div>
-              <span>Legacy reassembly planes</span>
-              <strong>{analysisResult.stats.globalPlanesAccepted}</strong>
+              <span>Surface families</span>
+              <strong>{analysisResult.stats.surfaceFamilyClusterCount}</strong>
             </div>
             <div>
               <span>Assigned points</span>
@@ -279,6 +383,8 @@ function ScannerFinishedView({
             </p>
           )}
         </section>
+          ) : null}
+        </>
       ) : null}
 
       <div className="scanner-complete-card">

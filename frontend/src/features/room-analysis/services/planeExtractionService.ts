@@ -9,6 +9,7 @@ import type {
   PlaneOrientationCategory,
   PlaneRelationshipDiagnostic,
   RoomAnalysisResult,
+  SurfaceFamilyDiagnostic,
 } from '../types'
 
 export interface PlaneExtractionConfig {
@@ -63,6 +64,18 @@ export interface PlaneExtractionConfig {
   readonly maximumDominantPlanes: number
   readonly ransacEarlyTerminationFraction: number
   readonly minimumRansacSupportFraction: number
+  /** Full-normal tolerance for merging fitted parallel surface layers. */
+  readonly surfaceFamilyNormalAngleDegrees: number
+  /** Pairwise canonical plane-offset tolerance for a surface family. */
+  readonly surfaceFamilyLayerOffsetToleranceMeters: number
+  /** Safety bound for the total depth thickness of one surface family. */
+  readonly surfaceFamilyMaximumThicknessMeters: number
+  /** Minimum occupied projected-support overlap for layer consolidation. */
+  readonly surfaceFamilyMinimumProjectedOverlapRatio: number
+  /** Small overlap/adjacency fallback for scan gaps along one plane axis. */
+  readonly surfaceFamilyMinimumAdjacentOverlapRatio: number
+  readonly surfaceFamilyProjectedAdjacencyMeters: number
+  readonly surfaceFamilySupportCellSizeMeters: number
 }
 
 /** Conservative defaults for major-surface candidates, not semantic labels. */
@@ -106,6 +119,13 @@ export const DEFAULT_PLANE_EXTRACTION_CONFIG: PlaneExtractionConfig = {
   maximumDominantPlanes: 12,
   ransacEarlyTerminationFraction: 0.7,
   minimumRansacSupportFraction: 0.01,
+  surfaceFamilyNormalAngleDegrees: 7,
+  surfaceFamilyLayerOffsetToleranceMeters: 0.1,
+  surfaceFamilyMaximumThicknessMeters: 0.22,
+  surfaceFamilyMinimumProjectedOverlapRatio: 0.35,
+  surfaceFamilyMinimumAdjacentOverlapRatio: 0.05,
+  surfaceFamilyProjectedAdjacencyMeters: 0.3,
+  surfaceFamilySupportCellSizeMeters: 0.1,
 }
 
 interface AnalysisPoint {
@@ -159,6 +179,9 @@ interface ExtractedPlane {
 interface CandidateGroup {
   candidate: PlaneCandidate
   support: readonly number[]
+  /** Support associated with a physical surface family, when present. */
+  ownershipSupport?: readonly number[]
+  surfaceFamily?: SurfaceFamilyMetadata
 }
 
 interface ConsolidationDiagnostics {
@@ -171,6 +194,36 @@ interface ConsolidationDiagnostics {
 interface OwnershipResult {
   groups: CandidateGroup[]
   assignedPointCount: number
+}
+
+interface SurfaceFamilyMetadata {
+  memberPlaneIds: readonly string[]
+  representativePlaneId: string
+  normalSpreadDegrees: number
+  minimumPlaneOffset: number
+  maximumPlaneOffset: number
+  clusterThicknessMeters: number
+  projectedSupportOverlapPercentage: number
+  directRepresentativeSupport: number
+  absorbedDuplicateLayerSupport: number
+}
+
+interface SurfaceFamilyCluster {
+  members: CandidateGroup[]
+  support: number[]
+  representative: CandidateGroup
+}
+
+interface SurfaceFamilyConsolidationDiagnostics {
+  rawRansacPlaneCount: number
+  surfaceFamilyClusterCount: number
+  surfaceFamilyPairsTested: number
+  surfaceFamilyMerges: number
+}
+
+interface SurfaceFamilyConsolidationResult {
+  groups: CandidateGroup[]
+  diagnostics: SurfaceFamilyConsolidationDiagnostics
 }
 
 interface CanonicalPlane {
@@ -1059,6 +1112,287 @@ function getPlaneRelation(
   }
 }
 
+function getAlignedPlaneOffset(candidate: PlaneCandidate, referenceNormal: SpatialPoint): number {
+  const offset = -candidate.planeConstant
+  return dot(referenceNormal, candidate.normal) < 0 ? -offset : offset
+}
+
+function getProjectedOccupiedCells(
+  points: readonly AnalysisPoint[],
+  support: readonly number[],
+  origin: SpatialPoint,
+  tangentU: SpatialPoint,
+  tangentV: SpatialPoint,
+  cellSize: number,
+): Set<string> {
+  const cells = new Set<string>()
+  for (const index of support) {
+    const relative = subtract(points[index].position, origin)
+    const u = Math.floor(dot(relative, tangentU) / cellSize)
+    const v = Math.floor(dot(relative, tangentV) / cellSize)
+    cells.add(`${u}:${v}`)
+  }
+  return cells
+}
+
+function getOccupiedCellOverlapRatio(first: Set<string>, second: Set<string>): number {
+  const smaller = first.size <= second.size ? first : second
+  const larger = first.size <= second.size ? second : first
+  if (smaller.size === 0) {
+    return 0
+  }
+
+  let overlap = 0
+  for (const key of smaller) {
+    if (larger.has(key)) {
+      overlap += 1
+    }
+  }
+  return overlap / smaller.size
+}
+
+function getProjectedSupportOverlapRatio(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): number {
+  const reference = first.candidate
+  const firstCells = getProjectedOccupiedCells(
+    points,
+    first.support,
+    reference.centroid,
+    reference.tangentU,
+    reference.tangentV,
+    config.surfaceFamilySupportCellSizeMeters,
+  )
+  const secondCells = getProjectedOccupiedCells(
+    points,
+    second.support,
+    reference.centroid,
+    reference.tangentU,
+    reference.tangentV,
+    config.surfaceFamilySupportCellSizeMeters,
+  )
+  return getOccupiedCellOverlapRatio(firstCells, secondCells)
+}
+
+function getProjectedSupportAdjacency(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): boolean {
+  const reference = first.candidate
+  const firstRange = getProjectedRange(
+    points,
+    first.support,
+    reference.centroid,
+    reference.tangentU,
+    reference.tangentV,
+  )
+  const secondRange = getProjectedRange(
+    points,
+    second.support,
+    reference.centroid,
+    reference.tangentU,
+    reference.tangentV,
+  )
+  const overlapU = getRangeOverlap(firstRange.minU, firstRange.maxU, secondRange.minU, secondRange.maxU)
+  const overlapV = getRangeOverlap(firstRange.minV, firstRange.maxV, secondRange.minV, secondRange.maxV)
+  const spanU = Math.min(getRangeSize(firstRange.minU, firstRange.maxU), getRangeSize(secondRange.minU, secondRange.maxU))
+  const spanV = Math.min(getRangeSize(firstRange.minV, firstRange.maxV), getRangeSize(secondRange.minV, secondRange.maxV))
+  const sharedAxisRatio = Math.max(
+    spanU > 0 ? overlapU / spanU : 0,
+    spanV > 0 ? overlapV / spanV : 0,
+  )
+  const gapU = getRangeGap(firstRange.minU, firstRange.maxU, secondRange.minU, secondRange.maxU)
+  const gapV = getRangeGap(firstRange.minV, firstRange.maxV, secondRange.minV, secondRange.maxV)
+  return sharedAxisRatio >= config.surfaceFamilyMinimumAdjacentOverlapRatio &&
+    gapU <= config.surfaceFamilyProjectedAdjacencyMeters &&
+    gapV <= config.surfaceFamilyProjectedAdjacencyMeters
+}
+
+interface SurfaceFamilyPairCompatibility {
+  compatible: boolean
+  projectedSupportOverlapRatio: number
+}
+
+function getSurfaceFamilyPairCompatibility(
+  first: CandidateGroup,
+  second: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): SurfaceFamilyPairCompatibility {
+  const relation = getPlaneRelation(first.candidate, second.candidate)
+  if (relation.angularDifferenceDegrees > config.surfaceFamilyNormalAngleDegrees ||
+    relation.planeOffsetDifferenceMeters > config.surfaceFamilyLayerOffsetToleranceMeters) {
+    return { compatible: false, projectedSupportOverlapRatio: 0 }
+  }
+
+  const projectedSupportOverlapRatio = getProjectedSupportOverlapRatio(first, second, points, config)
+  const isOverlapping = projectedSupportOverlapRatio >= config.surfaceFamilyMinimumProjectedOverlapRatio
+  const isAdjacent = getProjectedSupportAdjacency(first, second, points, config)
+  return {
+    compatible: isOverlapping || isAdjacent,
+    projectedSupportOverlapRatio,
+  }
+}
+
+function selectSurfaceFamilyRepresentative(members: readonly CandidateGroup[]): CandidateGroup {
+  let best = members[0]
+  let bestScore = Number.POSITIVE_INFINITY
+
+  for (const member of members) {
+    let disagreement = 0
+    let comparisonWeight = 0
+    for (const other of members) {
+      if (other === member) {
+        continue
+      }
+      const relation = getPlaneRelation(member.candidate, other.candidate)
+      const weight = Math.max(1, other.support.length)
+      disagreement += weight * (relation.planeOffsetDifferenceMeters +
+        (relation.angularDifferenceDegrees * Math.PI) / 180 * 0.05)
+      comparisonWeight += weight
+    }
+    const weightedDisagreement = comparisonWeight > 0 ? disagreement / comparisonWeight : 0
+    const score = weightedDisagreement + member.candidate.rmsError * 0.1 - member.support.length * 1e-5
+    if (score < bestScore) {
+      best = member
+      bestScore = score
+    }
+  }
+
+  return best
+}
+
+function createSurfaceFamilyMetadata(
+  cluster: SurfaceFamilyCluster,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): SurfaceFamilyMetadata {
+  const reference = cluster.representative.candidate
+  const offsets = cluster.members.map((member) => getAlignedPlaneOffset(member.candidate, reference.normal))
+  let normalSpreadDegrees = 0
+  let overlapSum = 0
+  let overlapPairs = 0
+  for (let firstIndex = 0; firstIndex < cluster.members.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < cluster.members.length; secondIndex += 1) {
+      const first = cluster.members[firstIndex]
+      const second = cluster.members[secondIndex]
+      const relation = getPlaneRelation(first.candidate, second.candidate)
+      normalSpreadDegrees = Math.max(normalSpreadDegrees, relation.angularDifferenceDegrees)
+      overlapSum += getProjectedSupportOverlapRatio(first, second, points, config)
+      overlapPairs += 1
+    }
+  }
+
+  const minimumPlaneOffset = Math.min(...offsets)
+  const maximumPlaneOffset = Math.max(...offsets)
+  const combinedSupport = cluster.support.length
+  return {
+    memberPlaneIds: cluster.members.map((member) => member.candidate.id),
+    representativePlaneId: cluster.representative.candidate.id,
+    normalSpreadDegrees,
+    minimumPlaneOffset,
+    maximumPlaneOffset,
+    clusterThicknessMeters: Math.max(0, maximumPlaneOffset - minimumPlaneOffset),
+    projectedSupportOverlapPercentage: (overlapPairs > 0 ? overlapSum / overlapPairs : 1) * 100,
+    directRepresentativeSupport: cluster.representative.support.length,
+    absorbedDuplicateLayerSupport: Math.max(0, combinedSupport - cluster.representative.support.length),
+  }
+}
+
+function areSurfaceFamilyClustersCompatible(
+  first: SurfaceFamilyCluster,
+  second: SurfaceFamilyCluster,
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): boolean {
+  const referenceNormal = first.representative.candidate.normal
+  const incomingOffsets = second.members.map((member) => getAlignedPlaneOffset(member.candidate, referenceNormal))
+  const existingOffsets = first.members.map((member) => getAlignedPlaneOffset(member.candidate, referenceNormal))
+  const combinedThickness = Math.max(...existingOffsets, ...incomingOffsets) -
+    Math.min(...existingOffsets, ...incomingOffsets)
+  if (combinedThickness > config.surfaceFamilyMaximumThicknessMeters) {
+    return false
+  }
+
+  for (const firstMember of first.members) {
+    for (const secondMember of second.members) {
+      const compatibility = getSurfaceFamilyPairCompatibility(firstMember, secondMember, points, config)
+      if (compatibility.compatible) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+function mergeSurfaceFamilyClusters(
+  first: SurfaceFamilyCluster,
+  second: SurfaceFamilyCluster,
+): SurfaceFamilyCluster {
+  const members = [...first.members, ...second.members]
+  const support = Array.from(new Set([...first.support, ...second.support]))
+  return {
+    members,
+    support,
+    representative: selectSurfaceFamilyRepresentative(members),
+  }
+}
+
+function consolidateSurfaceFamilies(
+  rawGroups: readonly CandidateGroup[],
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): SurfaceFamilyConsolidationResult {
+  const diagnostics: SurfaceFamilyConsolidationDiagnostics = {
+    rawRansacPlaneCount: rawGroups.length,
+    surfaceFamilyClusterCount: rawGroups.length,
+    surfaceFamilyPairsTested: 0,
+    surfaceFamilyMerges: 0,
+  }
+  let clusters = rawGroups.map((group) => ({
+    members: [group],
+    support: [...group.support],
+    representative: group,
+  }))
+
+  for (let pass = 0; pass < config.maximumConsolidationPasses; pass += 1) {
+    let mergedThisPass = false
+    for (let firstIndex = 0; firstIndex < clusters.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < clusters.length; secondIndex += 1) {
+        diagnostics.surfaceFamilyPairsTested += 1
+        if (!areSurfaceFamilyClustersCompatible(clusters[firstIndex], clusters[secondIndex], points, config)) {
+          continue
+        }
+        clusters[firstIndex] = mergeSurfaceFamilyClusters(clusters[firstIndex], clusters[secondIndex])
+        clusters.splice(secondIndex, 1)
+        diagnostics.surfaceFamilyMerges += 1
+        mergedThisPass = true
+        break
+      }
+      if (mergedThisPass) {
+        break
+      }
+    }
+    if (!mergedThisPass) {
+      break
+    }
+  }
+
+  diagnostics.surfaceFamilyClusterCount = clusters.length
+  const groups = clusters.map((cluster) => ({
+    candidate: cluster.representative.candidate,
+    support: cluster.representative.support,
+    ownershipSupport: cluster.support,
+    surfaceFamily: createSurfaceFamilyMetadata(cluster, points, config),
+  }))
+  return { groups, diagnostics }
+}
+
 function getPlaneSeedCompatibility(
   first: PlaneCandidate,
   second: PlaneCandidate,
@@ -1506,6 +1840,9 @@ function assignPointOwnership(
   config: PlaneExtractionConfig,
 ): OwnershipResult {
   const ownedSupports = groups.map(() => [] as number[])
+  const familySupportSets = groups.map((group) => group.ownershipSupport
+    ? new Set(group.ownershipSupport)
+    : null)
 
   for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
     const point = points[pointIndex]
@@ -1514,18 +1851,22 @@ function assignPointOwnership(
 
     groups.forEach((group, groupIndex) => {
       const residual = Math.abs(dot(group.candidate.normal, point.position) - group.candidate.planeConstant)
-      if (residual > config.maximumPlaneErrorMeters) {
+      const isKnownFamilySupport = familySupportSets[groupIndex]?.has(pointIndex) === true
+      if (!isKnownFamilySupport && residual > config.maximumPlaneErrorMeters) {
         return
       }
       const normalAgreement = Math.abs(dot(group.candidate.normal, point.normal))
       const outsideDistance = getProjectedOutsideDistance(group.candidate, point.position)
-      if (outsideDistance > config.ownershipBoundsPaddingMeters) {
+      if (!isKnownFamilySupport && outsideDistance > config.ownershipBoundsPaddingMeters) {
         return
       }
 
-      const score = residual / config.maximumPlaneErrorMeters +
+      const score = (isKnownFamilySupport ? residual * 0.25 : residual) /
+        config.maximumPlaneErrorMeters +
         (1 - normalAgreement) * 0.75 +
-        outsideDistance / Math.max(1e-6, config.ownershipBoundsPaddingMeters)
+        (isKnownFamilySupport
+          ? outsideDistance * 0.25
+          : outsideDistance) / Math.max(1e-6, config.ownershipBoundsPaddingMeters)
       if (score < bestScore) {
         bestScore = score
         bestGroupIndex = groupIndex
@@ -1539,30 +1880,27 @@ function assignPointOwnership(
 
   const finalGroups: CandidateGroup[] = []
   let assignedPointCount = 0
-  ownedSupports.forEach((support) => {
+  ownedSupports.forEach((support, groupIndex) => {
     if (support.length < config.minimumSupportPointCount) {
       return
     }
-    const refined = fitRobustPlane(points, support, config)
-    if (!refined || refined.support.length < config.minimumSupportPointCount) {
-      return
+    const group = groups[groupIndex]
+    const candidate = {
+      ...group.candidate,
+      supportPointCount: support.reduce((count, index) => count + points[index].sourceCount, 0),
     }
-    const candidate = createPlaneCandidate(
-      `plane-${finalGroups.length + 1}`,
-      points,
-      refined.support,
-      refined.fit,
-      config,
-    )
     if (
-      !candidate ||
       candidate.areaEstimate < config.minimumAreaSquareMeters ||
       candidate.rmsError > config.maximumRmsErrorMeters
     ) {
       return
     }
-    finalGroups.push({ candidate, support: refined.support })
-    assignedPointCount += refined.support.length
+    finalGroups.push({
+      candidate,
+      support,
+      surfaceFamily: group.surfaceFamily,
+    })
+    assignedPointCount += support.length
   })
 
   return { groups: finalGroups, assignedPointCount }
@@ -2115,9 +2453,7 @@ export class PlaneExtractionService {
     let legacyProvisionalGroups: CandidateGroup[] = []
     let legacyConsolidationDiagnostics = createEmptyConsolidationDiagnostics()
     let legacyGlobalDiagnostics = createEmptyGlobalReassemblyDiagnostics()
-    let legacyAnalysisMs = 0
     if (this.config.enableLegacyDiagnostics === true) {
-      const legacyStartedAt = getTimestamp()
       legacyProvisionalGroups = extractProvisionalPlanes(prepared.points, this.config)
       const consolidated = consolidateCandidates(legacyProvisionalGroups, prepared.points, this.config)
       legacyConsolidationDiagnostics = consolidated.diagnostics
@@ -2126,11 +2462,13 @@ export class PlaneExtractionService {
         prepared.points,
         this.config,
       ).diagnostics
-      legacyAnalysisMs = Math.max(0, getTimestamp() - legacyStartedAt)
     }
     const ransac = extractDominantPlanesByRansac(prepared.points, this.config)
+    const consolidationStartedAt = getTimestamp()
+    const surfaceFamilies = consolidateSurfaceFamilies(ransac.groups, prepared.points, this.config)
+    const consolidationFinishedAt = getTimestamp()
     const ownershipStartedAt = getTimestamp()
-    const owned = assignPointOwnership(prepared.points, ransac.groups, this.config)
+    const owned = assignPointOwnership(prepared.points, surfaceFamilies.groups, this.config)
     const ownershipFinishedAt = getTimestamp()
     const rankedGroups = owned.groups
       .slice()
@@ -2155,6 +2493,29 @@ export class PlaneExtractionService {
         owned.assignedPointCount) * 100
       : 0
     const planeRelationships = createPlaneRelationshipDiagnostics(planes)
+    const surfaceFamilyDiagnostics: SurfaceFamilyDiagnostic[] = rankedGroups.flatMap((group, index) => {
+      if (!group.surfaceFamily) {
+        return []
+      }
+      const family = group.surfaceFamily
+      return [{
+        familyId: `surface-family-${index + 1}`,
+        finalPlaneId: `plane-${index + 1}`,
+        memberPlaneIds: [...family.memberPlaneIds],
+        representativePlaneId: family.representativePlaneId,
+        normalSpreadDegrees: family.normalSpreadDegrees,
+        minimumPlaneOffset: family.minimumPlaneOffset,
+        maximumPlaneOffset: family.maximumPlaneOffset,
+        clusterThicknessMeters: family.clusterThicknessMeters,
+        projectedSupportOverlapPercentage: family.projectedSupportOverlapPercentage,
+        directRepresentativeSupport: family.directRepresentativeSupport,
+        absorbedDuplicateLayerSupport: family.absorbedDuplicateLayerSupport,
+        combinedPhysicalSupport: group.support.length,
+        combinedSupportPercentage: owned.assignedPointCount > 0
+          ? (group.support.length / owned.assignedPointCount) * 100
+          : 0,
+      }]
+    })
 
     const result: RoomAnalysisResult = {
       sourceScanId: scan.id,
@@ -2168,6 +2529,11 @@ export class PlaneExtractionService {
         downsampledPoints: prepared.points.length,
         analysisDownsampledSurfelCount: prepared.analysisDownsampledSurfelCount,
         provisionalPlaneCount: legacyProvisionalGroups.length,
+        rawRansacPlaneCount: ransac.groups.length,
+        surfaceFamilyClusterCount: surfaceFamilies.diagnostics.surfaceFamilyClusterCount,
+        surfaceFamilyPairsTested: surfaceFamilies.diagnostics.surfaceFamilyPairsTested,
+        surfaceFamilyMerges: surfaceFamilies.diagnostics.surfaceFamilyMerges,
+        finalConsolidatedPlaneCount: planes.length,
         planeCount: planes.length,
         assignedPoints: owned.assignedPointCount,
         unassignedPoints: Math.max(0, prepared.points.length - owned.assignedPointCount),
@@ -2176,7 +2542,7 @@ export class PlaneExtractionService {
         candidatePairsTested: legacyConsolidationDiagnostics.candidatePairsTested,
         highOverlapCandidatePairs: legacyConsolidationDiagnostics.highOverlapCandidatePairs,
         candidatesMerged: legacyConsolidationDiagnostics.candidatesMerged,
-        duplicateCandidatesSuppressed: Math.max(0, legacyProvisionalGroups.length - planes.length),
+        duplicateCandidatesSuppressed: Math.max(0, ransac.groups.length - planes.length),
         averageSupportOverlap: legacyConsolidationDiagnostics.averageSupportOverlap,
         planeParameterClusterCount: legacyGlobalDiagnostics.planeParameterClusterCount,
         globalPlanesAttempted: legacyGlobalDiagnostics.globalPlanesAttempted,
@@ -2217,12 +2583,14 @@ export class PlaneExtractionService {
         expansionConnectivityRejects: 0,
       },
       planeRelationships: Object.freeze(planeRelationships),
+      surfaceFamilies: Object.freeze(surfaceFamilyDiagnostics),
       ransacIterationsPerPlane: Object.freeze([...ransac.diagnostics.iterationsPerAcceptedPlane]),
       timings: {
         inputPreparationMs: prepared.inputPreparationMs,
         downsamplingMs: prepared.downsamplingMs,
         initialExtractionMs: ransac.diagnostics.ransacMs,
-        consolidationMs: legacyAnalysisMs,
+        consolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
+        surfaceFamilyConsolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
         ransacMs: ransac.diagnostics.ransacMs,
         refinementMs: ransac.diagnostics.refinementMs,
         globalReassemblyMs: ransac.diagnostics.refinementMs,
