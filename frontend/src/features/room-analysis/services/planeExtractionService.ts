@@ -28,6 +28,13 @@ export interface PlaneExtractionConfig {
   readonly maximumPlaneRefinementPasses: number
   readonly maximumConsolidationPasses: number
   readonly ownershipBoundsPaddingMeters: number
+  /** Point residual allowed while reassembling spatially separated fragments. */
+  readonly expansionResidualToleranceMeters: number
+  /** Full 3D normal agreement used by dominant-plane expansion. */
+  readonly expansionNormalAngleDegrees: number
+  /** Maximum gap between connected support regions during expansion. */
+  readonly expansionConnectivityGapMeters: number
+  readonly maximumExpansionPasses: number
 }
 
 /** Conservative defaults for major-surface candidates, not semantic labels. */
@@ -50,6 +57,10 @@ export const DEFAULT_PLANE_EXTRACTION_CONFIG: PlaneExtractionConfig = {
   maximumPlaneRefinementPasses: 2,
   maximumConsolidationPasses: 8,
   ownershipBoundsPaddingMeters: 0.12,
+  expansionResidualToleranceMeters: 0.05,
+  expansionNormalAngleDegrees: 13,
+  expansionConnectivityGapMeters: 0.3,
+  maximumExpansionPasses: 8,
 }
 
 interface AnalysisPoint {
@@ -111,6 +122,32 @@ interface ConsolidationDiagnostics {
 interface OwnershipResult {
   groups: CandidateGroup[]
   assignedPointCount: number
+}
+
+interface ExpansionDiagnostics {
+  dominantSeedsAttempted: number
+  dominantPlanesAccepted: number
+  pointsAbsorbedDuringExpansion: number
+  fragmentsAbsorbedDuringExpansion: number
+  expansionPasses: number
+  planeRefits: number
+  expansionResidualRejects: number
+  expansionNormalRejects: number
+  expansionConnectivityRejects: number
+}
+
+interface ExpansionResult {
+  groups: CandidateGroup[]
+  diagnostics: ExpansionDiagnostics
+}
+
+interface ExpansionMarkers {
+  encountered: Uint32Array
+  connected: Uint32Array
+  included: Uint32Array
+  encounteredIndices: number[]
+  passToken: number
+  claimToken: number
 }
 
 function getTimestamp(): number {
@@ -864,6 +901,238 @@ function consolidateCandidates(
   }
 }
 
+function getPlaneSeedScore(group: CandidateGroup): number {
+  return group.support.length +
+    group.candidate.areaEstimate * 100 +
+    group.candidate.confidence * 10 -
+    group.candidate.rmsError * 100
+}
+
+function expandCandidateGroup(
+  seed: CandidateGroup,
+  points: readonly AnalysisPoint[],
+  buckets: ReadonlyMap<string, readonly number[]>,
+  available: Uint8Array,
+  markers: ExpansionMarkers,
+  config: PlaneExtractionConfig,
+  diagnostics: ExpansionDiagnostics,
+  id: string,
+): CandidateGroup | null {
+  const seedSupport = seed.support.filter((index) => available[index] === 1)
+  if (seedSupport.length < config.minimumSupportPointCount) {
+    return null
+  }
+
+  const support = [...seedSupport]
+  markers.claimToken += 1
+  const claimToken = markers.claimToken
+  for (const index of support) {
+    markers.included[index] = claimToken
+  }
+
+  let fit = fitPlane(points, support)
+  if (!fit) {
+    return null
+  }
+  diagnostics.planeRefits += 1
+
+  const normalCompatibilityDot = getNormalCompatibilityDot(config.expansionNormalAngleDegrees)
+  const bucketRadius = Math.ceil(
+    config.expansionConnectivityGapMeters / config.connectivityBucketSizeMeters,
+  )
+
+  for (
+    let pass = 0;
+    pass < config.maximumExpansionPasses;
+    pass += 1
+  ) {
+    diagnostics.expansionPasses += 1
+    const passToken = markers.passToken + 1
+    markers.passToken = passToken
+    markers.encounteredIndices.length = 0
+    const supportCountAtPassStart = support.length
+
+    // Newly accepted points become anchors on the next pass. This keeps each
+    // pass bounded while allowing a sparse wall to be reassembled through a
+    // short chain of real, coplanar measurements.
+    for (let supportOffset = 0; supportOffset < supportCountAtPassStart; supportOffset += 1) {
+      const anchor = points[support[supportOffset]]
+      const bucketX = quantize(anchor.position.x, config.connectivityBucketSizeMeters)
+      const bucketY = quantize(anchor.position.y, config.connectivityBucketSizeMeters)
+      const bucketZ = quantize(anchor.position.z, config.connectivityBucketSizeMeters)
+
+      for (let xOffset = -bucketRadius; xOffset <= bucketRadius; xOffset += 1) {
+        for (let yOffset = -bucketRadius; yOffset <= bucketRadius; yOffset += 1) {
+          for (let zOffset = -bucketRadius; zOffset <= bucketRadius; zOffset += 1) {
+            const bucket = buckets.get(
+              `${bucketX + xOffset}:${bucketY + yOffset}:${bucketZ + zOffset}`,
+            )
+            if (!bucket) {
+              continue
+            }
+
+            for (const candidateIndex of bucket) {
+              if (
+                available[candidateIndex] === 0 ||
+                markers.included[candidateIndex] === claimToken
+              ) {
+                continue
+              }
+
+              if (markers.encountered[candidateIndex] !== passToken) {
+                markers.encountered[candidateIndex] = passToken
+                markers.encounteredIndices.push(candidateIndex)
+              }
+
+              const candidate = points[candidateIndex]
+              if (
+                squaredDistance(anchor.position, candidate.position) >
+                config.expansionConnectivityGapMeters ** 2
+              ) {
+                continue
+              }
+              if (markers.connected[candidateIndex] === passToken) {
+                continue
+              }
+              markers.connected[candidateIndex] = passToken
+
+              const residual = Math.abs(dot(fit.normal, candidate.position) - fit.planeConstant)
+              if (residual > config.expansionResidualToleranceMeters) {
+                diagnostics.expansionResidualRejects += 1
+                continue
+              }
+
+              const normalAgreement = Math.abs(dot(fit.normal, candidate.normal))
+              if (normalAgreement < normalCompatibilityDot) {
+                diagnostics.expansionNormalRejects += 1
+                continue
+              }
+
+              markers.included[candidateIndex] = claimToken
+              support.push(candidateIndex)
+            }
+          }
+        }
+      }
+    }
+
+    for (const candidateIndex of markers.encounteredIndices) {
+      if (markers.connected[candidateIndex] !== passToken) {
+        diagnostics.expansionConnectivityRejects += 1
+      }
+    }
+
+    if (support.length === supportCountAtPassStart) {
+      break
+    }
+
+    fit = fitPlane(points, support)
+    if (!fit) {
+      return null
+    }
+    diagnostics.planeRefits += 1
+  }
+
+  const refined = refineRegion(
+    points,
+    support,
+    config,
+    getNormalCompatibilityDot(config.maximumNormalAngleDegrees),
+  )
+  if (!refined || refined.support.length < config.minimumSupportPointCount) {
+    return null
+  }
+
+  const candidate = createPlaneCandidate(id, points, refined.support, refined.fit, config)
+  if (
+    !candidate ||
+    candidate.areaEstimate < config.minimumAreaSquareMeters ||
+    candidate.rmsError > config.maximumRmsErrorMeters
+  ) {
+    return null
+  }
+
+  return { candidate, support: refined.support }
+}
+
+function expandDominantPlanes(
+  consolidated: readonly CandidateGroup[],
+  points: readonly AnalysisPoint[],
+  config: PlaneExtractionConfig,
+): ExpansionResult {
+  const diagnostics: ExpansionDiagnostics = {
+    dominantSeedsAttempted: 0,
+    dominantPlanesAccepted: 0,
+    pointsAbsorbedDuringExpansion: 0,
+    fragmentsAbsorbedDuringExpansion: 0,
+    expansionPasses: 0,
+    planeRefits: 0,
+    expansionResidualRejects: 0,
+    expansionNormalRejects: 0,
+    expansionConnectivityRejects: 0,
+  }
+  if (consolidated.length === 0 || points.length === 0) {
+    return { groups: [], diagnostics }
+  }
+
+  const seeds = consolidated
+    .slice()
+    .sort((left, right) => getPlaneSeedScore(right) - getPlaneSeedScore(left))
+  const available = new Uint8Array(points.length)
+  available.fill(1)
+  const buckets = createSpatialIndex(points, config.connectivityBucketSizeMeters)
+  const markers: ExpansionMarkers = {
+    encountered: new Uint32Array(points.length),
+    connected: new Uint32Array(points.length),
+    included: new Uint32Array(points.length),
+    encounteredIndices: [],
+    passToken: 0,
+    claimToken: 0,
+  }
+  const expandedGroups: CandidateGroup[] = []
+
+  for (const seed of seeds) {
+    diagnostics.dominantSeedsAttempted += 1
+    const seedSupport = seed.support.filter((index) => available[index] === 1)
+    if (seedSupport.length < config.minimumSupportPointCount) {
+      continue
+    }
+
+    const expanded = expandCandidateGroup(
+      { candidate: seed.candidate, support: seedSupport },
+      points,
+      buckets,
+      available,
+      markers,
+      config,
+      diagnostics,
+      `dominant-plane-${expandedGroups.length + 1}`,
+    )
+    if (!expanded) {
+      continue
+    }
+
+    const expandedSupport = new Set(expanded.support)
+    for (const index of expanded.support) {
+      available[index] = 0
+    }
+
+    diagnostics.dominantPlanesAccepted += 1
+    diagnostics.pointsAbsorbedDuringExpansion += Math.max(0, expanded.support.length - seedSupport.length)
+    for (const fragment of consolidated) {
+      if (fragment === seed) {
+        continue
+      }
+      if (fragment.support.some((index) => expandedSupport.has(index))) {
+        diagnostics.fragmentsAbsorbedDuringExpansion += 1
+      }
+    }
+    expandedGroups.push(expanded)
+  }
+
+  return { groups: expandedGroups, diagnostics }
+}
+
 function getProjectedOutsideDistance(
   candidate: PlaneCandidate,
   point: SpatialPoint,
@@ -1019,16 +1288,26 @@ export class PlaneExtractionService {
     const consolidationStartedAt = getTimestamp()
     const consolidated = consolidateCandidates(provisionalGroups, prepared.points, this.config)
     const consolidationFinishedAt = getTimestamp()
+    const expansionStartedAt = getTimestamp()
+    const expanded = expandDominantPlanes(consolidated.groups, prepared.points, this.config)
+    const expansionFinishedAt = getTimestamp()
     const ownershipStartedAt = getTimestamp()
-    const owned = assignPointOwnership(prepared.points, consolidated.groups, this.config)
+    const owned = assignPointOwnership(prepared.points, expanded.groups, this.config)
     const ownershipFinishedAt = getTimestamp()
-    const planes = owned.groups
+    const rankedGroups = owned.groups
+      .slice()
+      .sort((left, right) => right.candidate.areaEstimate - left.candidate.areaEstimate)
+    const planes = rankedGroups
       .map((group) => group.candidate)
-      .sort((left, right) => right.areaEstimate - left.areaEstimate)
       .map((plane, index) => ({ ...plane, id: `plane-${index + 1}` }))
     const largestPlane = planes[0]
+    const secondLargestPlane = planes[1]
+    const largestGroup = rankedGroups[0]
     const assignedPercentage = prepared.points.length > 0
       ? (owned.assignedPointCount / prepared.points.length) * 100
+      : 0
+    const largestPlaneSupportPercentage = owned.assignedPointCount > 0 && largestGroup
+      ? (largestGroup.support.length / owned.assignedPointCount) * 100
       : 0
 
     const result: RoomAnalysisResult = {
@@ -1047,17 +1326,31 @@ export class PlaneExtractionService {
         candidatePairsTested: consolidated.diagnostics.candidatePairsTested,
         highOverlapCandidatePairs: consolidated.diagnostics.highOverlapCandidatePairs,
         candidatesMerged: consolidated.diagnostics.candidatesMerged,
-        duplicateCandidatesSuppressed: Math.max(0, provisionalGroups.length - consolidated.groups.length),
+        duplicateCandidatesSuppressed: Math.max(0, provisionalGroups.length - planes.length),
         averageSupportOverlap: consolidated.diagnostics.averageSupportOverlap,
         largestPlaneSupportPointCount: largestPlane?.supportPointCount ?? 0,
         largestPlaneOccupiedArea: largestPlane?.areaEstimate ?? 0,
         largestPlaneRmsError: largestPlane?.rmsError ?? 0,
+        secondLargestPlaneSupportPointCount: secondLargestPlane?.supportPointCount ?? 0,
+        secondLargestPlaneOccupiedArea: secondLargestPlane?.areaEstimate ?? 0,
+        secondLargestPlaneRmsError: secondLargestPlane?.rmsError ?? 0,
+        largestPlaneSupportPercentage,
+        dominantSeedsAttempted: expanded.diagnostics.dominantSeedsAttempted,
+        dominantPlanesAccepted: expanded.diagnostics.dominantPlanesAccepted,
+        pointsAbsorbedDuringExpansion: expanded.diagnostics.pointsAbsorbedDuringExpansion,
+        fragmentsAbsorbedDuringExpansion: expanded.diagnostics.fragmentsAbsorbedDuringExpansion,
+        expansionPasses: expanded.diagnostics.expansionPasses,
+        planeRefits: expanded.diagnostics.planeRefits,
+        expansionResidualRejects: expanded.diagnostics.expansionResidualRejects,
+        expansionNormalRejects: expanded.diagnostics.expansionNormalRejects,
+        expansionConnectivityRejects: expanded.diagnostics.expansionConnectivityRejects,
       },
       timings: {
         inputPreparationMs: prepared.inputPreparationMs,
         downsamplingMs: prepared.downsamplingMs,
         initialExtractionMs: Math.max(0, extractionFinishedAt - extractionStartedAt),
         consolidationMs: Math.max(0, consolidationFinishedAt - consolidationStartedAt),
+        dominantExpansionMs: Math.max(0, expansionFinishedAt - expansionStartedAt),
         ownershipMs: Math.max(0, ownershipFinishedAt - ownershipStartedAt),
         totalMs: Math.max(0, ownershipFinishedAt - analysisStartedAt),
       },
