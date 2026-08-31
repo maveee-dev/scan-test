@@ -238,7 +238,7 @@ function StructuralSurfaceSummary({
       {interpretation.directionGroups.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>
-            Direction groups: {interpretation.directionGroups.map((group) => `${group.id} [${group.planeIds.join(', ')}] -> ${group.selectedPlaneId ?? 'alternate'} | spread ${group.normalSpreadDegrees.toFixed(1)} deg | offset span ${group.planeOffsetSpanMeters.toFixed(2)} m`).join(' | ')}
+            Wall orientation groups: {interpretation.wallOrientationGroups.map((group) => `${group.id} [${group.planeIds.join(', ')}] -> ${group.selectedPlaneIds.length > 0 ? group.selectedPlaneIds.join(', ') : 'none'} | normal spread ${group.normalSpreadDegrees.toFixed(1)} deg`).join(' | ') || 'none'}
           </span>
         </div>
       ) : null}
@@ -303,7 +303,7 @@ function StructuralSurfaceRow({
         <small>{selectionLabel} | {getStructuralRoleLabel(surface.role)} | role confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m | normal ({surface.normal.x.toFixed(2)}, {surface.normal.y.toFixed(2)}, {surface.normal.z.toFixed(2)}) | d {(-surface.planeConstant).toFixed(3)}</small>
       </span>
       <span>
-        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)}
+        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | envelope score {surface.envelopeSelectionScore.toFixed(2)} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)} | {surface.selectionReason}
       </span>
     </div>
   )

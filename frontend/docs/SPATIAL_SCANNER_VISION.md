@@ -475,7 +475,13 @@ unknown. Orientation, size, support, height, and nearby perpendicular geometry
 are evidence rather than guarantees. A role candidate is not automatically a
 selected room-envelope surface: compatible same-direction candidates compete
 for a primary representative, while alternate candidates and uncertain
-geometry remain available for later processing. The interpretation preserves
+geometry remain available for later processing. Wall candidates are first
+grouped by sign-invariant full-normal orientation; plane offset and support
+position are evaluated afterward as parallel-surface competition, so those
+concepts are not conflated. A separate room-envelope evidence gate favors
+well-supported structural candidates and protects against promoting furniture,
+noise, or weak parallel alternatives. Selected surfaces are real geometric
+planes, while alternates preserve useful evidence. The interpretation preserves
 uncertainty and does not yet create plane intersections, a room boundary, or a
 final room mesh.
 

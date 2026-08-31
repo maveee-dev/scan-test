@@ -3,12 +3,14 @@ import type {
   RoomAnalysisResult,
   RoomStructureInterpretationResult,
   StructuralDirectionGroup,
+  StructuralParallelLane,
   StructuralRelationshipType,
   StructuralSurfaceCandidate,
   StructuralSurfaceEvidence,
   StructuralSurfaceRelationship,
   StructuralSurfaceRole,
   StructuralSurfaceSelection,
+  StructuralSurfaceSelectionEvidence,
 } from '../types'
 
 export interface StructuralSurfaceInterpretationConfig {
@@ -21,10 +23,19 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly perpendicularAngleToleranceDegrees: number
   readonly parallelAngleToleranceDegrees: number
   readonly wallDirectionGroupingAngleDegrees: number
+  readonly maximumOrientationGroupSpreadDegrees: number
   readonly sameRolePlaneOffsetToleranceMeters: number
   readonly sameRoleMaximumOffsetSpanMeters: number
   readonly sameRoleSupportGapMeters: number
   readonly supportIntersectionDistanceMeters: number
+  readonly minimumWallOrientationScore: number
+  readonly minimumWallRelationshipScore: number
+  readonly minimumWallNoRelationshipAreaScore: number
+  readonly minimumWallNoRelationshipSupportScore: number
+  readonly minimumWallNoRelationshipExtentScore: number
+  readonly independentParallelOffsetMeters: number
+  readonly independentParallelSupportGapMeters: number
+  readonly independentParallelEnvelopeScore: number
 }
 
 export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurfaceInterpretationConfig = {
@@ -37,10 +48,19 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   perpendicularAngleToleranceDegrees: 25,
   parallelAngleToleranceDegrees: 15,
   wallDirectionGroupingAngleDegrees: 14,
+  maximumOrientationGroupSpreadDegrees: 24,
   sameRolePlaneOffsetToleranceMeters: 0.22,
   sameRoleMaximumOffsetSpanMeters: 0.36,
   sameRoleSupportGapMeters: 0.55,
   supportIntersectionDistanceMeters: 0.12,
+  minimumWallOrientationScore: 0.68,
+  minimumWallRelationshipScore: 0.32,
+  minimumWallNoRelationshipAreaScore: 0.7,
+  minimumWallNoRelationshipSupportScore: 0.7,
+  minimumWallNoRelationshipExtentScore: 0.55,
+  independentParallelOffsetMeters: 0.75,
+  independentParallelSupportGapMeters: 0.8,
+  independentParallelEnvelopeScore: 0.72,
 }
 
 const WORLD_UP = { x: 0, y: 1, z: 0 }
@@ -73,12 +93,13 @@ interface RoleEvaluation {
   readonly role: StructuralSurfaceRole
   readonly confidence: number
   readonly heightScore: number
+  readonly envelopeSelectionScore: number
+  readonly selectionEvidence: StructuralSurfaceSelectionEvidence
 }
 
-interface RoleCompetitionGroup {
+interface StructuralOrientationGroup {
   readonly role: 'wall' | 'floor' | 'ceiling'
   readonly members: readonly RoleEvaluation[]
-  readonly selected: RoleEvaluation
 }
 
 function getTimestamp(): number {
@@ -325,6 +346,24 @@ function getFinalPlaneMetrics(analysisResult: RoomAnalysisResult, plane: PlaneCa
   }
 }
 
+function assertPlaneIdMapping(
+  analysisResult: RoomAnalysisResult,
+  planes: readonly PlaneCandidate[],
+  relationships: readonly StructuralSurfaceRelationship[],
+): void {
+  const planeIds = new Set(planes.map((plane) => plane.id))
+  if (planeIds.size !== planes.length) {
+    throw new Error('Structural analysis received duplicate final plane IDs.')
+  }
+  if (relationships.some((relationship) =>
+    !planeIds.has(relationship.firstPlaneId) || !planeIds.has(relationship.secondPlaneId))) {
+    throw new Error('Structural analysis received a relationship for an unknown final plane ID.')
+  }
+  if (analysisResult.surfaceConsensus.some((consensus) => !planeIds.has(consensus.finalPlaneId))) {
+    throw new Error('Structural analysis received consensus data for an unknown final plane ID.')
+  }
+}
+
 function createPlaneContexts(
   analysisResult: RoomAnalysisResult,
   relationships: readonly StructuralSurfaceRelationship[],
@@ -402,17 +441,262 @@ function createEvidence(
   }
 }
 
+function createRoleEvaluation(
+  context: PlaneContext,
+  role: StructuralSurfaceRole,
+  confidence: number,
+  heightScore: number,
+): RoleEvaluation {
+  const orientationScore = role === 'wall'
+    ? context.orientationScore
+    : context.horizontalOrientationScore
+  const extentScore = role === 'wall' ? context.verticalExtentScore : heightScore
+  const roleConfidence = clamp(confidence, 0, 1)
+  const fitQuality = 1 - clamp(context.plane.rmsError / MAXIMUM_RMS_FOR_QUALITY_METERS, 0, 1)
+  const envelopeSelectionScore = role === 'wall'
+    ? clamp(
+      roleConfidence * 0.24 +
+        orientationScore * 0.22 +
+        context.areaScore * 0.16 +
+        context.supportScore * 0.16 +
+        extentScore * 0.1 +
+        context.relationshipScore * 0.08 +
+        fitQuality * 0.04,
+      0,
+      1,
+    )
+    : role === 'floor' || role === 'ceiling'
+      ? clamp(
+        roleConfidence * 0.3 +
+          orientationScore * 0.22 +
+          context.areaScore * 0.16 +
+          context.supportScore * 0.14 +
+          heightScore * 0.1 +
+          context.relationshipScore * 0.04 +
+          fitQuality * 0.04,
+        0,
+        1,
+      )
+      : 0
+  return {
+    context,
+    role,
+    confidence: roleConfidence,
+    heightScore,
+    envelopeSelectionScore,
+    selectionEvidence: {
+      roleConfidence,
+      orientationScore,
+      sizeScore: context.areaScore,
+      supportScore: context.supportScore,
+      heightScore,
+      relationshipScore: context.relationshipScore,
+      competitionScore: envelopeSelectionScore,
+    },
+  }
+}
+
+function evaluateContexts(
+  contexts: readonly PlaneContext[],
+  config: StructuralSurfaceInterpretationConfig,
+): RoleEvaluation[] {
+  return contexts.map((context) => {
+    const isHorizontal = context.horizontalOrientationScore >= config.minimumHorizontalOrientationScore
+    if (context.wallConfidence >= config.minimumWallConfidence && context.orientationScore >= 0.5) {
+      return createRoleEvaluation(context, 'wall', context.wallConfidence, context.verticalExtentScore)
+    }
+    if (isHorizontal) {
+      const bestHorizontalConfidence = Math.max(context.floorConfidence, context.ceilingConfidence)
+      const heightEvidenceDifference = Math.abs(context.floorHeightScore - context.ceilingHeightScore)
+      if (bestHorizontalConfidence >= config.minimumHorizontalConfidence &&
+        heightEvidenceDifference >= config.minimumHorizontalHeightEvidenceDifference) {
+        if (context.floorConfidence >= context.ceilingConfidence) {
+          return createRoleEvaluation(context, 'floor', context.floorConfidence, context.floorHeightScore)
+        }
+        return createRoleEvaluation(context, 'ceiling', context.ceilingConfidence, context.ceilingHeightScore)
+      }
+    }
+
+    const hasMeaningfulEvidence = context.areaScore >= 0.35 && context.supportScore >= 0.35
+    return createRoleEvaluation(
+      context,
+      hasMeaningfulEvidence ? 'other' : 'unknown',
+      hasMeaningfulEvidence
+        ? Math.max(context.areaScore, context.supportScore) * 0.6
+        : 1 - Math.max(context.wallConfidence, context.floorConfidence, context.ceilingConfidence) * 0.5,
+      isHorizontal
+        ? Math.max(context.floorHeightScore, context.ceilingHeightScore)
+        : context.verticalExtentScore,
+    )
+  })
+}
+
+function getRoleSelectionScore(evaluation: RoleEvaluation): number {
+  return evaluation.envelopeSelectionScore
+}
+
+function getPlaneRoleOffset(reference: PlaneCandidate, candidate: PlaneCandidate): number {
+  return getAlignedPlaneConstant(reference.normal, candidate)
+}
+
+function getNormalSpread(members: readonly RoleEvaluation[]): number {
+  let spread = 0
+  for (let firstIndex = 0; firstIndex < members.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < members.length; secondIndex += 1) {
+      spread = Math.max(spread, getNormalAngleDegrees(members[firstIndex].context.plane, members[secondIndex].context.plane))
+    }
+  }
+  return spread
+}
+
+function buildOrientationGroups(
+  evaluations: readonly RoleEvaluation[],
+  role: 'wall' | 'floor' | 'ceiling',
+  config: StructuralSurfaceInterpretationConfig,
+): StructuralOrientationGroup[] {
+  const members = evaluations
+    .filter((evaluation) => evaluation.role === role)
+    .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+  const groups: RoleEvaluation[][] = []
+
+  for (const evaluation of members) {
+    const matchingGroups = groups.filter((group) => {
+      const hasCompatibleNormal = group.some((member) =>
+        getNormalAngleDegrees(member.context.plane, evaluation.context.plane) <= config.wallDirectionGroupingAngleDegrees)
+      return hasCompatibleNormal && getNormalSpread([...group, evaluation]) <= config.maximumOrientationGroupSpreadDegrees
+    })
+    if (matchingGroups.length === 0) {
+      groups.push([evaluation])
+      continue
+    }
+    const target = matchingGroups[0]
+    target.push(evaluation)
+    for (let groupIndex = groups.length - 1; groupIndex >= 0; groupIndex -= 1) {
+      const group = groups[groupIndex]
+      if (group === target || !matchingGroups.includes(group)) {
+        continue
+      }
+      target.push(...group)
+      groups.splice(groupIndex, 1)
+    }
+  }
+
+  return groups.map((group) => ({
+    role,
+    members: Object.freeze(group),
+  }))
+}
+
+function canJoinParallelLane(
+  first: RoleEvaluation,
+  second: RoleEvaluation,
+  lane: readonly RoleEvaluation[],
+  config: StructuralSurfaceInterpretationConfig,
+): boolean {
+  if (getNormalAngleDegrees(first.context.plane, second.context.plane) > config.wallDirectionGroupingAngleDegrees) {
+    return false
+  }
+  if (getPlaneOffsetDifference(first.context.plane, second.context.plane) > config.sameRolePlaneOffsetToleranceMeters) {
+    return false
+  }
+  if (getSupportBoundsGap(first.context.plane, second.context.plane) > config.sameRoleSupportGapMeters) {
+    return false
+  }
+  const reference = lane[0]?.context.plane ?? first.context.plane
+  const offsets = [...lane, first, second].map((member) => getPlaneRoleOffset(reference, member.context.plane))
+  return Math.max(...offsets) - Math.min(...offsets) <= config.sameRoleMaximumOffsetSpanMeters
+}
+
+function buildParallelLanes(
+  group: StructuralOrientationGroup,
+  config: StructuralSurfaceInterpretationConfig,
+): RoleEvaluation[][] {
+  const lanes: RoleEvaluation[][] = []
+  for (const evaluation of group.members) {
+    const matchingLane = lanes.find((lane) => lane.some((member) => canJoinParallelLane(member, evaluation, lane, config)))
+    if (matchingLane) {
+      matchingLane.push(evaluation)
+    } else {
+      lanes.push([evaluation])
+    }
+  }
+  return lanes
+}
+
+function isEnvelopeEligible(
+  evaluation: RoleEvaluation,
+  config: StructuralSurfaceInterpretationConfig,
+): boolean {
+  if (evaluation.role === 'wall') {
+    const context = evaluation.context
+    const strongWithoutRelationship = context.areaScore >= config.minimumWallNoRelationshipAreaScore &&
+      context.supportScore >= config.minimumWallNoRelationshipSupportScore &&
+      context.verticalExtentScore >= config.minimumWallNoRelationshipExtentScore
+    return context.orientationScore >= config.minimumWallOrientationScore &&
+      (context.relationshipScore >= config.minimumWallRelationshipScore || strongWithoutRelationship)
+  }
+  if (evaluation.role === 'floor' || evaluation.role === 'ceiling') {
+    return evaluation.context.horizontalOrientationScore >= config.minimumHorizontalOrientationScore &&
+      evaluation.confidence >= config.minimumHorizontalConfidence
+  }
+  return false
+}
+
+function isIndependentParallelWall(
+  primary: RoleEvaluation,
+  candidate: RoleEvaluation,
+  config: StructuralSurfaceInterpretationConfig,
+): boolean {
+  const offset = getPlaneOffsetDifference(primary.context.plane, candidate.context.plane)
+  const supportGap = getSupportBoundsGap(primary.context.plane, candidate.context.plane)
+  const structuralEvidence = candidate.context.relationshipScore >= config.minimumWallRelationshipScore ||
+    (candidate.context.areaScore >= config.minimumWallNoRelationshipAreaScore &&
+      candidate.context.supportScore >= config.minimumWallNoRelationshipSupportScore &&
+      candidate.context.verticalExtentScore >= config.minimumWallNoRelationshipExtentScore)
+  return offset >= config.independentParallelOffsetMeters &&
+    supportGap >= config.independentParallelSupportGapMeters &&
+    candidate.envelopeSelectionScore >= config.independentParallelEnvelopeScore &&
+    structuralEvidence
+}
+
+function getSelectionReason(
+  evaluation: RoleEvaluation,
+  selection: StructuralSurfaceSelection,
+  hasEligibleCompetition: boolean,
+  config: StructuralSurfaceInterpretationConfig,
+): string {
+  if (selection === 'selected') {
+    return evaluation.role === 'wall'
+      ? 'selected primary with strongest room-envelope evidence in orientation group'
+      : 'selected strongest candidate for this structural role'
+  }
+  if (selection === 'alternate') {
+    if (evaluation.role === 'wall' && !isEnvelopeEligible(evaluation, config)) {
+      return evaluation.context.orientationScore < config.minimumWallOrientationScore
+        ? 'insufficient orientation evidence'
+        : 'insufficient room-envelope evidence'
+    }
+    return hasEligibleCompetition ? 'lost same-direction competition' : 'insufficient envelope evidence'
+  }
+  return evaluation.role === 'unknown' ? 'insufficient structural evidence' : 'not a room-envelope role candidate'
+}
+
 function createSurfaceCandidate(
   evaluation: RoleEvaluation,
   selection: StructuralSurfaceSelection,
+  selectionReason: string,
 ): StructuralSurfaceCandidate {
   const context = evaluation.context
   return {
     planeId: context.plane.id,
     role: evaluation.role,
     selection,
+    roleConfidence: evaluation.confidence,
     confidence: clamp(evaluation.confidence, 0, 1),
+    envelopeSelectionScore: evaluation.envelopeSelectionScore,
     evidence: createEvidence(context, evaluation.heightScore),
+    selectionEvidence: evaluation.selectionEvidence,
+    selectionReason,
     centroid: copyPoint(context.plane.centroid),
     centroidHeight: context.plane.centroid.y,
     occupiedArea: context.metrics.area,
@@ -430,143 +714,10 @@ function createSurfaceCandidate(
   }
 }
 
-function evaluateContexts(
-  contexts: readonly PlaneContext[],
-  config: StructuralSurfaceInterpretationConfig,
-): RoleEvaluation[] {
-  return contexts.map((context) => {
-    const isHorizontal = context.horizontalOrientationScore >= config.minimumHorizontalOrientationScore
-    if (context.wallConfidence >= config.minimumWallConfidence && context.orientationScore >= 0.5) {
-      return { context, role: 'wall', confidence: context.wallConfidence, heightScore: context.verticalExtentScore }
-    }
-    if (isHorizontal) {
-      const bestHorizontalConfidence = Math.max(context.floorConfidence, context.ceilingConfidence)
-      const heightEvidenceDifference = Math.abs(context.floorHeightScore - context.ceilingHeightScore)
-      if (bestHorizontalConfidence >= config.minimumHorizontalConfidence &&
-        heightEvidenceDifference >= config.minimumHorizontalHeightEvidenceDifference) {
-        if (context.floorConfidence >= context.ceilingConfidence) {
-          return { context, role: 'floor', confidence: context.floorConfidence, heightScore: context.floorHeightScore }
-        }
-        return { context, role: 'ceiling', confidence: context.ceilingConfidence, heightScore: context.ceilingHeightScore }
-      }
-    }
-
-    const hasMeaningfulEvidence = context.areaScore >= 0.35 && context.supportScore >= 0.35
-    return {
-      context,
-      role: hasMeaningfulEvidence ? 'other' : 'unknown',
-      confidence: hasMeaningfulEvidence
-        ? Math.max(context.areaScore, context.supportScore) * 0.6
-        : 1 - Math.max(context.wallConfidence, context.floorConfidence, context.ceilingConfidence) * 0.5,
-      heightScore: isHorizontal
-        ? Math.max(context.floorHeightScore, context.ceilingHeightScore)
-        : context.verticalExtentScore,
-    }
-  })
-}
-
-function getRoleSelectionScore(evaluation: RoleEvaluation): number {
-  const context = evaluation.context
-  const fitQuality = 1 - clamp(context.plane.rmsError / MAXIMUM_RMS_FOR_QUALITY_METERS, 0, 1)
-  const extentScore = evaluation.role === 'wall'
-    ? context.verticalExtentScore
-    : evaluation.heightScore
-  // Support is already normalized in the context. Keep the final owned
-  // support metric prominent without allowing a large plane to erase fit or
-  // structural evidence.
-  return clamp(
-    evaluation.confidence * 0.32 +
-      context.supportScore * 0.28 +
-      context.areaScore * 0.2 +
-      extentScore * 0.1 +
-      fitQuality * 0.1,
-    0,
-    1,
-  )
-}
-
-function getPlaneRoleOffset(reference: PlaneCandidate, candidate: PlaneCandidate): number {
-  return getAlignedPlaneConstant(reference.normal, candidate)
-}
-
-function canJoinRoleGroup(
-  first: RoleEvaluation,
-  second: RoleEvaluation,
-  group: readonly RoleEvaluation[],
-  config: StructuralSurfaceInterpretationConfig,
-): boolean {
-  const normalAngle = getNormalAngleDegrees(first.context.plane, second.context.plane)
-  if (normalAngle > config.wallDirectionGroupingAngleDegrees) {
-    return false
-  }
-  if (getPlaneOffsetDifference(first.context.plane, second.context.plane) > config.sameRolePlaneOffsetToleranceMeters) {
-    return false
-  }
-  if (getSupportBoundsGap(first.context.plane, second.context.plane) > config.sameRoleSupportGapMeters) {
-    return false
-  }
-  const reference = group[0]?.context.plane ?? first.context.plane
-  const offsets = [...group, first, second].map((member) => getPlaneRoleOffset(reference, member.context.plane))
-  return Math.max(...offsets) - Math.min(...offsets) <= config.sameRoleMaximumOffsetSpanMeters
-}
-
-function buildRoleCompetitionGroups(
-  evaluations: readonly RoleEvaluation[],
-  role: 'wall' | 'floor' | 'ceiling',
-  config: StructuralSurfaceInterpretationConfig,
-): RoleCompetitionGroup[] {
-  const members = evaluations
-    .filter((evaluation) => evaluation.role === role)
-    .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
-  const groups: RoleEvaluation[][] = []
-
-  for (const evaluation of members) {
-    const matchingGroupIndexes = groups
-      .map((group, index) => group.some((member) => canJoinRoleGroup(member, evaluation, group, config)) ? index : -1)
-      .filter((index) => index >= 0)
-    if (matchingGroupIndexes.length === 0) {
-      groups.push([evaluation])
-      continue
-    }
-
-    const firstIndex = matchingGroupIndexes[0]
-    groups[firstIndex].push(evaluation)
-    // A candidate can bridge two nearby fragments. Merge the groups only if
-    // the complete offset span remains bounded.
-    for (let index = matchingGroupIndexes.length - 1; index >= 1; index -= 1) {
-      const groupIndex = matchingGroupIndexes[index]
-      const merged = [...groups[firstIndex], ...groups[groupIndex]]
-      const reference = merged[0].context.plane
-      const offsets = merged.map((member) => getPlaneRoleOffset(reference, member.context.plane))
-      if (Math.max(...offsets) - Math.min(...offsets) <= config.sameRoleMaximumOffsetSpanMeters) {
-        groups[firstIndex] = merged
-        groups.splice(groupIndex, 1)
-      }
-    }
-  }
-
-  return groups.map((group) => ({
-    role,
-    members: Object.freeze(group),
-    selected: group.reduce((best, current) =>
-      getRoleSelectionScore(current) > getRoleSelectionScore(best) ? current : best),
-  }))
-}
-
-function getNormalSpread(members: readonly RoleEvaluation[]): number {
-  let spread = 0
-  for (let firstIndex = 0; firstIndex < members.length; firstIndex += 1) {
-    for (let secondIndex = firstIndex + 1; secondIndex < members.length; secondIndex += 1) {
-      spread = Math.max(spread, getNormalAngleDegrees(members[firstIndex].context.plane, members[secondIndex].context.plane))
-    }
-  }
-  return spread
-}
-
 function createDirectionGroup(
   id: string,
-  group: RoleCompetitionGroup,
-  selectedPlaneId: string | null,
+  group: StructuralOrientationGroup,
+  selectedPlaneIds: readonly string[],
 ): StructuralDirectionGroup {
   const reference = group.members[0]?.context.plane
   const weightedNormal = group.members.reduce((sum, member) => {
@@ -587,7 +738,8 @@ function createDirectionGroup(
     id,
     role: group.role,
     planeIds: Object.freeze(group.members.map((member) => member.context.plane.id)),
-    selectedPlaneId,
+    selectedPlaneId: selectedPlaneIds[0] ?? null,
+    selectedPlaneIds: Object.freeze([...selectedPlaneIds]),
     representativeNormal: {
       x: weightedNormal.x / length,
       y: weightedNormal.y / length,
@@ -598,13 +750,28 @@ function createDirectionGroup(
   }
 }
 
-function chooseGlobalHorizontalWinner(groups: readonly RoleCompetitionGroup[]): RoleEvaluation | null {
-  return groups.reduce<RoleEvaluation | null>((best, group) => {
-    if (!best || getRoleSelectionScore(group.selected) > getRoleSelectionScore(best)) {
-      return group.selected
-    }
-    return best
-  }, null)
+function createParallelLanes(
+  orientationGroups: readonly StructuralOrientationGroup[],
+  config: StructuralSurfaceInterpretationConfig,
+  prefix: string,
+): StructuralParallelLane[] {
+  return orientationGroups.flatMap((group, groupIndex) =>
+    buildParallelLanes(group, config).map((lane, laneIndex) => {
+      const reference = lane[0]?.context.plane
+      const offsets = reference
+        ? lane.map((member) => getPlaneRoleOffset(reference, member.context.plane))
+        : [0]
+      const representative = lane.reduce((best, current) =>
+        getRoleSelectionScore(current) > getRoleSelectionScore(best) ? current : best)
+      return {
+        id: `${prefix}-lane-${groupIndex + 1}-${laneIndex + 1}`,
+        role: group.role,
+        orientationGroupId: `${prefix}-orientation-${groupIndex + 1}`,
+        planeIds: Object.freeze(lane.map((member) => member.context.plane.id)),
+        representativePlaneId: representative.context.plane.id,
+        planeOffsetSpanMeters: Math.max(...offsets) - Math.min(...offsets),
+      }
+    }))
 }
 
 function freezeSurfaceArray(surfaces: StructuralSurfaceCandidate[]): readonly StructuralSurfaceCandidate[] {
@@ -635,6 +802,7 @@ export class StructuralSurfaceInterpretationService {
       }
     }
     const relationshipFinishedAt = getTimestamp()
+    assertPlaneIdMapping(analysisResult, analysisResult.planes, relationships)
     const interpretationStartedAt = getTimestamp()
     const contexts = createPlaneContexts(
       analysisResult,
@@ -643,19 +811,66 @@ export class StructuralSurfaceInterpretationService {
       this.config,
     )
     const evaluations = evaluateContexts(contexts, this.config)
-    const wallGroups = buildRoleCompetitionGroups(evaluations, 'wall', this.config)
-    const floorGroups = buildRoleCompetitionGroups(evaluations, 'floor', this.config)
-    const ceilingGroups = buildRoleCompetitionGroups(evaluations, 'ceiling', this.config)
-    const selectedFloorEvaluation = chooseGlobalHorizontalWinner(floorGroups)
-    const selectedCeilingEvaluation = chooseGlobalHorizontalWinner(ceilingGroups)
-    const selectedWallIds = new Set(wallGroups.map((group) => group.selected.context.plane.id))
-    const alternateWallIds = new Set(wallGroups.flatMap((group) =>
-      group.members.filter((member) => member !== group.selected).map((member) => member.context.plane.id)))
+    const wallOrientationGroups = buildOrientationGroups(evaluations, 'wall', this.config)
+    const floorOrientationGroups = buildOrientationGroups(evaluations, 'floor', this.config)
+    const ceilingOrientationGroups = buildOrientationGroups(evaluations, 'ceiling', this.config)
+    const selectedWallIds = new Set<string>()
+    const alternateWallIds = new Set<string>()
+    const wallSelectionReasons = new Map<string, string>()
+    const selectedWallIdsByGroup = new Map<StructuralOrientationGroup, string[]>()
+
+    for (const group of wallOrientationGroups) {
+      const eligibleMembers = group.members
+        .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
+        .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+      const primary = eligibleMembers[0]
+      const groupSelectedIds: string[] = []
+      if (primary) {
+        selectedWallIds.add(primary.context.plane.id)
+        groupSelectedIds.push(primary.context.plane.id)
+        wallSelectionReasons.set(primary.context.plane.id, getSelectionReason(primary, 'selected', true, this.config))
+        for (const candidate of group.members) {
+          if (candidate === primary) {
+            continue
+          }
+          const independent = isEnvelopeEligible(candidate, this.config) &&
+            isIndependentParallelWall(primary, candidate, this.config)
+          if (independent) {
+            selectedWallIds.add(candidate.context.plane.id)
+            groupSelectedIds.push(candidate.context.plane.id)
+            wallSelectionReasons.set(candidate.context.plane.id, 'selected as independently supported parallel room-envelope surface')
+          } else {
+            alternateWallIds.add(candidate.context.plane.id)
+            wallSelectionReasons.set(candidate.context.plane.id, getSelectionReason(
+              candidate,
+              'alternate',
+              Boolean(primary),
+              this.config,
+            ))
+          }
+        }
+      } else {
+        for (const candidate of group.members) {
+          alternateWallIds.add(candidate.context.plane.id)
+          wallSelectionReasons.set(candidate.context.plane.id, getSelectionReason(candidate, 'alternate', false, this.config))
+        }
+      }
+      selectedWallIdsByGroup.set(group, groupSelectedIds)
+    }
+
+    const floorEligible = floorOrientationGroups.flatMap((group) => group.members)
+      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
+      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+    const ceilingEligible = ceilingOrientationGroups.flatMap((group) => group.members)
+      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
+      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+    const selectedFloorEvaluation = floorEligible[0]
+    const selectedCeilingEvaluation = ceilingEligible[0]
     const selectedFloorId = selectedFloorEvaluation?.context.plane.id ?? null
     const selectedCeilingId = selectedCeilingEvaluation?.context.plane.id ?? null
-    const alternateFloorIds = new Set(floorGroups.flatMap((group) =>
+    const alternateFloorIds = new Set(floorOrientationGroups.flatMap((group) =>
       group.members.filter((member) => member.context.plane.id !== selectedFloorId).map((member) => member.context.plane.id)))
-    const alternateCeilingIds = new Set(ceilingGroups.flatMap((group) =>
+    const alternateCeilingIds = new Set(ceilingOrientationGroups.flatMap((group) =>
       group.members.filter((member) => member.context.plane.id !== selectedCeilingId).map((member) => member.context.plane.id)))
 
     const getSelection = (evaluation: RoleEvaluation): StructuralSurfaceSelection => {
@@ -677,7 +892,13 @@ export class StructuralSurfaceInterpretationService {
       return 'unselected'
     }
 
-    const surfaces = evaluations.map((evaluation) => createSurfaceCandidate(evaluation, getSelection(evaluation)))
+    const surfaces = evaluations.map((evaluation) => {
+      const selection = getSelection(evaluation)
+      const reason = evaluation.role === 'wall'
+        ? wallSelectionReasons.get(evaluation.context.plane.id) ?? getSelectionReason(evaluation, selection, false, this.config)
+        : getSelectionReason(evaluation, selection, evaluation.role === 'floor' || evaluation.role === 'ceiling', this.config)
+      return createSurfaceCandidate(evaluation, selection, reason)
+    })
     const selectedWalls = surfaces.filter((surface) => surface.role === 'wall' && surface.selection === 'selected')
     const selectedFloor = surfaces.find((surface) => surface.planeId === selectedFloorId) ?? null
     const selectedCeiling = surfaces.find((surface) => surface.planeId === selectedCeilingId) ?? null
@@ -687,9 +908,26 @@ export class StructuralSurfaceInterpretationService {
     const otherSurfaces = surfaces.filter((surface) => surface.role === 'other')
     const unknownSurfaces = surfaces.filter((surface) => surface.role === 'unknown')
     const directionGroups = [
-      ...wallGroups.map((group, index) => createDirectionGroup(`wall-direction-${index + 1}`, group, group.selected.context.plane.id)),
-      ...floorGroups.map((group, index) => createDirectionGroup(`floor-group-${index + 1}`, group, group.selected.context.plane.id === selectedFloorId ? selectedFloorId : null)),
-      ...ceilingGroups.map((group, index) => createDirectionGroup(`ceiling-group-${index + 1}`, group, group.selected.context.plane.id === selectedCeilingId ? selectedCeilingId : null)),
+      ...wallOrientationGroups.map((group, index) => createDirectionGroup(
+        `wall-orientation-${index + 1}`,
+        group,
+        selectedWallIdsByGroup.get(group) ?? [],
+      )),
+      ...floorOrientationGroups.map((group, index) => createDirectionGroup(
+        `floor-orientation-${index + 1}`,
+        group,
+        group.members.some((member) => member.context.plane.id === selectedFloorId) ? [selectedFloorId as string] : [],
+      )),
+      ...ceilingOrientationGroups.map((group, index) => createDirectionGroup(
+        `ceiling-orientation-${index + 1}`,
+        group,
+        group.members.some((member) => member.context.plane.id === selectedCeilingId) ? [selectedCeilingId as string] : [],
+      )),
+    ]
+    const parallelLanes = [
+      ...createParallelLanes(wallOrientationGroups, this.config, 'wall'),
+      ...createParallelLanes(floorOrientationGroups, this.config, 'floor'),
+      ...createParallelLanes(ceilingOrientationGroups, this.config, 'ceiling'),
     ]
     const interpretationFinishedAt = getTimestamp()
     const roleCandidateCount = surfaces.filter((surface) => surface.role === 'wall' || surface.role === 'floor' || surface.role === 'ceiling').length
@@ -697,6 +935,7 @@ export class StructuralSurfaceInterpretationService {
     return Object.freeze({
       sourceScanId: analysisResult.sourceScanId,
       referenceSpaceType,
+      roleCandidates: freezeSurfaceArray(surfaces),
       surfaces: freezeSurfaceArray(surfaces),
       selectedWalls: freezeSurfaceArray(selectedWalls),
       selectedFloor,
@@ -705,6 +944,8 @@ export class StructuralSurfaceInterpretationService {
       alternateFloorCandidates: freezeSurfaceArray(alternateFloorCandidates),
       alternateCeilingCandidates: freezeSurfaceArray(alternateCeilingCandidates),
       directionGroups: Object.freeze(directionGroups),
+      wallOrientationGroups: Object.freeze(directionGroups.filter((group) => group.role === 'wall')),
+      parallelLanes: Object.freeze(parallelLanes),
       likelyWalls: freezeSurfaceArray(selectedWalls),
       floorCandidate: selectedFloor,
       ceilingCandidate: selectedCeiling,
@@ -721,7 +962,7 @@ export class StructuralSurfaceInterpretationService {
         alternateFloorCount: alternateFloorCandidates.length,
         selectedCeilingCount: selectedCeiling ? 1 : 0,
         alternateCeilingCount: alternateCeilingCandidates.length,
-        wallDirectionGroupCount: wallGroups.length,
+        wallDirectionGroupCount: wallOrientationGroups.length,
         floorCandidate: selectedFloor?.planeId ?? null,
         ceilingCandidate: selectedCeiling?.planeId ?? null,
         otherCount: otherSurfaces.length,

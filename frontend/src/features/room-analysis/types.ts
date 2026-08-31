@@ -102,13 +102,29 @@ export interface StructuralSurfaceEvidence {
   readonly boundaryScore?: number
 }
 
+export interface StructuralSurfaceSelectionEvidence {
+  readonly roleConfidence: number
+  readonly orientationScore: number
+  readonly sizeScore: number
+  readonly supportScore: number
+  readonly heightScore: number
+  readonly relationshipScore: number
+  readonly competitionScore: number
+}
+
 export interface StructuralSurfaceCandidate {
   readonly planeId: string
   readonly role: StructuralSurfaceRole
   /** Role evidence is kept separate from whether this surface won room-envelope selection. */
   readonly selection: StructuralSurfaceSelection
+  /** Confidence that the geometry fits the assigned role, independent of selection. */
+  readonly roleConfidence: number
   readonly confidence: number
+  /** Confidence that this candidate belongs in the room envelope. */
+  readonly envelopeSelectionScore: number
   readonly evidence: StructuralSurfaceEvidence
+  readonly selectionEvidence: StructuralSurfaceSelectionEvidence
+  readonly selectionReason: string
   readonly centroid: SpatialPoint
   readonly centroidHeight: number
   readonly occupiedArea: number
@@ -155,14 +171,26 @@ export interface StructuralDirectionGroup {
   readonly role: 'wall' | 'floor' | 'ceiling'
   readonly planeIds: readonly string[]
   readonly selectedPlaneId: string | null
+  readonly selectedPlaneIds: readonly string[]
   readonly representativeNormal: SpatialPoint
   readonly normalSpreadDegrees: number
+  readonly planeOffsetSpanMeters: number
+}
+
+export interface StructuralParallelLane {
+  readonly id: string
+  readonly role: 'wall' | 'floor' | 'ceiling'
+  readonly orientationGroupId: string
+  readonly planeIds: readonly string[]
+  readonly representativePlaneId: string
   readonly planeOffsetSpanMeters: number
 }
 
 export interface RoomStructureInterpretationResult {
   readonly sourceScanId: string
   readonly referenceSpaceType: 'local-floor' | 'local'
+  /** All final geometric surfaces with role evidence and selection status. */
+  readonly roleCandidates: readonly StructuralSurfaceCandidate[]
   readonly surfaces: readonly StructuralSurfaceCandidate[]
   /** Selected room-envelope surfaces, kept distinct from role evidence. */
   readonly selectedWalls: readonly StructuralSurfaceCandidate[]
@@ -172,6 +200,8 @@ export interface RoomStructureInterpretationResult {
   readonly alternateFloorCandidates: readonly StructuralSurfaceCandidate[]
   readonly alternateCeilingCandidates: readonly StructuralSurfaceCandidate[]
   readonly directionGroups: readonly StructuralDirectionGroup[]
+  readonly wallOrientationGroups: readonly StructuralDirectionGroup[]
+  readonly parallelLanes: readonly StructuralParallelLane[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
