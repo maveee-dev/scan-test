@@ -207,6 +207,7 @@ export interface StructuralGraphEdge {
   readonly firstPlaneId: string
   readonly secondPlaneId: string
   readonly edgeType: 'corner' | 'wall-horizontal' | 'parallel-boundary'
+  readonly edgeStrength: 'strong' | 'supporting'
   readonly normalAngleDegrees: number
   readonly perpendicularityScore: number
   readonly closestSupportDistanceMeters: number
@@ -214,6 +215,12 @@ export interface StructuralGraphEdge {
   readonly verticalOverlapScore: number
   readonly proximityScore: number
   readonly edgeScore: number
+}
+
+export interface StructuralGraphComponent {
+  readonly id: string
+  readonly planeIds: readonly string[]
+  readonly edgeCount: number
 }
 
 export interface RoomStructureInterpretationResult {
@@ -234,6 +241,8 @@ export interface RoomStructureInterpretationResult {
   readonly parallelLanes: readonly StructuralParallelLane[]
   readonly structuralGraphNodes: readonly StructuralGraphNode[]
   readonly structuralGraphEdges: readonly StructuralGraphEdge[]
+  readonly structuralGraphComponents: readonly StructuralGraphComponent[]
+  readonly selectedWallCorePlaneIds: readonly string[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
@@ -255,6 +264,8 @@ export interface RoomStructureInterpretationResult {
     readonly selectedWallComponentCount: number
     readonly structuralGraphNodeCount: number
     readonly structuralGraphEdgeCount: number
+    readonly structuralGraphComponentCount: number
+    readonly selectedWallCoreCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number

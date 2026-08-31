@@ -492,6 +492,13 @@ wall-like candidates remain alternate or uncertain unless they have compelling
 independent boundary evidence. This graph is a selection aid only: it does not
 construct exact intersection lines or merge geometric planes.
 
+Final room-envelope selection is seeded from the strongest coherent structural
+edges rather than promoting every node in a connected graph component. Candidate
+growth checks the whole selected set for redundant wall directions, admits a
+parallel surface only with independent boundary evidence, and retains weaker
+transitive or disconnected candidates as alternates. A credible standalone
+surface remains valid when no strong relationship graph is available.
+
 The longer-term post-scan direction is:
 
 ```text

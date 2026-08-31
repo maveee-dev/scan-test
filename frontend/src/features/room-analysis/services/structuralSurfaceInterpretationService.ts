@@ -4,6 +4,7 @@ import type {
   RoomStructureInterpretationResult,
   StructuralDirectionGroup,
   StructuralGraphEdge,
+  StructuralGraphComponent,
   StructuralGraphNode,
   StructuralParallelLane,
   StructuralRelationshipType,
@@ -39,6 +40,8 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly independentParallelSupportGapMeters: number
   readonly independentParallelEnvelopeScore: number
   readonly minimumGraphEdgeScore: number
+  readonly minimumStrongGraphEdgeScore: number
+  readonly selectedWallRedundancyAngleDegrees: number
 }
 
 export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurfaceInterpretationConfig = {
@@ -65,6 +68,8 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   independentParallelSupportGapMeters: 0.8,
   independentParallelEnvelopeScore: 0.72,
   minimumGraphEdgeScore: 0.42,
+  minimumStrongGraphEdgeScore: 0.84,
+  selectedWallRedundancyAngleDegrees: 18,
 }
 
 const WORLD_UP = { x: 0, y: 1, z: 0 }
@@ -915,6 +920,7 @@ function createStructuralGraphEdge(
     firstPlaneId: first.context.plane.id,
     secondPlaneId: second.context.plane.id,
     edgeType,
+    edgeStrength: edgeScore >= config.minimumStrongGraphEdgeScore ? 'strong' : 'supporting',
     normalAngleDegrees: relationship.normalAngleDegrees,
     perpendicularityScore: relationship.perpendicularityScore,
     closestSupportDistanceMeters: relationship.closestSupportDistanceMeters,
@@ -933,8 +939,9 @@ function createStructuralGraph(
 ): {
   readonly nodes: readonly StructuralGraphNode[]
   readonly edges: readonly StructuralGraphEdge[]
-  readonly graphSupportByPlaneId: ReadonlyMap<string, number>
   readonly components: readonly ReadonlySet<string>[]
+  readonly componentRecords: readonly StructuralGraphComponent[]
+  readonly graphSupportByPlaneId: ReadonlyMap<string, number>
 } {
   const graphEvaluations = evaluations.filter((evaluation) => getGraphRoleCandidate(evaluation, config))
   const nodes: StructuralGraphNode[] = graphEvaluations.map((evaluation) => ({
@@ -980,6 +987,7 @@ function createStructuralGraph(
   }
   const visited = new Set<string>()
   const components: ReadonlySet<string>[] = []
+  const componentRecords: StructuralGraphComponent[] = []
   for (const node of nodes) {
     if (visited.has(node.planeId) || (adjacency.get(node.planeId)?.length ?? 0) === 0) {
       continue
@@ -1001,12 +1009,18 @@ function createStructuralGraph(
       }
     }
     components.push(component)
+    componentRecords.push({
+      id: `structural-component-${componentRecords.length + 1}`,
+      planeIds: Object.freeze([...component]),
+      edgeCount: edges.filter((edge) => component.has(edge.firstPlaneId) && component.has(edge.secondPlaneId)).length,
+    })
   }
   return {
     nodes: Object.freeze(nodes),
     edges: Object.freeze(edges),
     graphSupportByPlaneId,
     components: Object.freeze(components),
+    componentRecords: Object.freeze(componentRecords),
   }
 }
 
@@ -1032,6 +1046,99 @@ function applyGraphEvidence(
       },
     }
   })
+}
+
+function getBestWallEdgeToSelected(
+  planeId: string,
+  selectedPlaneIds: ReadonlySet<string>,
+  edges: readonly StructuralGraphEdge[],
+): StructuralGraphEdge | null {
+  return edges
+    .filter((edge) =>
+      (edge.edgeType === 'corner' || edge.edgeType === 'parallel-boundary') &&
+      (edge.firstPlaneId === planeId || edge.secondPlaneId === planeId) &&
+      selectedPlaneIds.has(edge.firstPlaneId === planeId ? edge.secondPlaneId : edge.firstPlaneId))
+    .reduce<StructuralGraphEdge | null>((best, edge) =>
+      !best || edge.edgeScore > best.edgeScore ? edge : best, null)
+}
+
+function getClosestSelectedWall(
+  evaluation: RoleEvaluation,
+  selectedEvaluations: readonly RoleEvaluation[],
+): RoleEvaluation | null {
+  return selectedEvaluations.reduce<RoleEvaluation | null>((closest, selected) => {
+    if (!closest) {
+      return selected
+    }
+    return getNormalAngleDegrees(evaluation.context.plane, selected.context.plane) <
+      getNormalAngleDegrees(evaluation.context.plane, closest.context.plane)
+      ? selected
+      : closest
+  }, null)
+}
+
+function hasIndependentParallelBoundaryEvidence(
+  evaluation: RoleEvaluation,
+  selectedEvaluations: readonly RoleEvaluation[],
+  config: StructuralSurfaceInterpretationConfig,
+): boolean {
+  return selectedEvaluations.some((selected) => isIndependentParallelWall(selected, evaluation, config))
+}
+
+function getWallGrowthReason(
+  evaluation: RoleEvaluation,
+  selectedEvaluations: readonly RoleEvaluation[],
+  selectedPlaneIds: ReadonlySet<string>,
+  graphEdges: readonly StructuralGraphEdge[],
+  config: StructuralSurfaceInterpretationConfig,
+): string {
+  if (!isEnvelopeEligible(evaluation, config)) {
+    return evaluation.context.orientationScore < config.minimumWallOrientationScore
+      ? 'insufficient orientation evidence'
+      : 'insufficient envelope evidence'
+  }
+  const closestSelected = getClosestSelectedWall(evaluation, selectedEvaluations)
+  const orientationDifference = closestSelected
+    ? getNormalAngleDegrees(evaluation.context.plane, closestSelected.context.plane)
+    : Infinity
+  const independentParallel = hasIndependentParallelBoundaryEvidence(evaluation, selectedEvaluations, config)
+  if (orientationDifference <= config.selectedWallRedundancyAngleDegrees && !independentParallel) {
+    return `orientation redundant with selected ${closestSelected?.context.plane.id ?? 'wall'}`
+  }
+  const bestEdge = getBestWallEdgeToSelected(evaluation.context.plane.id, selectedPlaneIds, graphEdges)
+  if (bestEdge?.edgeStrength === 'supporting') {
+    return 'only weak transitive graph support'
+  }
+  if (!bestEdge) {
+    return selectedEvaluations.length > 0
+      ? 'disconnected wall-like candidate'
+      : 'insufficient envelope graph evidence'
+  }
+  return bestEdge.edgeType === 'parallel-boundary'
+    ? 'distinct parallel room boundary'
+    : 'strong corner edge; candidate considered for graph growth'
+}
+
+function getWallCoreSeedEdge(
+  edges: readonly StructuralGraphEdge[],
+): StructuralGraphEdge | null {
+  return edges
+    .filter((edge) =>
+      edge.edgeStrength === 'strong' &&
+      (edge.edgeType === 'corner' || edge.edgeType === 'parallel-boundary'))
+    .sort((left, right) => right.edgeScore - left.edgeScore ||
+      left.firstPlaneId.localeCompare(right.firstPlaneId) ||
+      left.secondPlaneId.localeCompare(right.secondPlaneId))[0] ?? null
+}
+
+function getStrongWallHorizontalEdge(
+  edges: readonly StructuralGraphEdge[],
+): StructuralGraphEdge | null {
+  return edges
+    .filter((edge) => edge.edgeType === 'wall-horizontal' && edge.edgeStrength === 'strong')
+    .sort((left, right) => right.edgeScore - left.edgeScore ||
+      left.firstPlaneId.localeCompare(right.firstPlaneId) ||
+      left.secondPlaneId.localeCompare(right.secondPlaneId))[0] ?? null
 }
 
 function freezeSurfaceArray(surfaces: StructuralSurfaceCandidate[]): readonly StructuralSurfaceCandidate[] {
@@ -1102,82 +1209,107 @@ export class StructuralSurfaceInterpretationService {
     const alternateWallIds = new Set<string>()
     const wallSelectionReasons = new Map<string, string>()
     const selectedWallIdsByGroup = new Map<string, string[]>()
-    const selectedWallComponents = new Set<number>()
     const hasGraphEvidence = graph.edges.length > 0
-    const selectedWallGroupIds = new Set<string>()
 
-    for (const [componentIndex, component] of graph.components.entries()) {
-      const componentWalls = [...component]
-        .map((planeId) => evaluationByPlaneId.get(planeId))
-        .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall'))
-      if (componentWalls.length === 0) {
-        continue
-      }
-      const componentGroupIds = new Set(componentWalls
-        .map((evaluation) => orientationGroupIdByPlaneId.get(evaluation.context.plane.id))
-        .filter((groupId): groupId is string => Boolean(groupId)))
-      let componentHasSelectedWall = false
-      for (const groupId of componentGroupIds) {
-        const groupWalls = componentWalls.filter((evaluation) => orientationGroupIdByPlaneId.get(evaluation.context.plane.id) === groupId)
-        const eligibleMembers = groupWalls
-          .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
-          .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
-        const primary = eligibleMembers[0]
-        if (!primary) {
-          continue
+    const addSelectedWall = (evaluation: RoleEvaluation, reason: string): void => {
+      const planeId = evaluation.context.plane.id
+      selectedWallIds.add(planeId)
+      const groupId = orientationGroupIdByPlaneId.get(planeId)
+      if (groupId) {
+        const groupSelection = selectedWallIdsByGroup.get(groupId) ?? []
+        if (!groupSelection.includes(planeId)) {
+          groupSelection.push(planeId)
         }
-        componentHasSelectedWall = true
-        selectedWallGroupIds.add(groupId)
-        selectedWallIds.add(primary.context.plane.id)
-        selectedWallIdsByGroup.set(groupId, [primary.context.plane.id])
-        wallSelectionReasons.set(primary.context.plane.id, getGraphSelectionReason(
-          primary,
-          'selected',
-          graph.edges,
-          hasGraphEvidence,
-          false,
-          this.config,
-        ))
-        for (const candidate of groupWalls) {
-          if (candidate === primary) {
-            continue
-          }
-          const independent = isEnvelopeEligible(candidate, this.config) &&
-            isIndependentParallelWall(primary, candidate, this.config)
-          if (independent) {
-            selectedWallIds.add(candidate.context.plane.id)
-            selectedWallIdsByGroup.get(groupId)?.push(candidate.context.plane.id)
-            wallSelectionReasons.set(candidate.context.plane.id, 'distinct parallel boundary supported by room graph')
-          } else {
-            alternateWallIds.add(candidate.context.plane.id)
-            wallSelectionReasons.set(candidate.context.plane.id, getGraphSelectionReason(
-              candidate,
-              'alternate',
-              graph.edges,
-              hasGraphEvidence,
-              true,
-              this.config,
-            ))
-          }
-        }
+        selectedWallIdsByGroup.set(groupId, groupSelection)
       }
-      if (componentHasSelectedWall) {
-        selectedWallComponents.add(componentIndex)
+      wallSelectionReasons.set(planeId, reason)
+    }
+
+    const eligibleWalls = evaluations
+      .filter((evaluation) => evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config))
+    const seedEdge = getWallCoreSeedEdge(graph.edges)
+    const seedEvaluations = seedEdge
+      ? [evaluationByPlaneId.get(seedEdge.firstPlaneId), evaluationByPlaneId.get(seedEdge.secondPlaneId)]
+        .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config)))
+      : []
+
+    if (seedEdge && seedEvaluations.length === 2) {
+      for (const evaluation of seedEvaluations) {
+        addSelectedWall(
+          evaluation,
+          seedEdge.edgeType === 'parallel-boundary'
+            ? 'distinct parallel boundary supported by strong graph core'
+            : 'strong corner edge; introduces a coherent wall direction',
+        )
+      }
+    } else {
+      const wallHorizontalSeed = getStrongWallHorizontalEdge(graph.edges)
+      const wallHorizontalEvaluation = wallHorizontalSeed
+        ? [wallHorizontalSeed.firstPlaneId, wallHorizontalSeed.secondPlaneId]
+          .map((planeId) => evaluationByPlaneId.get(planeId))
+          .find((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config)))
+        : undefined
+      if (wallHorizontalEvaluation && wallHorizontalSeed) {
+        const otherPlaneId = wallHorizontalSeed.firstPlaneId === wallHorizontalEvaluation.context.plane.id
+          ? wallHorizontalSeed.secondPlaneId
+          : wallHorizontalSeed.firstPlaneId
+        addSelectedWall(wallHorizontalEvaluation, `strong wall-horizontal envelope evidence (${otherPlaneId})`)
       }
     }
 
-    if (!hasGraphEvidence || selectedWallIds.size === 0) {
-      const standaloneWall = evaluations
-        .filter((evaluation) => evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config))
-        .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))[0]
+    while (selectedWallIds.size > 0) {
+      const selectedEvaluations = [...selectedWallIds]
+        .map((planeId) => evaluationByPlaneId.get(planeId))
+        .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall'))
+      const growthOptions = eligibleWalls
+        .filter((evaluation) => !selectedWallIds.has(evaluation.context.plane.id) && !alternateWallIds.has(evaluation.context.plane.id))
+        .map((evaluation) => ({
+          evaluation,
+          edge: getBestWallEdgeToSelected(evaluation.context.plane.id, selectedWallIds, graph.edges),
+        }))
+        .filter((option): option is { evaluation: RoleEvaluation; edge: StructuralGraphEdge } =>
+          Boolean(option.edge && option.edge.edgeStrength === 'strong'))
+        .sort((left, right) => right.edge.edgeScore - left.edge.edgeScore ||
+          getRoleSelectionScore(right.evaluation) - getRoleSelectionScore(left.evaluation) ||
+          left.evaluation.context.plane.id.localeCompare(right.evaluation.context.plane.id))
+      const next = growthOptions[0]
+      if (!next) {
+        break
+      }
+      const candidate = next.evaluation
+      const closestSelected = getClosestSelectedWall(candidate, selectedEvaluations)
+      const orientationRedundant = Boolean(closestSelected &&
+        getNormalAngleDegrees(candidate.context.plane, closestSelected.context.plane) <= this.config.selectedWallRedundancyAngleDegrees)
+      const independentParallel = hasIndependentParallelBoundaryEvidence(candidate, selectedEvaluations, this.config)
+      if (orientationRedundant && !independentParallel) {
+        alternateWallIds.add(candidate.context.plane.id)
+        wallSelectionReasons.set(
+          candidate.context.plane.id,
+          `orientation redundant with selected ${closestSelected?.context.plane.id ?? 'wall'}`,
+        )
+        continue
+      }
+      addSelectedWall(
+        candidate,
+        next.edge.edgeType === 'parallel-boundary'
+          ? 'distinct parallel boundary supported by room graph'
+          : 'strong corner edge; introduces a new wall direction',
+      )
+    }
+
+    if (selectedWallIds.size === 0) {
+      const standaloneWall = eligibleWalls
+        .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left) ||
+          left.context.plane.id.localeCompare(right.context.plane.id))[0]
       if (standaloneWall) {
-        selectedWallIds.add(standaloneWall.context.plane.id)
-        const groupId = orientationGroupIdByPlaneId.get(standaloneWall.context.plane.id)
-        if (groupId) {
-          selectedWallGroupIds.add(groupId)
-          selectedWallIdsByGroup.set(groupId, [standaloneWall.context.plane.id])
-        }
-        wallSelectionReasons.set(standaloneWall.context.plane.id, 'strongest credible standalone wall')
+        addSelectedWall(standaloneWall, 'strongest credible standalone wall')
+      }
+    }
+
+    const selectedWallComponents = new Set<number>()
+    for (const [componentIndex, component] of graph.components.entries()) {
+      if ([...selectedWallIds].some((planeId) => component.has(planeId))) {
+        selectedWallComponents.add(componentIndex)
       }
     }
 
@@ -1187,14 +1319,14 @@ export class StructuralSurfaceInterpretationService {
         continue
       }
       alternateWallIds.add(planeId)
-      const groupId = orientationGroupIdByPlaneId.get(planeId)
-      const lostCompetition = Boolean(groupId && selectedWallGroupIds.has(groupId))
-      wallSelectionReasons.set(planeId, getGraphSelectionReason(
+      const selectedEvaluations = [...selectedWallIds]
+        .map((selectedPlaneId) => evaluationByPlaneId.get(selectedPlaneId))
+        .filter((selected): selected is RoleEvaluation => Boolean(selected && selected.role === 'wall'))
+      wallSelectionReasons.set(planeId, getWallGrowthReason(
         evaluation,
-        'alternate',
+        selectedEvaluations,
+        selectedWallIds,
         graph.edges,
-        hasGraphEvidence,
-        lostCompetition,
         this.config,
       ))
     }
@@ -1290,6 +1422,8 @@ export class StructuralSurfaceInterpretationService {
       parallelLanes: Object.freeze(parallelLanes),
       structuralGraphNodes: graph.nodes,
       structuralGraphEdges: graph.edges,
+      structuralGraphComponents: graph.componentRecords,
+      selectedWallCorePlaneIds: Object.freeze([...selectedWallIds]),
       likelyWalls: freezeSurfaceArray(selectedWalls),
       floorCandidate: selectedFloor,
       ceilingCandidate: selectedCeiling,
@@ -1314,6 +1448,8 @@ export class StructuralSurfaceInterpretationService {
         selectedWallComponentCount: selectedWallComponents.size,
         structuralGraphNodeCount: graph.nodes.length,
         structuralGraphEdgeCount: graph.edges.length,
+        structuralGraphComponentCount: graph.componentRecords.length,
+        selectedWallCoreCount: selectedWallIds.size,
       },
       timings: {
         relationshipAnalysisMs: Math.max(0, relationshipFinishedAt - relationshipStartedAt),

@@ -186,6 +186,8 @@ function StructuralSurfaceSummary({
   const selectedSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'selected')
   const alternateSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'alternate')
   const unselectedSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'unselected')
+  const strongGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'strong')
+  const supportingGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'supporting')
 
   return (
     <section className="scanner-analysis-result" aria-labelledby="structural-surfaces-title">
@@ -237,6 +239,14 @@ function StructuralSurfaceSummary({
           <span>Selected wall components</span>
           <strong>{interpretation.stats.selectedWallComponentCount}</strong>
         </div>
+        <div>
+          <span>Raw graph components</span>
+          <strong>{interpretation.stats.structuralGraphComponentCount}</strong>
+        </div>
+        <div>
+          <span>Strong / supporting edges</span>
+          <strong>{strongGraphEdges.length} / {supportingGraphEdges.length}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
@@ -250,6 +260,11 @@ function StructuralSurfaceSummary({
           </span>
         </div>
       ) : null}
+      <div className="scanner-analysis-timings">
+        <span>
+          Selected structural core: {interpretation.selectedWallCorePlaneIds.join(', ') || 'none'} | raw graph components: {interpretation.structuralGraphComponents.map((component) => `${component.id} [${component.planeIds.join(', ')}]`).join(' | ') || 'none'}
+        </span>
+      </div>
       {selectedSurfaces.length > 0 ? (
         <>
           <div className="scanner-analysis-timings"><span>Selected room surfaces</span></div>
@@ -298,7 +313,7 @@ function StructuralSurfaceSummary({
             Structural graph edges: {[...interpretation.structuralGraphEdges]
               .sort((left, right) => right.edgeScore - left.edgeScore)
               .slice(0, 6)
-              .map((edge) => `${edge.firstPlaneId}/${edge.secondPlaneId} ${edge.edgeType}, score ${edge.edgeScore.toFixed(2)}, angle ${edge.normalAngleDegrees.toFixed(1)} deg, closest support ${edge.closestSupportDistanceMeters.toFixed(2)} m`)
+              .map((edge) => `${edge.firstPlaneId}/${edge.secondPlaneId} ${edge.edgeType} (${edge.edgeStrength}), score ${edge.edgeScore.toFixed(2)}, angle ${edge.normalAngleDegrees.toFixed(1)} deg, closest support ${edge.closestSupportDistanceMeters.toFixed(2)} m`)
               .join(' | ')}
           </span>
         </div>
