@@ -290,7 +290,45 @@ export interface StructuralMultiSurfaceCoherenceDiagnostic {
   readonly geometryGate: StructuralTriadGateStatus
   readonly coherenceGate: StructuralTriadGateStatus
   readonly decision: 'selected' | 'rejected'
+  /** Local gate decision before competing-triad consolidation. */
+  readonly locallyAccepted: boolean
+  /** Final decision after competing-triad consolidation. */
+  readonly finalDecision: 'selected' | 'suppressed' | 'rejected'
+  readonly competitionGroupId: string | null
+  readonly competitionReason: string | null
   readonly selected: boolean
+  readonly reason: string
+}
+
+export interface StructuralTriadCompetitionDiagnostic {
+  readonly triadAKey: string
+  readonly triadBKey: string
+  readonly competitionGroupId: string | null
+  readonly sharedAnchorWallPlaneId: string
+  readonly sharedHorizontalPlaneId: string
+  readonly introducedWallPlaneAId: string
+  readonly introducedWallPlaneBId: string
+  readonly normalSeparationDegrees: number
+  readonly planeOffsetDifferenceMeters: number
+  readonly bidirectionalSupportDistanceMeters: number | null
+  readonly supportCentroidDistanceMeters: number | null
+  readonly projectedSupportOverlap: number
+  readonly projectedExtentOverlap: number
+  readonly triplePointSeparationMeters: number | null
+  readonly representativeScoreA: number
+  readonly representativeScoreB: number
+  readonly decision: 'competing' | 'distinct'
+  readonly winnerTriadKey: string | null
+  readonly reason: string
+}
+
+export interface StructuralTriadCompetitionGroup {
+  readonly id: string
+  readonly sharedAnchorWallPlaneId: string
+  readonly sharedHorizontalPlaneId: string
+  readonly triadKeys: readonly string[]
+  readonly introducedWallPlaneIds: readonly string[]
+  readonly selectedTriadKey: string
   readonly reason: string
 }
 
@@ -316,6 +354,8 @@ export interface RoomStructureInterpretationResult {
   readonly selectedWallCorePlaneIds: readonly string[]
   readonly structuralCorePairCandidates: readonly StructuralCorePairCandidate[]
   readonly multiSurfaceCoherenceDiagnostics: readonly StructuralMultiSurfaceCoherenceDiagnostic[]
+  readonly triadCompetitionDiagnostics: readonly StructuralTriadCompetitionDiagnostic[]
+  readonly triadCompetitionGroups: readonly StructuralTriadCompetitionGroup[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
@@ -342,6 +382,11 @@ export interface RoomStructureInterpretationResult {
     readonly eligibleStrongWallEdgeCount: number
     readonly multiSurfaceCoherenceCandidateCount: number
     readonly selectedMultiSurfaceCoherenceCount: number
+    readonly locallyAcceptedTriadCount: number
+    readonly finalSelectedTriadCount: number
+    readonly triadCompetitionGroupCount: number
+    readonly triadCompetitionPairCount: number
+    readonly suppressedTriadCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number

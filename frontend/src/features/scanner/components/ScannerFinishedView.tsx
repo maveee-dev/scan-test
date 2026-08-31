@@ -262,8 +262,12 @@ function StructuralSurfaceSummary({
           <strong>{interpretation.stats.eligibleStrongWallEdgeCount}</strong>
         </div>
         <div>
-          <span>Multi-surface candidates / selected</span>
-          <strong>{interpretation.stats.multiSurfaceCoherenceCandidateCount} / {interpretation.stats.selectedMultiSurfaceCoherenceCount}</strong>
+          <span>Local triads / final selected</span>
+          <strong>{interpretation.stats.locallyAcceptedTriadCount} / {interpretation.stats.finalSelectedTriadCount}</strong>
+        </div>
+        <div>
+          <span>Triad competition groups / suppressed</span>
+          <strong>{interpretation.stats.triadCompetitionGroupCount} / {interpretation.stats.suppressedTriadCount}</strong>
         </div>
       </div>
       <div className="scanner-analysis-timings">
@@ -297,7 +301,14 @@ function StructuralSurfaceSummary({
       {topTriadCandidates.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>
-            Multi-surface candidates: {topTriadCandidates.map((candidate) => `${candidate.candidatePlaneId} with ${candidate.existingWallPlaneId} + ${candidate.horizontalPlaneId} | wall angle ${candidate.wallWallAngleDegrees.toFixed(1)} deg | line support A/B ${candidate.wallWallSupport.nearLineSupportCountA}/${candidate.wallWallSupport.nearLineSupportCountB} (${candidate.wallWallSupport.intersectionSupportScore.toFixed(2)}) | horizontal support A/B ${candidate.candidateHorizontalSupport.intersectionSupportScore.toFixed(2)}/${candidate.existingHorizontalSupport?.intersectionSupportScore.toFixed(2) ?? 'n/a'} | triple support ${candidate.triplePointSupportCounts.candidate}/${candidate.triplePointSupportCounts.existing}/${candidate.triplePointSupportCounts.horizontal} (${candidate.triplePointSupportScore.toFixed(2)}) | triple point ${candidate.threePlanePoint ? formatPoint(candidate.threePlanePoint) : 'none'} | node ${candidate.candidateNodeQuality.toFixed(2)} | coherence ${candidate.multiSurfaceCoherenceScore.toFixed(2)} | gates geom/${candidate.geometryGate} wall-wall/${candidate.wallWallSupportGate} horiz/${candidate.wallHorizontalSupportGateA}/${candidate.wallHorizontalSupportGateB} triple/${candidate.triplePointSupportGate} coherence/${candidate.coherenceGate} | ${candidate.decision}${candidate.selected ? '' : `: ${candidate.reason}`}`).join(' | ')}
+            Multi-surface candidates: {topTriadCandidates.map((candidate) => `${candidate.candidatePlaneId} with ${candidate.existingWallPlaneId} + ${candidate.horizontalPlaneId} | wall angle ${candidate.wallWallAngleDegrees.toFixed(1)} deg | line support A/B ${candidate.wallWallSupport.nearLineSupportCountA}/${candidate.wallWallSupport.nearLineSupportCountB} (${candidate.wallWallSupport.intersectionSupportScore.toFixed(2)}) | horizontal support A/B ${candidate.candidateHorizontalSupport.intersectionSupportScore.toFixed(2)}/${candidate.existingHorizontalSupport?.intersectionSupportScore.toFixed(2) ?? 'n/a'} | triple support ${candidate.triplePointSupportCounts.candidate}/${candidate.triplePointSupportCounts.existing}/${candidate.triplePointSupportCounts.horizontal} (${candidate.triplePointSupportScore.toFixed(2)}) | triple point ${candidate.threePlanePoint ? formatPoint(candidate.threePlanePoint) : 'none'} | node ${candidate.candidateNodeQuality.toFixed(2)} | coherence ${candidate.multiSurfaceCoherenceScore.toFixed(2)} | gates geom/${candidate.geometryGate} wall-wall/${candidate.wallWallSupportGate} horiz/${candidate.wallHorizontalSupportGateA}/${candidate.wallHorizontalSupportGateB} triple/${candidate.triplePointSupportGate} coherence/${candidate.coherenceGate} | local/${candidate.locallyAccepted ? 'accepted' : 'rejected'} final/${candidate.finalDecision}${candidate.competitionGroupId ? ` group ${candidate.competitionGroupId}` : ''}${candidate.selected ? '' : `: ${candidate.competitionReason ?? candidate.reason}`}`).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+      {interpretation.triadCompetitionDiagnostics.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Triad competition: {interpretation.triadCompetitionDiagnostics.slice(0, 6).map((competition) => `${competition.triadAKey} vs ${competition.triadBKey} | anchor ${competition.sharedAnchorWallPlaneId} + ${competition.sharedHorizontalPlaneId} | normal ${competition.normalSeparationDegrees.toFixed(1)} deg | support overlap ${(competition.projectedSupportOverlap * 100).toFixed(0)}% | extent ${(competition.projectedExtentOverlap * 100).toFixed(0)}% | bidirectional support ${competition.bidirectionalSupportDistanceMeters === null ? 'n/a' : `${competition.bidirectionalSupportDistanceMeters.toFixed(2)} m`} | triple gap ${competition.triplePointSeparationMeters === null ? 'n/a' : `${competition.triplePointSeparationMeters.toFixed(2)} m`} | representative ${competition.representativeScoreA.toFixed(2)}/${competition.representativeScoreB.toFixed(2)} | ${competition.decision}${competition.winnerTriadKey ? ` winner ${competition.winnerTriadKey}` : ''}: ${competition.reason}`).join(' | ')}
           </span>
         </div>
       ) : null}

@@ -538,6 +538,15 @@ support. This prevents mobile-depth angle noise from blocking a real
 wall-plus-wall-plus-horizontal structure without promoting surfaces that merely
 touch a horizontal plane in unrelated locations.
 
+Locally accepted triads may still compete after their mandatory gates pass.
+Triads sharing an anchor wall and horizontal surface are compared as structural
+hypotheses using full-normal similarity, bidirectional support agreement,
+projected occupied-support overlap, spatial extent, and candidate triple-point
+separation. A bounded competition group selects the strongest real
+representative; losing triads remain visible as locally accepted but suppressed
+diagnostics. Distinct spatial corners are preserved, so this is not a fixed wall
+count or a rule that reduces every room to two walls.
+
 Selected structural surfaces then feed the M7.2 intersection stage:
 
 ```text

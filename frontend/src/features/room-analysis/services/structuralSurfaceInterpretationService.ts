@@ -18,6 +18,8 @@ import type {
   StructuralSurfaceRole,
   StructuralSurfaceSelection,
   StructuralSurfaceSelectionEvidence,
+  StructuralTriadCompetitionDiagnostic,
+  StructuralTriadCompetitionGroup,
 } from '../types'
 import {
   associateFinalizedSupportPoints,
@@ -67,6 +69,12 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly minimumTriadPointSupportCountPerSurface: number
   readonly minimumTriadPointSupportScore: number
   readonly minimumTriadPlaneDeterminant: number
+  readonly triadCompetitionMaximumNormalSeparationDegrees: number
+  readonly triadCompetitionMinimumProjectedSupportOverlap: number
+  readonly triadCompetitionMinimumProjectedExtentOverlap: number
+  readonly triadCompetitionProjectedCellSizeMeters: number
+  readonly triadCompetitionMaximumTriplePointDistanceMeters: number
+  readonly triadCompetitionMaximumSupportCentroidDistanceMeters: number
 }
 
 export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurfaceInterpretationConfig = {
@@ -105,6 +113,12 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   minimumTriadPointSupportCountPerSurface: 2,
   minimumTriadPointSupportScore: 0.35,
   minimumTriadPlaneDeterminant: 0.2,
+  triadCompetitionMaximumNormalSeparationDegrees: 30,
+  triadCompetitionMinimumProjectedSupportOverlap: 0.2,
+  triadCompetitionMinimumProjectedExtentOverlap: 0.35,
+  triadCompetitionProjectedCellSizeMeters: 0.15,
+  triadCompetitionMaximumTriplePointDistanceMeters: 0.45,
+  triadCompetitionMaximumSupportCentroidDistanceMeters: 0.75,
 }
 
 const WORLD_UP = { x: 0, y: 1, z: 0 }
@@ -153,6 +167,22 @@ interface RelationshipSupportIndex {
   readonly pointsBySurfaceId: ReadonlyMap<string, readonly SpatialPoint[]>
 }
 
+interface ProjectedTriadSupportSummary {
+  readonly cells: ReadonlySet<string>
+  readonly minU: number
+  readonly maxU: number
+  readonly minV: number
+  readonly maxV: number
+  readonly centroid: SpatialPoint | null
+}
+
+interface TriadCompetitionAnalysis {
+  readonly pairDiagnostics: readonly StructuralTriadCompetitionDiagnostic[]
+  readonly groups: readonly StructuralTriadCompetitionGroup[]
+  readonly finalSelectedTriadKeys: ReadonlySet<string>
+  readonly suppressedTriadKeys: ReadonlySet<string>
+}
+
 function getTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
 }
@@ -170,6 +200,17 @@ function distance(
   second: { x: number; y: number; z: number },
 ): number {
   return Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z)
+}
+
+function getMedian(values: readonly number[]): number | null {
+  if (values.length === 0) {
+    return null
+  }
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle]
 }
 
 function copyPoint(point: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
@@ -1476,6 +1517,10 @@ function getBestMultiSurfaceCoherence(
         geometryGate,
         coherenceGate,
         decision,
+        locallyAccepted: decision === 'selected',
+        finalDecision: decision === 'selected' ? 'selected' : 'rejected',
+        competitionGroupId: null,
+        competitionReason: null,
         selected: false,
         reason,
       })
@@ -1484,6 +1529,373 @@ function getBestMultiSurfaceCoherence(
   return options.sort((left, right) => right.multiSurfaceCoherenceScore - left.multiSurfaceCoherenceScore ||
     left.existingWallPlaneId.localeCompare(right.existingWallPlaneId) ||
     left.horizontalPlaneId.localeCompare(right.horizontalPlaneId))[0] ?? null
+}
+
+function getTriadKey(diagnostic: StructuralMultiSurfaceCoherenceDiagnostic): string {
+  return `${diagnostic.candidatePlaneId}/${diagnostic.existingWallPlaneId}/${diagnostic.horizontalPlaneId}`
+}
+
+function getSupportPointsForSurface(
+  planeId: string,
+  supportIndex: RelationshipSupportIndex | null,
+): readonly SpatialPoint[] {
+  return supportIndex?.pointsBySurfaceId.get(planeId) ?? []
+}
+
+function projectTriadSupport(
+  points: readonly SpatialPoint[],
+  origin: SpatialPoint,
+  tangentU: SpatialPoint,
+  tangentV: SpatialPoint,
+  cellSizeMeters: number,
+): ProjectedTriadSupportSummary {
+  const cells = new Set<string>()
+  let minU = Infinity
+  let maxU = -Infinity
+  let minV = Infinity
+  let maxV = -Infinity
+  let centroid = { x: 0, y: 0, z: 0 }
+  let pointCount = 0
+  for (const point of points) {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) {
+      continue
+    }
+    const relative = {
+      x: point.x - origin.x,
+      y: point.y - origin.y,
+      z: point.z - origin.z,
+    }
+    const u = dot(relative, tangentU)
+    const v = dot(relative, tangentV)
+    if (!Number.isFinite(u) || !Number.isFinite(v)) {
+      continue
+    }
+    minU = Math.min(minU, u)
+    maxU = Math.max(maxU, u)
+    minV = Math.min(minV, v)
+    maxV = Math.max(maxV, v)
+    cells.add(`${Math.floor(u / cellSizeMeters)}:${Math.floor(v / cellSizeMeters)}`)
+    centroid = {
+      x: centroid.x + point.x,
+      y: centroid.y + point.y,
+      z: centroid.z + point.z,
+    }
+    pointCount += 1
+  }
+  return {
+    cells,
+    minU: pointCount > 0 ? minU : 0,
+    maxU: pointCount > 0 ? maxU : 0,
+    minV: pointCount > 0 ? minV : 0,
+    maxV: pointCount > 0 ? maxV : 0,
+    centroid: pointCount > 0
+      ? {
+        x: centroid.x / pointCount,
+        y: centroid.y / pointCount,
+        z: centroid.z / pointCount,
+      }
+      : null,
+  }
+}
+
+function getSetIntersectionCount(first: ReadonlySet<string>, second: ReadonlySet<string>): number {
+  let count = 0
+  for (const value of first) {
+    if (second.has(value)) {
+      count += 1
+    }
+  }
+  return count
+}
+
+function getProjectedSupportOverlap(first: ProjectedTriadSupportSummary, second: ProjectedTriadSupportSummary): number {
+  const intersectionCount = getSetIntersectionCount(first.cells, second.cells)
+  const unionCount = first.cells.size + second.cells.size - intersectionCount
+  return unionCount > 0 ? intersectionCount / unionCount : 0
+}
+
+function getProjectedExtentOverlap(first: ProjectedTriadSupportSummary, second: ProjectedTriadSupportSummary): number {
+  if (first.cells.size === 0 || second.cells.size === 0) {
+    return 0
+  }
+  const overlapWidth = Math.max(0, Math.min(first.maxU, second.maxU) - Math.max(first.minU, second.minU))
+  const overlapHeight = Math.max(0, Math.min(first.maxV, second.maxV) - Math.max(first.minV, second.minV))
+  const firstArea = Math.max(0, first.maxU - first.minU) * Math.max(0, first.maxV - first.minV)
+  const secondArea = Math.max(0, second.maxU - second.minU) * Math.max(0, second.maxV - second.minV)
+  const smallerArea = Math.min(firstArea, secondArea)
+  return smallerArea > 0 ? clamp((overlapWidth * overlapHeight) / smallerArea, 0, 1) : 0
+}
+
+function getBidirectionalPlaneSupportDistance(
+  first: RoleEvaluation,
+  second: RoleEvaluation,
+  supportIndex: RelationshipSupportIndex | null,
+): number | null {
+  const firstPlane = getNormalizedPlane(first.context.plane)
+  const secondPlane = getNormalizedPlane(second.context.plane)
+  if (!firstPlane || !secondPlane || !supportIndex) {
+    return null
+  }
+  const firstToSecond = getSupportPointsForSurface(first.context.plane.id, supportIndex)
+    .map((point) => Math.abs(dot(secondPlane.normal, point) - secondPlane.planeConstant))
+    .filter((residual) => Number.isFinite(residual))
+  const secondToFirst = getSupportPointsForSurface(second.context.plane.id, supportIndex)
+    .map((point) => Math.abs(dot(firstPlane.normal, point) - firstPlane.planeConstant))
+    .filter((residual) => Number.isFinite(residual))
+  const firstMedian = getMedian(firstToSecond)
+  const secondMedian = getMedian(secondToFirst)
+  return firstMedian !== null && secondMedian !== null
+    ? Math.max(firstMedian, secondMedian)
+    : null
+}
+
+function getTriadRepresentativeScore(
+  diagnostic: StructuralMultiSurfaceCoherenceDiagnostic,
+  evaluationByPlaneId: ReadonlyMap<string, RoleEvaluation>,
+): number {
+  const candidate = evaluationByPlaneId.get(diagnostic.candidatePlaneId)
+  if (!candidate) {
+    return diagnostic.multiSurfaceCoherenceScore
+  }
+  const fitQuality = 1 - clamp(candidate.context.plane.rmsError / MAXIMUM_RMS_FOR_QUALITY_METERS, 0, 1)
+  const horizontalSupport = diagnostic.existingHorizontalSupport
+    ? (diagnostic.candidateHorizontalSupport.intersectionSupportScore + diagnostic.existingHorizontalSupport.intersectionSupportScore) / 2
+    : diagnostic.candidateHorizontalSupport.intersectionSupportScore
+  const determinantQuality = clamp(Math.abs(diagnostic.threePlaneDeterminant), 0, 1)
+  return clamp(
+    diagnostic.multiSurfaceCoherenceScore * 0.28 +
+      diagnostic.candidateNodeQuality * 0.18 +
+      candidate.confidence * 0.1 +
+      candidate.envelopeSelectionScore * 0.12 +
+      candidate.context.areaScore * 0.08 +
+      candidate.context.supportScore * 0.08 +
+      diagnostic.wallWallSupport.intersectionSupportScore * 0.05 +
+      horizontalSupport * 0.04 +
+      fitQuality * 0.04 +
+      diagnostic.triplePointSupportScore * 0.03 +
+      determinantQuality * 0.02,
+    0,
+    1,
+  )
+}
+
+function analyzeTriadCompetition(
+  triads: readonly StructuralMultiSurfaceCoherenceDiagnostic[],
+  evaluationByPlaneId: ReadonlyMap<string, RoleEvaluation>,
+  supportIndex: RelationshipSupportIndex | null,
+  config: StructuralSurfaceInterpretationConfig,
+): TriadCompetitionAnalysis {
+  const sortedTriads = [...new Map(triads.map((triad) => [getTriadKey(triad), triad])).values()]
+    .sort((left, right) => getTriadKey(left).localeCompare(getTriadKey(right)))
+  const representativeScores = new Map(sortedTriads.map((triad) => [
+    getTriadKey(triad),
+    getTriadRepresentativeScore(triad, evaluationByPlaneId),
+  ]))
+  const parent = sortedTriads.map((_, index) => index)
+  const groupKeyByRoot: Array<string | null> = sortedTriads.map(() => null)
+  const findRoot = (index: number): number => {
+    let root = index
+    while (parent[root] !== root) {
+      root = parent[root]
+    }
+    while (parent[index] !== index) {
+      const next = parent[index]
+      parent[index] = root
+      index = next
+    }
+    return root
+  }
+  const union = (first: number, second: number, groupKey: string): void => {
+    const firstRoot = findRoot(first)
+    const secondRoot = findRoot(second)
+    if (firstRoot !== secondRoot) {
+      if (groupKeyByRoot[firstRoot] !== null && groupKeyByRoot[firstRoot] !== groupKey) {
+        return
+      }
+      if (groupKeyByRoot[secondRoot] !== null && groupKeyByRoot[secondRoot] !== groupKey) {
+        return
+      }
+      parent[secondRoot] = firstRoot
+      groupKeyByRoot[firstRoot] = groupKey
+    }
+  }
+  const pairDrafts: Array<{
+    readonly firstIndex: number
+    readonly secondIndex: number
+    readonly diagnostic: StructuralTriadCompetitionDiagnostic
+    readonly competing: boolean
+  }> = []
+  for (let firstIndex = 0; firstIndex < sortedTriads.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < sortedTriads.length; secondIndex += 1) {
+      const firstTriad = sortedTriads[firstIndex]
+      const secondTriad = sortedTriads[secondIndex]
+      if (firstTriad.horizontalPlaneId !== secondTriad.horizontalPlaneId) {
+        continue
+      }
+      const firstWallIds = [firstTriad.candidatePlaneId, firstTriad.existingWallPlaneId]
+      const secondWallIds = [secondTriad.candidatePlaneId, secondTriad.existingWallPlaneId]
+      const sharedWallIds = firstWallIds.filter((planeId) => secondWallIds.includes(planeId))
+      if (sharedWallIds.length !== 1) {
+        continue
+      }
+      const sharedAnchorWallPlaneId = sharedWallIds[0]
+      const introducedWallPlaneAId = firstWallIds.find((planeId) => planeId !== sharedAnchorWallPlaneId)
+      const introducedWallPlaneBId = secondWallIds.find((planeId) => planeId !== sharedAnchorWallPlaneId)
+      if (!introducedWallPlaneAId || !introducedWallPlaneBId || introducedWallPlaneAId === introducedWallPlaneBId) {
+        continue
+      }
+      const firstCandidate = evaluationByPlaneId.get(introducedWallPlaneAId)
+      const secondCandidate = evaluationByPlaneId.get(introducedWallPlaneBId)
+      if (!firstCandidate || !secondCandidate) {
+        continue
+      }
+      const referencePlane = firstCandidate.context.plane
+      const firstSupport = projectTriadSupport(
+        getSupportPointsForSurface(introducedWallPlaneAId, supportIndex),
+        referencePlane.centroid,
+        referencePlane.tangentU,
+        referencePlane.tangentV,
+        config.triadCompetitionProjectedCellSizeMeters,
+      )
+      const secondSupport = projectTriadSupport(
+        getSupportPointsForSurface(introducedWallPlaneBId, supportIndex),
+        referencePlane.centroid,
+        referencePlane.tangentU,
+        referencePlane.tangentV,
+        config.triadCompetitionProjectedCellSizeMeters,
+      )
+      const projectedSupportOverlap = getProjectedSupportOverlap(firstSupport, secondSupport)
+      const projectedExtentOverlap = getProjectedExtentOverlap(firstSupport, secondSupport)
+      const triplePointSeparationMeters = firstTriad.threePlanePoint && secondTriad.threePlanePoint
+        ? distance(firstTriad.threePlanePoint, secondTriad.threePlanePoint)
+        : null
+      const supportCentroidDistanceMeters = firstSupport.centroid && secondSupport.centroid
+        ? distance(firstSupport.centroid, secondSupport.centroid)
+        : null
+      const normalSeparationDegrees = getNormalAngleDegrees(firstCandidate.context.plane, secondCandidate.context.plane)
+      const planeOffsetDifferenceMeters = getPlaneOffsetDifference(firstCandidate.context.plane, secondCandidate.context.plane)
+      const bidirectionalSupportDistanceMeters = getBidirectionalPlaneSupportDistance(firstCandidate, secondCandidate, supportIndex)
+      const supportOverlapEvidence = projectedSupportOverlap >= config.triadCompetitionMinimumProjectedSupportOverlap ||
+        projectedExtentOverlap >= config.triadCompetitionMinimumProjectedExtentOverlap
+      const commonCornerEvidence = triplePointSeparationMeters !== null &&
+        triplePointSeparationMeters <= config.triadCompetitionMaximumTriplePointDistanceMeters &&
+        supportCentroidDistanceMeters !== null &&
+        supportCentroidDistanceMeters <= config.triadCompetitionMaximumSupportCentroidDistanceMeters
+      const competing = normalSeparationDegrees <= config.triadCompetitionMaximumNormalSeparationDegrees &&
+        (supportOverlapEvidence || commonCornerEvidence)
+      const firstKey = getTriadKey(firstTriad)
+      const secondKey = getTriadKey(secondTriad)
+      const groupKey = `${sharedAnchorWallPlaneId}::${firstTriad.horizontalPlaneId}`
+      const firstScore = representativeScores.get(firstKey) ?? 0
+      const secondScore = representativeScores.get(secondKey) ?? 0
+      pairDrafts.push({
+        firstIndex,
+        secondIndex,
+        competing,
+        diagnostic: {
+          triadAKey: firstKey,
+          triadBKey: secondKey,
+          competitionGroupId: null,
+          sharedAnchorWallPlaneId,
+          sharedHorizontalPlaneId: firstTriad.horizontalPlaneId,
+          introducedWallPlaneAId,
+          introducedWallPlaneBId,
+          normalSeparationDegrees,
+          planeOffsetDifferenceMeters,
+          bidirectionalSupportDistanceMeters,
+          supportCentroidDistanceMeters,
+          projectedSupportOverlap,
+          projectedExtentOverlap,
+          triplePointSeparationMeters,
+          representativeScoreA: firstScore,
+          representativeScoreB: secondScore,
+          decision: competing ? 'competing' : 'distinct',
+          winnerTriadKey: null,
+          reason: competing ? 'competing duplicate structural wall hypothesis' : 'distinct spatial corner; preserved',
+        },
+      })
+      if (competing) {
+        union(firstIndex, secondIndex, groupKey)
+      }
+    }
+  }
+
+  const groupedIndices = new Map<number, number[]>()
+  sortedTriads.forEach((_, index) => {
+    const root = findRoot(index)
+    const indices = groupedIndices.get(root) ?? []
+    indices.push(index)
+    groupedIndices.set(root, indices)
+  })
+  const competitionGroups: StructuralTriadCompetitionGroup[] = []
+  const groupIdByTriadKey = new Map<string, string>()
+  const winnerByGroupId = new Map<string, string>()
+  const groupedEntries = [...groupedIndices.values()]
+    .filter((indices) => indices.length > 1)
+    .sort((left, right) => getTriadKey(sortedTriads[left[0]]).localeCompare(getTriadKey(sortedTriads[right[0]])))
+  groupedEntries.forEach((indices, groupIndex) => {
+    const members = indices
+      .map((index) => sortedTriads[index])
+      .sort((left, right) => getTriadKey(left).localeCompare(getTriadKey(right)))
+    const first = members[0]
+    const memberIndices = new Set(indices)
+    const firstPair = pairDrafts.find((pair) => pair.competing && memberIndices.has(pair.firstIndex) && memberIndices.has(pair.secondIndex))
+    const sharedAnchorWallPlaneId = firstPair?.diagnostic.sharedAnchorWallPlaneId ?? first.existingWallPlaneId
+    const groupId = `triad-competition-${sharedAnchorWallPlaneId}-${first.horizontalPlaneId}-${groupIndex + 1}`
+    const selectedTriad = [...members]
+      .sort((left, right) => (representativeScores.get(getTriadKey(right)) ?? 0) - (representativeScores.get(getTriadKey(left)) ?? 0) ||
+        getTriadKey(left).localeCompare(getTriadKey(right)))[0]
+    const selectedTriadKey = getTriadKey(selectedTriad)
+    winnerByGroupId.set(groupId, selectedTriadKey)
+    const triadKeys = members.map(getTriadKey).sort((left, right) => left.localeCompare(right))
+    for (const triadKey of triadKeys) {
+      groupIdByTriadKey.set(triadKey, groupId)
+    }
+    competitionGroups.push({
+      id: groupId,
+      sharedAnchorWallPlaneId,
+      sharedHorizontalPlaneId: first.horizontalPlaneId,
+      triadKeys,
+      introducedWallPlaneIds: [...new Set(members.map((member) => member.candidatePlaneId))].sort((left, right) => left.localeCompare(right)),
+      selectedTriadKey,
+      reason: 'strongest representative of competing wall hypotheses selected',
+    })
+  })
+
+  const pairDiagnostics = pairDrafts.map(({ diagnostic, competing }) => {
+    const groupId = groupIdByTriadKey.get(diagnostic.triadAKey) ?? null
+    const winnerTriadKey = groupId ? winnerByGroupId.get(groupId) ?? null : null
+    const winner = diagnostic.representativeScoreA >= diagnostic.representativeScoreB
+      ? diagnostic.triadAKey
+      : diagnostic.triadBKey
+    return {
+      ...diagnostic,
+      competitionGroupId: groupId,
+      winnerTriadKey: competing ? winnerTriadKey : null,
+      reason: competing
+        ? winner === diagnostic.triadAKey
+          ? 'strongest representative of competing wall hypothesis'
+          : 'competing duplicate structural wall; alternate representative is stronger'
+        : 'distinct spatial corner; preserved',
+    }
+  })
+  const suppressedTriadKeys = new Set<string>()
+  const finalSelectedTriadKeys = new Set<string>()
+  for (const triad of sortedTriads) {
+    const key = getTriadKey(triad)
+    const groupId = groupIdByTriadKey.get(key)
+    if (!groupId || winnerByGroupId.get(groupId) === key) {
+      finalSelectedTriadKeys.add(key)
+    } else {
+      suppressedTriadKeys.add(key)
+    }
+  }
+  return {
+    pairDiagnostics,
+    groups: competitionGroups,
+    finalSelectedTriadKeys,
+    suppressedTriadKeys,
+  }
 }
 
 function getClosestSelectedWall(
@@ -1829,6 +2241,8 @@ export class StructuralSurfaceInterpretationService {
       .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation))
     const multiSurfaceCoherenceByPlaneId = new Map<string, number>()
     const multiSurfaceDiagnosticByKey = new Map<string, StructuralMultiSurfaceCoherenceDiagnostic>()
+    const locallyAcceptedTriads: StructuralMultiSurfaceCoherenceDiagnostic[] = []
+    const triadAddedWallIds = new Set<string>()
     let addedTriadWall = true
     while (addedTriadWall && selectedHorizontalEvaluations.length > 0) {
       addedTriadWall = false
@@ -1876,10 +2290,67 @@ export class StructuralSurfaceInterpretationService {
           candidate.context.plane.id,
           Math.max(multiSurfaceCoherenceByPlaneId.get(candidate.context.plane.id) ?? 0, diagnostic.multiSurfaceCoherenceScore),
         )
-        multiSurfaceDiagnosticByKey.set(key, { ...diagnostic, decision: 'selected', selected: true })
+        const acceptedDiagnostic = {
+          ...diagnostic,
+          locallyAccepted: true,
+          finalDecision: 'selected' as const,
+          competitionGroupId: null,
+          competitionReason: null,
+          decision: 'selected' as const,
+          selected: true,
+        }
+        multiSurfaceDiagnosticByKey.set(key, acceptedDiagnostic)
+        locallyAcceptedTriads.push(acceptedDiagnostic)
+        triadAddedWallIds.add(candidate.context.plane.id)
         addSelectedWall(candidate, 'coherent wall-wall-horizontal triad')
         addedTriadWall = true
         break
+      }
+    }
+
+    const triadCompetition = analyzeTriadCompetition(
+      locallyAcceptedTriads,
+      evaluationByPlaneId,
+      relationshipSupportIndex,
+      this.config,
+    )
+    const selectedTriadWallIds = new Set<string>()
+    for (const triad of locallyAcceptedTriads) {
+      const triadKey = getTriadKey(triad)
+      if (triadCompetition.finalSelectedTriadKeys.has(triadKey)) {
+        selectedTriadWallIds.add(triad.candidatePlaneId)
+      }
+    }
+    for (const triad of locallyAcceptedTriads) {
+      const triadKey = getTriadKey(triad)
+      const group = triadCompetition.groups.find((candidate) => candidate.triadKeys.includes(triadKey))
+      const suppressed = triadCompetition.suppressedTriadKeys.has(triadKey)
+      multiSurfaceDiagnosticByKey.set(triadKey, {
+        ...triad,
+        competitionGroupId: group?.id ?? null,
+        competitionReason: suppressed
+          ? 'competing duplicate structural wall; alternate representative is stronger'
+          : group
+            ? 'strongest representative of competing wall hypothesis'
+            : null,
+        finalDecision: suppressed ? 'suppressed' : 'selected',
+        selected: !suppressed,
+      })
+      if (suppressed && triadAddedWallIds.has(triad.candidatePlaneId) &&
+        !selectedTriadWallIds.has(triad.candidatePlaneId)) {
+        selectedWallIds.delete(triad.candidatePlaneId)
+        alternateWallIds.add(triad.candidatePlaneId)
+        wallSelectionReasons.set(
+          triad.candidatePlaneId,
+          'competing duplicate structural wall; alternate representative is stronger',
+        )
+        const groupId = orientationGroupIdByPlaneId.get(triad.candidatePlaneId)
+        if (groupId) {
+          selectedWallIdsByGroup.set(
+            groupId,
+            (selectedWallIdsByGroup.get(groupId) ?? []).filter((planeId) => planeId !== triad.candidatePlaneId),
+          )
+        }
       }
     }
 
@@ -2019,6 +2490,8 @@ export class StructuralSurfaceInterpretationService {
       selectedWallCorePlaneIds: Object.freeze([...selectedWallIds]),
       structuralCorePairCandidates: Object.freeze(corePairDiagnostics),
       multiSurfaceCoherenceDiagnostics: Object.freeze(multiSurfaceCoherenceDiagnostics),
+      triadCompetitionDiagnostics: Object.freeze(triadCompetition.pairDiagnostics),
+      triadCompetitionGroups: Object.freeze(triadCompetition.groups),
       likelyWalls: freezeSurfaceArray(selectedWalls),
       floorCandidate: selectedFloor,
       ceilingCandidate: selectedCeiling,
@@ -2048,6 +2521,11 @@ export class StructuralSurfaceInterpretationService {
         eligibleStrongWallEdgeCount: structuralCorePairCandidates.length,
         multiSurfaceCoherenceCandidateCount: multiSurfaceCoherenceDiagnostics.length,
         selectedMultiSurfaceCoherenceCount: multiSurfaceCoherenceDiagnostics.filter((candidate) => candidate.selected).length,
+        locallyAcceptedTriadCount: locallyAcceptedTriads.length,
+        finalSelectedTriadCount: triadCompetition.finalSelectedTriadKeys.size,
+        triadCompetitionGroupCount: triadCompetition.groups.length,
+        triadCompetitionPairCount: triadCompetition.pairDiagnostics.filter((candidate) => candidate.decision === 'competing').length,
+        suppressedTriadCount: triadCompetition.suppressedTriadKeys.size,
       },
       timings: {
         relationshipAnalysisMs: Math.max(0, relationshipFinishedAt - relationshipStartedAt),
