@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { CoverageCellState, FinalizedSpatialScan } from '../types'
 import type {
   PlaneCandidate,
+  RoomBoundaryResult,
   RoomAnalysisResult,
   RoomStructureInterpretationResult,
   StructuralIntersectionResult,
@@ -12,6 +13,7 @@ import type {
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
   analysisResult?: RoomAnalysisResult | null
+  roomBoundary?: RoomBoundaryResult | null
   structuralInterpretation?: RoomStructureInterpretationResult | null
   structuralIntersections?: StructuralIntersectionResult | null
 }
@@ -39,8 +41,13 @@ const STRUCTURAL_INTERSECTION_COLORS = {
   'wall-ceiling': 0xd2b8ff,
   'wall-floor': 0x9de5b3,
 } as const
+const ROOM_BOUNDARY_COLORS = {
+  'wall-wall': 0xffcf5c,
+  'wall-ceiling': 0xd9a7ff,
+  'wall-floor': 0x8ee2a8,
+} as const
 
-type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections'
+type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections' | 'boundary'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -214,6 +221,74 @@ function addStructuralIntersections(
   return { geometries, materials }
 }
 
+function addRoomBoundary(
+  scene: THREE.Scene,
+  analysisResult: RoomAnalysisResult,
+  interpretation: RoomStructureInterpretationResult,
+  boundary: RoomBoundaryResult,
+): { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } {
+  const group = new THREE.Group()
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.Material[] = []
+
+  for (const surface of interpretation.surfaces) {
+    if (surface.selection !== 'selected') {
+      continue
+    }
+    const plane = analysisResult.planes.find((candidate) => candidate.id === surface.planeId)
+    if (!plane) {
+      continue
+    }
+    const geometry = createPlaneGeometry(plane)
+    const material = new THREE.MeshBasicMaterial({
+      color: STRUCTURAL_SURFACE_COLORS[surface.role],
+      depthWrite: false,
+      opacity: 0.06,
+      side: THREE.DoubleSide,
+      transparent: true,
+    })
+    group.add(new THREE.Mesh(geometry, material))
+    geometries.push(geometry)
+    materials.push(material)
+  }
+
+  for (const edge of boundary.edges) {
+    if (edge.status === 'rejected') {
+      continue
+    }
+    const geometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(edge.start.x, edge.start.y, edge.start.z),
+      new THREE.Vector3(edge.end.x, edge.end.y, edge.end.z),
+    ])
+    const material = new THREE.LineBasicMaterial({
+      color: ROOM_BOUNDARY_COLORS[edge.type],
+      opacity: edge.status === 'supported' ? 1 : 0.58,
+      transparent: true,
+    })
+    group.add(new THREE.Line(geometry, material))
+    geometries.push(geometry)
+    materials.push(material)
+  }
+
+  for (const corner of boundary.corners) {
+    const geometry = new THREE.SphereGeometry(0.035, 8, 6)
+    const material = new THREE.MeshBasicMaterial({
+      color: corner.status === 'supported' ? 0xffffff : 0xffb56b,
+      depthWrite: false,
+      opacity: corner.status === 'supported' ? 1 : 0.72,
+      transparent: true,
+    })
+    const marker = new THREE.Mesh(geometry, material)
+    marker.position.set(corner.position.x, corner.position.y, corner.position.z)
+    group.add(marker)
+    geometries.push(geometry)
+    materials.push(material)
+  }
+
+  scene.add(group)
+  return { geometries, materials }
+}
+
 function createFusedSurfaceGeometry(
   surfels: readonly FinalizedSpatialScan['fusedSurface'][number][],
 ): THREE.BufferGeometry {
@@ -259,6 +334,7 @@ function createFusedSurfaceGeometry(
 
 function FinalizedSpatialScanPreview({
   analysisResult,
+  roomBoundary,
   scan,
   structuralIntersections,
   structuralInterpretation,
@@ -324,9 +400,11 @@ function FinalizedSpatialScanPreview({
           ? structuralIntersections?.intersections.flatMap((intersection) => intersection.segment
             ? [intersection.segment.start, intersection.segment.end]
             : []) ?? []
+          : mode === 'boundary'
+            ? roomBoundary?.edges.flatMap((edge) => [edge.start, edge.end]) ?? []
         : scan.coverage.map((cell) => cell.position)
     if (pointsForBounds.length === 0) {
-      if (mode === 'intersections' && structuralInterpretation && analysisResult) {
+      if ((mode === 'intersections' || mode === 'boundary') && structuralInterpretation && analysisResult) {
         for (const surface of structuralInterpretation.surfaces) {
           if (surface.selection !== 'selected') {
             continue
@@ -358,6 +436,7 @@ function FinalizedSpatialScanPreview({
     let planeResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+    let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
 
     if (mode === 'coverage') {
       coverageGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -388,6 +467,8 @@ function FinalizedSpatialScanPreview({
       structuralResources = addStructuralSurfaces(scene, analysisResult, structuralInterpretation)
     } else if (mode === 'intersections' && analysisResult && structuralInterpretation && structuralIntersections) {
       intersectionResources = addStructuralIntersections(scene, analysisResult, structuralInterpretation, structuralIntersections)
+    } else if (mode === 'boundary' && analysisResult && structuralInterpretation && roomBoundary) {
+      boundaryResources = addRoomBoundary(scene, analysisResult, structuralInterpretation, roomBoundary)
     }
 
     const center = new THREE.Vector3(
@@ -452,6 +533,8 @@ function FinalizedSpatialScanPreview({
       structuralResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       intersectionResources?.geometries.forEach((intersectionGeometry) => intersectionGeometry.dispose())
       intersectionResources?.materials.forEach((intersectionMaterial) => intersectionMaterial.dispose())
+      boundaryResources?.geometries.forEach((boundaryGeometry) => boundaryGeometry.dispose())
+      boundaryResources?.materials.forEach((boundaryMaterial) => boundaryMaterial.dispose())
       renderer.dispose()
       if (pointCloud) {
         scene.remove(pointCloud)
@@ -460,7 +543,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(fusedSurface)
       }
     }
-  }, [analysisResult, mode, scan, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, mode, roomBoundary, scan, structuralInterpretation, structuralIntersections])
 
   return (
     <div className="scanner-scan-preview">
@@ -519,6 +602,16 @@ function FinalizedSpatialScanPreview({
               Structural Intersections
             </button>
           ) : null}
+          {roomBoundary ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'boundary'}
+              onClick={() => setMode('boundary')}
+            >
+              Room Boundary
+            </button>
+          ) : null}
         </div>
         <button
           type="button"
@@ -536,6 +629,11 @@ function FinalizedSpatialScanPreview({
       {mode === 'intersections' && structuralIntersections && structuralIntersections.stats.supportedCount === 0 ? (
         <p className="scanner-scan-preview-note">
           No supported finite structural intersection segments were detected. Partial candidates remain in the diagnostics below.
+        </p>
+      ) : null}
+      {mode === 'boundary' && roomBoundary && roomBoundary.edges.length === 0 ? (
+        <p className="scanner-scan-preview-note">
+          No finite structural boundary edges were observed. Selected surfaces remain available as an open, incomplete boundary.
         </p>
       ) : null}
     </div>

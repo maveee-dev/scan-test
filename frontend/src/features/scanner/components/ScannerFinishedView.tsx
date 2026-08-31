@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { BUILD_INFO } from '../../../config/buildInfo'
 import type { FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
+import { RoomBoundaryReconstructionService } from '../../room-analysis/services/roomBoundaryReconstructionService'
 import { StructuralIntersectionService } from '../../room-analysis/services/structuralIntersectionService'
 import { StructuralSurfaceInterpretationService } from '../../room-analysis/services/structuralSurfaceInterpretationService'
 import type {
   RoomAnalysisResult,
+  RoomBoundaryResult,
   RoomStructureInterpretationResult,
   StructuralIntersectionCandidate,
   StructuralIntersectionResult,
@@ -475,17 +477,130 @@ function StructuralIntersectionRow({
   )
 }
 
+function RoomBoundarySummary({
+  result,
+}: {
+  result: RoomBoundaryResult
+}) {
+  const supportedCorners = result.corners.filter((corner) => corner.status === 'supported')
+  const partialCorners = result.corners.filter((corner) => corner.status === 'partial')
+
+  return (
+    <section className="scanner-analysis-result" aria-labelledby="room-boundary-title">
+      <div className="scanner-analysis-result-header">
+        <div>
+          <span className="scanner-analysis-label" id="room-boundary-title">
+            Room boundary
+          </span>
+          <span className="scanner-analysis-copy">
+            Observed structural connections only; no closed room or mesh is inferred.
+          </span>
+        </div>
+        <strong>{result.components.length}</strong>
+      </div>
+      <div className="scanner-analysis-stats">
+        <div>
+          <span>Selected structural surfaces</span>
+          <strong>{result.stats.selectedSurfaceCount}</strong>
+        </div>
+        <div>
+          <span>Boundary edges</span>
+          <strong>{result.stats.boundaryEdgeCount}</strong>
+        </div>
+        <div>
+          <span>Wall-wall</span>
+          <strong>{result.stats.wallWallEdgeCount}</strong>
+        </div>
+        <div>
+          <span>Wall-ceiling</span>
+          <strong>{result.stats.wallCeilingEdgeCount}</strong>
+        </div>
+        <div>
+          <span>Wall-floor</span>
+          <strong>{result.stats.wallFloorEdgeCount}</strong>
+        </div>
+        <div>
+          <span>Corner nodes</span>
+          <strong>{result.stats.cornerNodeCount}</strong>
+        </div>
+        <div>
+          <span>Supported / partial corners</span>
+          <strong>{supportedCorners.length} / {partialCorners.length}</strong>
+        </div>
+        <div>
+          <span>Connected components</span>
+          <strong>{result.stats.connectedComponentCount}</strong>
+        </div>
+        <div>
+          <span>Rejected intersections</span>
+          <strong>{result.stats.rejectedIntersectionCount}</strong>
+        </div>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Timing: preparation {result.timings.preparationMs.toFixed(1)} ms | graph construction {result.timings.graphConstructionMs.toFixed(1)} ms | corner solving {result.timings.cornerSolvingMs.toFixed(1)} ms | total {result.timings.totalMs.toFixed(1)} ms
+        </span>
+      </div>
+      {result.wallBoundaries.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Wall boundary profiles: {result.wallBoundaries.map((boundary) => `${boundary.wallId} (wall-wall ${boundary.wallWallEdgeIds.length}, upper ${boundary.upperBoundaryEdgeIds.length}, lower ${boundary.lowerBoundaryEdgeIds.length})`).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+      {result.edges.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Observed boundary edges</span></div>
+          <div className="scanner-plane-list">
+            {result.edges.map((edge) => (
+              <div className={`scanner-plane-row ${edge.status === 'supported' ? 'scanner-plane-row-selected' : 'scanner-plane-row-secondary'}`} key={edge.id}>
+                <span>
+                  <strong>{edge.id}</strong>
+                  <small>{edge.status} | {edge.type} | {edge.surfaceAId} / {edge.surfaceBId} | source {edge.sourceIntersectionId}</small>
+                </span>
+                <span>
+                  {formatPoint(edge.start)} → {formatPoint(edge.end)} | length {edge.lengthMeters.toFixed(2)} m | confidence {edge.confidence.toFixed(2)} | nodes {edge.startNodeId ?? 'none'} / {edge.endNodeId ?? 'none'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {result.corners.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Structural corner nodes</span></div>
+          <div className="scanner-plane-list">
+            {result.corners.map((corner) => (
+              <div className={`scanner-plane-row ${corner.status === 'supported' ? 'scanner-plane-row-selected' : 'scanner-plane-row-secondary'}`} key={corner.id}>
+                <span>
+                  <strong>{corner.id}</strong>
+                  <small>{corner.status} | surfaces {corner.surfaceIds.join(', ')} | edges {corner.sourceEdgeIds.join(', ')}</small>
+                </span>
+                <span>
+                  position {formatPoint(corner.position)} | confidence {corner.confidence.toFixed(2)} | segment gap {corner.segmentGapMeters.toFixed(2)} m | extensions {corner.extensionDistances.map((extension) => `${extension.edgeId} ${extension.distanceMeters.toFixed(2)} m`).join(', ') || 'none'} | plane residuals {corner.planeResiduals.map((residual) => `${residual.surfaceId} ${residual.residualMeters.toFixed(3)} m`).join(', ') || 'none'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </section>
+  )
+}
+
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
   scan,
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
+  const [boundaryService] = useState(() => new RoomBoundaryReconstructionService())
   const [interpretationService] = useState(() => new StructuralSurfaceInterpretationService())
   const [intersectionService] = useState(() => new StructuralIntersectionService())
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
   const [interpretationResult, setInterpretationResult] = useState<RoomStructureInterpretationResult | null>(null)
   const [intersectionResult, setIntersectionResult] = useState<StructuralIntersectionResult | null>(null)
+  const [boundaryResult, setBoundaryResult] = useState<RoomBoundaryResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -510,6 +625,7 @@ function ScannerFinishedView({
     setAnalysisResult(null)
     setInterpretationResult(null)
     setIntersectionResult(null)
+    setBoundaryResult(null)
     analysisTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) {
         return
@@ -519,9 +635,11 @@ function ScannerFinishedView({
         const nextAnalysisResult = analysisService.analyze(scan)
         const nextInterpretationResult = interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType)
         const nextIntersectionResult = intersectionService.analyze(nextInterpretationResult, scan)
+        const nextBoundaryResult = boundaryService.reconstruct(nextInterpretationResult, nextIntersectionResult)
         setAnalysisResult(nextAnalysisResult)
         setInterpretationResult(nextInterpretationResult)
         setIntersectionResult(nextIntersectionResult)
+        setBoundaryResult(nextBoundaryResult)
       } catch (error: unknown) {
         setAnalysisError(
           error instanceof Error
@@ -571,6 +689,7 @@ function ScannerFinishedView({
         <FinalizedSpatialScanPreview
           analysisResult={analysisResult}
           scan={scan}
+          roomBoundary={boundaryResult}
           structuralIntersections={intersectionResult}
           structuralInterpretation={interpretationResult}
         />
@@ -588,6 +707,7 @@ function ScannerFinishedView({
           <AnalysisResultSummary analysisResult={analysisResult} />
           {interpretationResult ? <StructuralSurfaceSummary interpretation={interpretationResult} /> : null}
           {intersectionResult ? <StructuralIntersectionSummary result={intersectionResult} /> : null}
+          {boundaryResult ? <RoomBoundarySummary result={boundaryResult} /> : null}
           {analysisResult.stats.provisionalPlaneCount > 0 ? (
         <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">
           <div className="scanner-analysis-result-header">

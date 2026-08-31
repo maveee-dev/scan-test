@@ -360,6 +360,104 @@ export interface StructuralIntersectionResult {
   }
 }
 
+export type StructuralBoundaryStatus = 'supported' | 'partial' | 'inferred' | 'rejected'
+
+export interface StructuralPlaneResidual {
+  readonly surfaceId: string
+  readonly residualMeters: number
+}
+
+export interface StructuralBoundaryExtension {
+  readonly edgeId: string
+  readonly distanceMeters: number
+}
+
+export interface StructuralBoundaryEdge {
+  readonly id: string
+  readonly type: StructuralIntersectionType
+  readonly surfaceAId: string
+  readonly surfaceBId: string
+  readonly sourceIntersectionId: string
+  readonly start: SpatialPoint
+  readonly end: SpatialPoint
+  readonly lengthMeters: number
+  readonly confidence: number
+  readonly status: StructuralBoundaryStatus
+  readonly startNodeId: string | null
+  readonly endNodeId: string | null
+  readonly extensionDistances: readonly StructuralBoundaryExtension[]
+}
+
+export interface StructuralBoundaryNode {
+  readonly id: string
+  readonly position: SpatialPoint
+  readonly surfaceIds: readonly string[]
+  readonly sourceEdgeIds: readonly string[]
+  readonly sourceIntersectionIds: readonly string[]
+  readonly status: StructuralBoundaryStatus
+  readonly confidence: number
+  readonly segmentGapMeters: number
+  readonly extensionDistances: readonly StructuralBoundaryExtension[]
+  readonly planeResiduals: readonly StructuralPlaneResidual[]
+  readonly cornerId: string | null
+}
+
+export interface StructuralCorner {
+  readonly id: string
+  readonly nodeId: string
+  readonly position: SpatialPoint
+  readonly surfaceIds: readonly string[]
+  readonly sourceEdgeIds: readonly string[]
+  readonly sourceIntersectionIds: readonly string[]
+  readonly status: StructuralBoundaryStatus
+  readonly confidence: number
+  readonly segmentGapMeters: number
+  readonly extensionDistances: readonly StructuralBoundaryExtension[]
+  readonly planeResiduals: readonly StructuralPlaneResidual[]
+}
+
+export interface ObservedWallBoundary {
+  readonly wallId: string
+  readonly wallWallEdgeIds: readonly string[]
+  readonly upperBoundaryEdgeIds: readonly string[]
+  readonly lowerBoundaryEdgeIds: readonly string[]
+}
+
+export interface StructuralBoundaryComponent {
+  readonly id: string
+  readonly surfaceIds: readonly string[]
+  readonly edgeIds: readonly string[]
+  readonly nodeIds: readonly string[]
+}
+
+export interface RoomBoundaryResult {
+  readonly sourceScanId: string
+  readonly selectedSurfaceIds: readonly string[]
+  readonly edges: readonly StructuralBoundaryEdge[]
+  readonly nodes: readonly StructuralBoundaryNode[]
+  readonly corners: readonly StructuralCorner[]
+  readonly wallBoundaries: readonly ObservedWallBoundary[]
+  readonly components: readonly StructuralBoundaryComponent[]
+  readonly stats: {
+    readonly selectedSurfaceCount: number
+    readonly boundaryEdgeCount: number
+    readonly wallWallEdgeCount: number
+    readonly wallCeilingEdgeCount: number
+    readonly wallFloorEdgeCount: number
+    readonly cornerNodeCount: number
+    readonly supportedCornerCount: number
+    readonly partialCornerCount: number
+    readonly connectedComponentCount: number
+    readonly rejectedIntersectionCount: number
+  }
+  readonly timings: {
+    readonly preparationMs: number
+    readonly graphConstructionMs: number
+    readonly cornerSolvingMs: number
+    readonly totalMs: number
+  }
+}
+
 export interface SurfaceConsensusDiagnostic {
   readonly consensusId: string
   readonly finalPlaneId: string

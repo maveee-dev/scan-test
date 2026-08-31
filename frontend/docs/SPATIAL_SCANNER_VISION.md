@@ -526,6 +526,14 @@ edges until both surfaces provide nearby measured support. Supported and
 partial finite segments are retained with their uncertainty and continuity;
 missing support is not completed or extended into a room mesh in M7.2.
 
+M7.3 consumes those finite intersections as a structural boundary graph. It
+clusters nearby segment endpoints, keeps selected surface IDs attached to each
+edge and node, and may validate a multi-surface corner with a real
+three-plane solution. Boundary edges and corners preserve supported or
+partial status, endpoint extension, segment gap, and plane residuals. An
+incomplete scan remains an open boundary; M7.3 does not close a room, invent
+missing corners, or construct wall, floor, ceiling, or mesh polygons.
+
 The longer-term post-scan direction is:
 
 ```text
@@ -540,6 +548,8 @@ final physical-surface consensus
 structural room-surface interpretation
         â†“
 supported structural intersections
+        |
+structural boundary graph and corner nodes
         |
 plane relationships and room envelope
         â†“
