@@ -8,9 +8,11 @@ import {
   StructuralIntersectionService,
 } from '../../room-analysis/services/structuralIntersectionService'
 import { StructuralSurfaceInterpretationService } from '../../room-analysis/services/structuralSurfaceInterpretationService'
+import { RoomSurfaceConstructionService } from '../../room-analysis/services/roomSurfaceConstructionService'
 import type {
   RoomAnalysisResult,
   RoomBoundaryResult,
+  RoomSurfaceConstructionResult,
   RoomStructureInterpretationResult,
   StructuralIntersectionCandidate,
   StructuralIntersectionResult,
@@ -696,6 +698,73 @@ function RoomBoundarySummary({
   )
 }
 
+function RoomSurfaceSummary({
+  result,
+}: {
+  result: RoomSurfaceConstructionResult
+}) {
+  return (
+    <section className="scanner-analysis-result" aria-labelledby="room-surfaces-title">
+      <div className="scanner-analysis-result-header">
+        <div>
+          <span className="scanner-analysis-label" id="room-surfaces-title">
+            Room surfaces
+          </span>
+          <span className="scanner-analysis-copy">
+            Bounded measured patches from selected structural planes; no missing room geometry is closed or guessed.
+          </span>
+        </div>
+        <strong>{result.surfaces.length}</strong>
+      </div>
+      <div className="scanner-analysis-stats">
+        <div>
+          <span>Selected surfaces</span>
+          <strong>{result.diagnostics.inputSelectedSurfaceCount}</strong>
+        </div>
+        <div>
+          <span>Constructed patches</span>
+          <strong>{result.diagnostics.constructedPatchCount}</strong>
+        </div>
+        <div>
+          <span>Walls / ceiling / floor</span>
+          <strong>{result.diagnostics.wallPatchCount} / {result.diagnostics.ceilingPatchCount} / {result.diagnostics.floorPatchCount}</strong>
+        </div>
+        <div>
+          <span>Skipped patches</span>
+          <strong>{result.diagnostics.skippedSurfaceIds.length}</strong>
+        </div>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Timing: basis {result.timings.basisConstructionMs.toFixed(1)} ms | support projection {result.timings.supportProjectionMs.toFixed(1)} ms | polygon {result.timings.polygonConstructionMs.toFixed(1)} ms | triangulation {result.timings.triangulationMs.toFixed(1)} ms | total {result.timings.totalMs.toFixed(1)} ms
+        </span>
+      </div>
+      {result.surfaces.length > 0 ? (
+        <div className="scanner-plane-list">
+          {result.surfaces.map((surface) => (
+            <div className="scanner-plane-row scanner-plane-row-selected" key={surface.id}>
+              <span>
+                <strong>{surface.sourceSurfaceId}</strong>
+                <small>{surface.role} | {surface.completionStatus} | confidence {surface.confidence.toFixed(2)}</small>
+              </span>
+              <span>
+                {surface.vertices3D.length} vertices / {surface.triangleIndices.length / 3} triangles | area {surface.areaMetersSquared.toFixed(2)} m2 | support {surface.supportPointCount} | structural edges {surface.structuralEdgeCount} | support edges {surface.supportDerivedEdgeCount} | corners {surface.canonicalCornerCount} | plane residual {surface.maximumPlaneResidualMeters.toExponential(1)} | basis round-trip {surface.maximumBasisRoundTripResidualMeters.toExponential(1)} | triangulation {surface.triangulationValid ? 'valid' : 'invalid'}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="scanner-analysis-empty">No selected structural surfaces produced a bounded patch.</p>
+      )}
+      {result.diagnostics.warnings.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>{result.diagnostics.warnings.join(' | ')}</span>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
@@ -705,11 +774,13 @@ function ScannerFinishedView({
   const [boundaryService] = useState(() => new RoomBoundaryReconstructionService())
   const [interpretationService] = useState(() => new StructuralSurfaceInterpretationService())
   const [intersectionService] = useState(() => new StructuralIntersectionService())
+  const [surfaceConstructionService] = useState(() => new RoomSurfaceConstructionService())
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
   const [interpretationResult, setInterpretationResult] = useState<RoomStructureInterpretationResult | null>(null)
   const [intersectionResult, setIntersectionResult] = useState<StructuralIntersectionResult | null>(null)
   const [supportConsistencyWarnings, setSupportConsistencyWarnings] = useState<readonly string[]>([])
   const [boundaryResult, setBoundaryResult] = useState<RoomBoundaryResult | null>(null)
+  const [roomSurfaceResult, setRoomSurfaceResult] = useState<RoomSurfaceConstructionResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -736,6 +807,7 @@ function ScannerFinishedView({
     setIntersectionResult(null)
     setSupportConsistencyWarnings([])
     setBoundaryResult(null)
+    setRoomSurfaceResult(null)
     analysisTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) {
         return
@@ -746,6 +818,7 @@ function ScannerFinishedView({
         const nextInterpretationResult = interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType, scan)
         const nextIntersectionResult = intersectionService.analyze(nextInterpretationResult, scan)
         const nextBoundaryResult = boundaryService.reconstruct(nextInterpretationResult, nextIntersectionResult)
+        const nextRoomSurfaceResult = surfaceConstructionService.construct(nextInterpretationResult, nextBoundaryResult, scan)
         const nextSupportConsistencyWarnings = import.meta.env.DEV
           ? getStructuralSupportConsistencyWarnings(nextInterpretationResult, nextIntersectionResult)
           : []
@@ -754,6 +827,7 @@ function ScannerFinishedView({
         setIntersectionResult(nextIntersectionResult)
         setSupportConsistencyWarnings(nextSupportConsistencyWarnings)
         setBoundaryResult(nextBoundaryResult)
+        setRoomSurfaceResult(nextRoomSurfaceResult)
       } catch (error: unknown) {
         setAnalysisError(
           error instanceof Error
@@ -804,6 +878,7 @@ function ScannerFinishedView({
           analysisResult={analysisResult}
           scan={scan}
           roomBoundary={boundaryResult}
+          roomSurfaceConstruction={roomSurfaceResult}
           structuralIntersections={intersectionResult}
           structuralInterpretation={interpretationResult}
         />
@@ -822,6 +897,7 @@ function ScannerFinishedView({
           {interpretationResult ? <StructuralSurfaceSummary interpretation={interpretationResult} /> : null}
           {intersectionResult ? <StructuralIntersectionSummary result={intersectionResult} consistencyWarnings={supportConsistencyWarnings} /> : null}
           {boundaryResult ? <RoomBoundarySummary result={boundaryResult} /> : null}
+          {roomSurfaceResult ? <RoomSurfaceSummary result={roomSurfaceResult} /> : null}
           {analysisResult.stats.provisionalPlaneCount > 0 ? (
         <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">
           <div className="scanner-analysis-result-header">

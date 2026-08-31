@@ -688,6 +688,82 @@ export interface RoomBoundaryResult {
   }
 }
 
+export type RoomSurfacePatchRole = 'wall' | 'floor' | 'ceiling'
+
+export type RoomSurfacePatchCompletionStatus = 'observed' | 'partial' | 'structurally-completed'
+
+export type RoomSurfaceBoundaryProvenance =
+  | 'structural-intersection'
+  | 'canonical-corner'
+  | 'observed-support-extent'
+  | 'partial-completion'
+
+export interface RoomSurfaceLocalPoint {
+  readonly u: number
+  readonly v: number
+}
+
+export interface RoomSurfacePlaneBasis {
+  readonly origin: SpatialPoint
+  readonly axisU: SpatialPoint
+  readonly axisV: SpatialPoint
+}
+
+export interface RoomSurfacePatchBoundary {
+  readonly start: SpatialPoint
+  readonly end: SpatialPoint
+  readonly provenance: RoomSurfaceBoundaryProvenance
+  readonly sourceIds: readonly string[]
+}
+
+export interface RoomSurfacePatch {
+  readonly id: string
+  readonly sourceSurfaceId: string
+  readonly role: RoomSurfacePatchRole
+  readonly vertices3D: readonly SpatialPoint[]
+  readonly vertices2DLocal: readonly RoomSurfaceLocalPoint[]
+  readonly triangleIndices: readonly number[]
+  readonly boundaryProvenance: readonly RoomSurfacePatchBoundary[]
+  readonly confidence: number
+  readonly completionStatus: RoomSurfacePatchCompletionStatus
+  readonly areaMetersSquared: number
+  readonly supportPointCount: number
+  readonly normal: SpatialPoint
+  readonly planeConstant: number
+  readonly basis: RoomSurfacePlaneBasis
+  readonly structuralEdgeCount: number
+  readonly supportDerivedEdgeCount: number
+  readonly canonicalCornerCount: number
+  readonly maximumPlaneResidualMeters: number
+  readonly maximumBasisRoundTripResidualMeters: number
+  readonly triangulationValid: boolean
+}
+
+export interface RoomSurfaceConstructionDiagnostics {
+  readonly inputSelectedSurfaceCount: number
+  readonly constructedPatchCount: number
+  readonly wallPatchCount: number
+  readonly floorPatchCount: number
+  readonly ceilingPatchCount: number
+  readonly skippedSurfaceIds: readonly string[]
+  readonly supportPointCounts: Readonly<Record<string, number>>
+  readonly structuralBoundaryCounts: Readonly<Record<string, number>>
+  readonly warnings: readonly string[]
+}
+
+export interface RoomSurfaceConstructionResult {
+  readonly sourceScanId: string
+  readonly surfaces: readonly RoomSurfacePatch[]
+  readonly diagnostics: RoomSurfaceConstructionDiagnostics
+  readonly timings: {
+    readonly basisConstructionMs: number
+    readonly supportProjectionMs: number
+    readonly polygonConstructionMs: number
+    readonly triangulationMs: number
+    readonly totalMs: number
+  }
+}
+
 export interface SurfaceConsensusDiagnostic {
   readonly consensusId: string
   readonly finalPlaneId: string

@@ -617,6 +617,43 @@ paths produce one room-topology corner. Rejected candidates remain diagnostics,
 and spatially distinct corners or corners with unrelated structural topology
 remain separate.
 
+M7.4 derives clean bounded room-surface patches from the selected structural
+surfaces, supported or partial M7.2 boundaries, canonical M7.3 corners, and
+the finalized fused support. Each selected plane receives a stable local
+two-dimensional basis. Finalized support is projected into that basis, robust
+support extents are bounded, and topology-backed intersection/corner
+constraints take precedence over noisy support limits. The result is a new
+immutable patch representation with 3D vertices, local vertices, indexed
+triangles, plane data, confidence, completion status, and per-edge provenance.
+
+Patch construction is intentionally open-ended. It can produce a bounded wall
+patch from a single selected surface, partial ceiling or floor patches, and
+adjacent patches that share canonical corner coordinates. It does not connect
+disconnected surfaces, invent missing boundaries, close a room, assume a
+rectangle, or snap measured planes to a Manhattan layout. A bounded support
+hull is triangulated with a deterministic ear-clipping pass rather than an
+arbitrary triangle fan, and all generated vertices are reconstructed on the
+source plane. M7.4 is therefore a clean filled-surface review stage, not the
+final room mesh or room-completion stage.
+
+The post-scan geometry direction is now:
+
+```text
+finalized fused geometry
+        |
+geometric plane extraction
+        |
+structural room-surface interpretation
+        |
+finite structural intersections
+        |
+canonical structural corners
+        |
+bounded structural surface patches
+        |
+future clean room mesh and first-person viewer
+```
+
 The longer-term post-scan direction is:
 
 ```text
