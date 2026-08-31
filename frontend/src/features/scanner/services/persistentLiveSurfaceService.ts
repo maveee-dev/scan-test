@@ -43,6 +43,11 @@ interface CompatibleSurfelResult {
 export interface PersistentLiveSurfaceFrameResult {
   persistentSurfaceMesh: DenseCoverageMesh
   candidateSurfaceMesh: DenseCoverageMesh
+  performance: {
+    normalFilteringDurationMs: number
+    fusionDurationMs: number
+    renderPreparationDurationMs: number
+  }
 }
 
 function getPerformanceTimestamp(): number {
@@ -200,7 +205,13 @@ export class PersistentLiveSurfaceService {
     this.updateSequence += 1
     this.candidateVertexOffset = 0
     this.ensureNormalCapacity(sampleCount)
+    const normalFilteringStartedAt = getPerformanceTimestamp()
     this.estimateNormals(frame, cameraPosition)
+    const normalFilteringDurationMs = Math.max(
+      0,
+      getPerformanceTimestamp() - normalFilteringStartedAt,
+    )
+    const fusionStartedAt = getPerformanceTimestamp()
     this.removeWeakSurfels(timestamp)
 
     let incomingMeasuredPointCount = 0
@@ -326,6 +337,7 @@ export class PersistentLiveSurfaceService {
       }
     }
     this.touchedSurfelIds.length = 0
+    const fusionDurationMs = Math.max(0, getPerformanceTimestamp() - fusionStartedAt)
 
     this.diagnostics = {
       ...this.diagnostics,
@@ -363,9 +375,20 @@ export class PersistentLiveSurfaceService {
     this.diagnostics.updateRateHz = this.diagnostics.updateCount /
       Math.max(1, (timestamp - this.firstUpdateAt) / 1000)
 
+    const renderPreparationStartedAt = getPerformanceTimestamp()
+    const persistentSurfaceMesh = this.buildMesh(debugVisible)
+    const candidateSurfaceMesh = this.buildCandidateMesh()
     return {
-      persistentSurfaceMesh: this.buildMesh(debugVisible),
-      candidateSurfaceMesh: this.buildCandidateMesh(),
+      persistentSurfaceMesh,
+      candidateSurfaceMesh,
+      performance: {
+        normalFilteringDurationMs,
+        fusionDurationMs,
+        renderPreparationDurationMs: Math.max(
+          0,
+          getPerformanceTimestamp() - renderPreparationStartedAt,
+        ),
+      },
     }
   }
 
@@ -848,10 +871,21 @@ export class PersistentLiveSurfaceService {
     let partialPersistentSurfelCount = 0
     let observedPersistentSurfelCount = 0
     let unknownPersistentSurfelCount = 0
+    let weakSurfelCount = 0
+    let confirmedSurfelCount = 0
+    let stableSurfelCount = 0
     const debugOpacity = 0.16
     for (const surfel of this.surfels) {
       if (!surfel.active) {
         continue
+      }
+
+      if (surfel.geometryState === 'new') {
+        weakSurfelCount += 1
+      } else if (surfel.geometryState === 'confirmed') {
+        confirmedSurfelCount += 1
+      } else {
+        stableSurfelCount += 1
       }
 
       if (surfel.visualConfidence <= 0) {
@@ -889,21 +923,9 @@ export class PersistentLiveSurfaceService {
     this.diagnostics.partialPersistentSurfelCount = partialPersistentSurfelCount
     this.diagnostics.observedPersistentSurfelCount = observedPersistentSurfelCount
     this.diagnostics.unknownPersistentSurfelCount = unknownPersistentSurfelCount
-    this.diagnostics.weakSurfelCount = 0
-    this.diagnostics.confirmedSurfelCount = 0
-    this.diagnostics.stableSurfelCount = 0
-    for (const surfel of this.surfels) {
-      if (!surfel || !surfel.active) {
-        continue
-      }
-      if (surfel.geometryState === 'new') {
-        this.diagnostics.weakSurfelCount += 1
-      } else if (surfel.geometryState === 'confirmed') {
-        this.diagnostics.confirmedSurfelCount += 1
-      } else {
-        this.diagnostics.stableSurfelCount += 1
-      }
-    }
+    this.diagnostics.weakSurfelCount = weakSurfelCount
+    this.diagnostics.confirmedSurfelCount = confirmedSurfelCount
+    this.diagnostics.stableSurfelCount = stableSurfelCount
 
     this.meshRevision += 1
     requiredFloats = offset

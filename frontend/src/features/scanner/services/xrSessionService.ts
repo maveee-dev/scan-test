@@ -4,6 +4,7 @@ import type {
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
   SpatialPointDebug,
+  SpatialPointObservation,
   DenseMaskStabilizationOptions,
   XRPresentationStatus,
   ViewerPoseDebug,
@@ -27,6 +28,9 @@ import {
   DENSE_MASK_ROWS,
 } from './spatialCoverageVisualConfig'
 import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
+import {
+  LivePerformanceTracker,
+} from './livePerformanceService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -77,23 +81,19 @@ interface ReferenceSpaceResult {
   type: ScannerReferenceSpaceType
 }
 
-function createPosition(position: DOMPointReadOnly): ViewerPosition {
-  return {
-    x: position.x,
-    y: position.y,
-    z: position.z,
-  }
+function updatePosition(target: ViewerPosition, position: DOMPointReadOnly): void {
+  target.x = position.x
+  target.y = position.y
+  target.z = position.z
 }
 
-function createViewerDirection(orientation: DOMPointReadOnly): ViewerDirection {
+function updateViewerDirection(target: ViewerDirection, orientation: DOMPointReadOnly): void {
   // Rotate the camera's local forward vector (0, 0, -1) by the XR pose
   // quaternion. This is only used for distinct-observation gating.
   const { x, y, z, w } = orientation
-  return {
-    x: -2 * (w * y + x * z),
-    y: 2 * (w * x - y * z),
-    z: -1 + 2 * (x * x + y * y),
-  }
+  target.x = -2 * (w * y + x * z)
+  target.y = 2 * (w * x - y * z)
+  target.z = -1 + 2 * (x * x + y * y)
 }
 
 function createError(
@@ -144,6 +144,8 @@ export class XRSessionService {
 
   private readonly finalizedSpatialScanService = new FinalizedSpatialScanService()
 
+  private readonly performanceTracker = new LivePerformanceTracker()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -175,6 +177,8 @@ export class XRSessionService {
   private position: ViewerPosition | null = null
 
   private viewerDirection: ViewerDirection | null = null
+
+  private latestSpatialObservations: readonly SpatialPointObservation[] = []
 
   private rawCurrentDepthVisible = false
 
@@ -450,12 +454,15 @@ export class XRSessionService {
     }
 
     const processFrame: XRFrameRequestCallback = (time, frame) => {
+      const frameStartedAt = getPerformanceTimestamp()
       this.frameRequestId = null
       this.xrFrameCount += 1
 
       if (!this.isActiveSession(session) || this.isEnding) {
         return
       }
+
+      this.performanceTracker.beginFrame(time, frameStartedAt)
 
       try {
         this.presentationService.clearTransparentFrame()
@@ -483,35 +490,65 @@ export class XRSessionService {
       if (pose) {
         this.poseSampleCount += 1
       }
-      this.position = pose ? createPosition(pose.transform.position) : null
-      this.viewerDirection = pose
-        ? createViewerDirection(pose.transform.orientation)
-        : null
+      if (pose) {
+        this.position ??= { x: 0, y: 0, z: 0 }
+        this.viewerDirection ??= { x: 0, y: 0, z: 0 }
+        updatePosition(this.position, pose.transform.position)
+        updateViewerDirection(this.viewerDirection, pose.transform.orientation)
+      } else {
+        this.position = null
+        this.viewerDirection = null
+      }
 
-      const depthObservation = pose?.views[0]
-        ? this.depthService.inspectFrame(frame, pose.views[0])
-        : null
-      const spatialObservations = this.spatialPointService.processFrame(depthObservation)
-
+      const primaryView = pose?.views[0]
+      if (!primaryView) {
+        this.latestSpatialObservations = []
+      }
       if (
-        pose?.views[0] &&
+        primaryView &&
         time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS
       ) {
-        const depthReconstructionStartedAt = getPerformanceTimestamp()
+        const depthAcquisitionStartedAt = getPerformanceTimestamp()
+        const depthObservation = this.depthService.inspectFrame(frame, primaryView)
+        this.performanceTracker.recordStage(
+          'depthAcquisition',
+          getPerformanceTimestamp() - depthAcquisitionStartedAt,
+        )
+
+        const candidateGenerationStartedAt = getPerformanceTimestamp()
+        this.latestSpatialObservations = this.spatialPointService.processFrame(depthObservation)
+        this.performanceTracker.recordStage(
+          'candidateGeneration',
+          getPerformanceTimestamp() - candidateGenerationStartedAt,
+        )
+
+        const denseDepthStartedAt = getPerformanceTimestamp()
         const denseDepthObservation = this.depthService.inspectDenseFrame(
           frame,
-          pose.views[0],
+          primaryView,
           DENSE_MASK_COLUMNS,
           DENSE_MASK_ROWS,
         )
+        this.performanceTracker.recordStage(
+          'depthAcquisition',
+          getPerformanceTimestamp() - denseDepthStartedAt,
+        )
         if (denseDepthObservation) {
+          const densePointStartedAt = getPerformanceTimestamp()
           const densePointFrame = this.spatialPointService.processDenseFrame(
             denseDepthObservation,
           )
+          const densePointDurationMs = Math.max(
+            0,
+            getPerformanceTimestamp() - densePointStartedAt,
+          )
+          this.performanceTracker.recordStage('candidateGeneration', densePointDurationMs)
           const depthReconstructionDurationMs = Math.max(
             0,
-            getPerformanceTimestamp() - depthReconstructionStartedAt,
+            getPerformanceTimestamp() - denseDepthStartedAt,
           )
+
+          const coverageStartedAt = getPerformanceTimestamp()
           this.spatialCoverageService.processDenseFrame(
             densePointFrame,
             this.position,
@@ -519,7 +556,12 @@ export class XRSessionService {
             time,
             this.mappingPhase,
           )
+          this.performanceTracker.recordStage(
+            'coverageUpdate',
+            getPerformanceTimestamp() - coverageStartedAt,
+          )
           this.mappingPhase = (this.mappingPhase + 1) % 4
+
           const persistentSurfaceResult = this.persistentLiveSurfaceService.processFrame(
             densePointFrame,
             this.position,
@@ -527,9 +569,26 @@ export class XRSessionService {
             this.spatialCoverageService,
             this.persistentSurfelDebugVisible,
           )
+          this.performanceTracker.recordStage(
+            'normalFiltering',
+            persistentSurfaceResult.performance.normalFilteringDurationMs,
+          )
+          this.performanceTracker.recordStage(
+            'fusionUpdate',
+            persistentSurfaceResult.performance.fusionDurationMs,
+          )
+
+          const persistentRenderStartedAt = getPerformanceTimestamp()
           this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
             persistentSurfaceResult.persistentSurfaceMesh,
           )
+          this.performanceTracker.recordStage(
+            'persistentRenderPreparation',
+            persistentSurfaceResult.performance.renderPreparationDurationMs +
+              getPerformanceTimestamp() - persistentRenderStartedAt,
+          )
+
+          const candidateVisualizationStartedAt = getPerformanceTimestamp()
           this.spatialCoverageRenderService.updateCandidateSurfaceMesh(
             persistentSurfaceResult.candidateSurfaceMesh,
           )
@@ -544,8 +603,13 @@ export class XRSessionService {
           } else {
             this.spatialCoverageRenderService.clearDenseMesh()
           }
+          this.performanceTracker.recordStage(
+            'candidateVisualization',
+            getPerformanceTimestamp() - candidateVisualizationStartedAt,
+          )
           this.lastDenseMaskUpdatedAt = time
         } else {
+          const candidateVisualizationStartedAt = getPerformanceTimestamp()
           if (this.rawCurrentDepthVisible) {
             const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(time)
             this.spatialCoverageRenderService.updateDenseMesh(cachedDenseMesh)
@@ -553,16 +617,31 @@ export class XRSessionService {
             this.spatialCoverageRenderService.clearDenseMesh()
           }
           this.spatialCoverageRenderService.clearCandidateSurfaceMesh()
+          this.performanceTracker.recordStage(
+            'candidateVisualization',
+            getPerformanceTimestamp() - candidateVisualizationStartedAt,
+          )
+          this.latestSpatialObservations = []
           this.lastDenseMaskUpdatedAt = time
         }
       }
+
+      const renderStartedAt = getPerformanceTimestamp()
       this.spatialCoverageRenderService.render(pose?.views ?? [])
+      this.performanceTracker.recordStage('webGlDraw', getPerformanceTimestamp() - renderStartedAt)
 
       if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
         this.lastPublishedAt = time
-        this.spatialPointPreviewService.render(spatialObservations)
+        const previewStartedAt = getPerformanceTimestamp()
+        this.spatialPointPreviewService.render(this.latestSpatialObservations)
+        this.performanceTracker.recordStage(
+          'reactDiagnostics',
+          getPerformanceTimestamp() - previewStartedAt,
+        )
         this.publishDiagnostics(time)
       }
+
+      this.performanceTracker.endFrame(time, getPerformanceTimestamp())
 
       if (this.isActiveSession(session) && !this.isEnding) {
         try {
@@ -592,7 +671,24 @@ export class XRSessionService {
   }
 
   private publishDiagnostics(time: DOMHighResTimeStamp): void {
-    this.callbacks?.onDiagnostics({
+    const publicationStartedAt = getPerformanceTimestamp()
+    this.callbacks?.onDiagnostics(this.createDiagnosticsSnapshot(time))
+    this.performanceTracker.recordStage(
+      'reactDiagnostics',
+      getPerformanceTimestamp() - publicationStartedAt,
+    )
+  }
+
+  private createDiagnosticsSnapshot(time: number): ViewerPoseDebug {
+    const renderDiagnostics = this.spatialCoverageRenderService.getDiagnostics()
+    const denseDiagnostics = this.denseSurfaceMaskService.getDiagnostics()
+    const liveSurfaceDiagnostics = this.persistentLiveSurfaceService.getDiagnostics()
+    const coverageDiagnostics = this.spatialCoverageService.getDiagnostics(
+      renderDiagnostics,
+      denseDiagnostics,
+      liveSurfaceDiagnostics,
+    )
+    return {
       sessionActive: this.activeSession !== null,
       glContextStatus: this.glContextStatus,
       baseLayerStatus: this.baseLayerStatus,
@@ -601,17 +697,19 @@ export class XRSessionService {
       poseSampleCount: this.poseSampleCount,
       trackingStatus: this.trackingActive ? 'active' : 'waiting',
       trackingActive: this.trackingActive,
-      position: this.position,
+      position: this.position ? { ...this.position } : null,
       referenceSpaceType: this.referenceSpaceType,
       lastSampledAt: time,
       depth: this.depthService.getDiagnostics(),
       spatial: this.getSpatialPointDiagnostics(),
-      coverage: this.spatialCoverageService.getDiagnostics(
-        this.spatialCoverageRenderService.getDiagnostics(),
-        this.denseSurfaceMaskService.getDiagnostics(),
-        this.persistentLiveSurfaceService.getDiagnostics(),
-      ),
-    })
+      coverage: coverageDiagnostics,
+      performance: this.performanceTracker.getDiagnostics(time, {
+        activeSurfelCount: liveSurfaceDiagnostics.surfelCount,
+        renderedSurfelCount: liveSurfaceDiagnostics.renderedSurfelCount,
+        candidatePatchCount: liveSurfaceDiagnostics.candidateVisualSurfelCount,
+        coverageCellCount: coverageDiagnostics.totalUniqueCells,
+      }),
+    }
   }
 
   private handleFrameProcessingError(session: XRSession, error: XRSessionError): void {
@@ -645,9 +743,11 @@ export class XRSessionService {
     this.trackingActive = false
     this.position = null
     this.viewerDirection = null
+    this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
     this.isEnding = false
+    this.performanceTracker.reset(getPerformanceTimestamp())
 
     const callback = this.callbacks?.onSessionEnded
     const endReason = this.requestedEndReason ?? 'external'
@@ -719,6 +819,7 @@ export class XRSessionService {
     this.trackingActive = false
     this.position = null
     this.viewerDirection = null
+    this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
     this.scanStartedAt = null
@@ -730,6 +831,7 @@ export class XRSessionService {
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
     this.persistentLiveSurfaceService.dispose()
+    this.performanceTracker.reset(getPerformanceTimestamp())
   }
 
   private applyPresentationDiagnostics(diagnostics: XRPresentationDiagnostics): void {
@@ -738,26 +840,9 @@ export class XRSessionService {
   }
 
   private emitDiagnostics(): void {
-    this.callbacks?.onDiagnostics({
-      sessionActive: this.activeSession !== null,
-      glContextStatus: this.glContextStatus,
-      baseLayerStatus: this.baseLayerStatus,
-      referenceSpaceStatus: this.referenceSpaceStatus,
-      xrFrameCount: this.xrFrameCount,
-      poseSampleCount: this.poseSampleCount,
-      trackingStatus: this.trackingActive ? 'active' : 'waiting',
-      trackingActive: this.trackingActive,
-      position: this.position,
-      referenceSpaceType: this.referenceSpaceType,
-      lastSampledAt: Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : null,
-      depth: this.depthService.getDiagnostics(),
-      spatial: this.getSpatialPointDiagnostics(),
-      coverage: this.spatialCoverageService.getDiagnostics(
-        this.spatialCoverageRenderService.getDiagnostics(),
-        this.denseSurfaceMaskService.getDiagnostics(),
-        this.persistentLiveSurfaceService.getDiagnostics(),
-      ),
-    })
+    this.callbacks?.onDiagnostics(this.createDiagnosticsSnapshot(
+      Number.isFinite(this.lastPublishedAt) ? this.lastPublishedAt : getPerformanceTimestamp(),
+    ))
   }
 
   private getSpatialPointDiagnostics(): SpatialPointDebug {

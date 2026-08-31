@@ -7,6 +7,7 @@ import {
 import { createInitialDepthDebug } from '../services/xrDepthService'
 import { createInitialSpatialPointDebug } from '../services/spatialPointService'
 import { createInitialSpatialCoverageDebug } from '../services/spatialCoverageService'
+import { createInitialLivePerformanceDebug } from '../services/livePerformanceService'
 import type {
   FinalizedSpatialScan,
   DenseMaskStabilizationOptions,
@@ -30,6 +31,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   depth: createInitialDepthDebug(),
   spatial: createInitialSpatialPointDebug(),
   coverage: createInitialSpatialCoverageDebug(),
+  performance: createInitialLivePerformanceDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -169,6 +171,7 @@ export function useScannerSession(
                   depth: createInitialDepthDebug(),
                   spatial: createInitialSpatialPointDebug(),
                   coverage: createInitialSpatialCoverageDebug(),
+                  performance: createInitialLivePerformanceDebug(),
                 },
                 error:
                   currentState.error ??

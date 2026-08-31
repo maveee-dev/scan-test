@@ -655,6 +655,19 @@ The current browser technology direction is:
 
 The application must feature-detect WebXR, `immersive-ar`, DOM Overlay, reference spaces, and depth sensing. Capabilities are separate: immersive AR may work without depth sensing, and depth sensing may be unavailable or temporarily missing during an otherwise valid session.
 
+Live scan performance is measured in the XR service rather than inferred from
+post-scan analysis. The XR render callback remains responsible for pose and
+presentation every frame, while depth sampling, dense point reconstruction,
+persistent surfel fusion, coverage processing, and transient candidate-mask
+updates run on their bounded processing cadence. The current-point preview and
+React/HUD diagnostics are also throttled because they are review telemetry, not
+scan-state inputs. A fixed-size rolling performance tracker records observed XR
+frame interval and processing time, p95 frame time, slow-frame budgets, stage
+timings, active/rendered geometry counts, and elapsed-session windows. This
+allows Android physical tests to distinguish an immediate hot path from
+long-session load or thermal degradation without changing coverage meaning or
+fused geometry quality.
+
 Raw XR session, depth acquisition, spatial conversion, coverage fusion, and XR rendering logic remain outside presentation components. The intended flow is:
 
 ```text

@@ -154,6 +154,14 @@ function formatVisualConfidence(confidence: number): string {
   return Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : 'N/A'
 }
 
+function formatPerformanceMilliseconds(value: number): string {
+  return Number.isFinite(value) ? `${value.toFixed(1)} ms` : 'N/A'
+}
+
+function formatPerformancePercentage(value: number): string {
+  return Number.isFinite(value) ? `${value.toFixed(1)}%` : 'N/A'
+}
+
 function formatMeterRange(value: number | null): string {
   return value !== null && Number.isFinite(value) ? `${value.toFixed(2)} m` : 'N/A'
 }
@@ -437,6 +445,103 @@ function ScannerDomOverlay({
             <div>
               <span>Valid poses received</span>
               <strong>{sessionState.debug.poseSampleCount}</strong>
+            </div>
+          </div>
+
+          <div className="xr-dom-overlay-depth" aria-label="Live performance diagnostics">
+            <div className="xr-dom-overlay-depth-header">
+              <span>Live performance</span>
+              <strong>{sessionState.debug.performance.fps.toFixed(1)} FPS</strong>
+            </div>
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Avg / p95 frame</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.averageFrameTimeMs)} / {formatPerformanceMilliseconds(sessionState.debug.performance.p95FrameTimeMs)}</strong>
+              </div>
+              <div>
+                <span>Avg XR interval</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.averageFrameIntervalMs)}</strong>
+              </div>
+              <div>
+                <span>Slow &gt; 16.7 / 22 ms</span>
+                <strong>{formatPerformancePercentage(sessionState.debug.performance.frameOver16Point7MsPercentage)} ({sessionState.debug.performance.frameOver16Point7MsCount}) / {formatPerformancePercentage(sessionState.debug.performance.frameOver22MsPercentage)} ({sessionState.debug.performance.frameOver22MsCount})</strong>
+              </div>
+              <div>
+                <span>Slow &gt; 33 ms / dropped</span>
+                <strong>{formatPerformancePercentage(sessionState.debug.performance.frameOver33MsPercentage)} ({sessionState.debug.performance.frameOver33MsCount}) / {sessionState.debug.performance.droppedFrameCount}</strong>
+              </div>
+              <div>
+                <span>XR session elapsed</span>
+                <strong>{(sessionState.debug.performance.xrSessionElapsedMs / 1000).toFixed(1)} s</strong>
+              </div>
+              <div>
+                <span>Rolling frames</span>
+                <strong>{sessionState.debug.performance.frameCount}</strong>
+              </div>
+            </div>
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Depth acquisition</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.depthAcquisitionMs)}</strong>
+              </div>
+              <div>
+                <span>Point generation</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.candidateGenerationMs)}</strong>
+              </div>
+              <div>
+                <span>Normal filtering</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.normalFilteringMs)}</strong>
+              </div>
+              <div>
+                <span>Surfel fusion</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.fusionUpdateMs)}</strong>
+              </div>
+              <div>
+                <span>Coverage update</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.coverageUpdateMs)}</strong>
+              </div>
+              <div>
+                <span>Candidate visualization</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.candidateVisualizationMs)}</strong>
+              </div>
+              <div>
+                <span>Persistent render prep</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.persistentRenderPreparationMs)}</strong>
+              </div>
+              <div>
+                <span>WebGL draw work</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.webGlDrawMs)}</strong>
+              </div>
+              <div>
+                <span>HUD diagnostics</span>
+                <strong>{formatPerformanceMilliseconds(sessionState.debug.performance.reactDiagnosticsMs)}</strong>
+              </div>
+            </div>
+            <div className="xr-dom-overlay-counts">
+              <div>
+                <span>Active surfels</span>
+                <strong>{sessionState.debug.performance.activeSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Rendered surfels</span>
+                <strong>{sessionState.debug.performance.renderedSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Candidate patches</span>
+                <strong>{sessionState.debug.performance.candidatePatchCount}</strong>
+              </div>
+              <div>
+                <span>Coverage cells</span>
+                <strong>{sessionState.debug.performance.coverageCellCount}</strong>
+              </div>
+            </div>
+            <div className="xr-dom-overlay-depth-samples">
+              {sessionState.debug.performance.performanceWindows.map((window) => (
+                <div key={window.label}>
+                  <span>{window.label}</span>
+                  <strong>{window.frameCount} frames / {window.fps.toFixed(1)} FPS / slow {window.slowFramePercentage.toFixed(1)}%</strong>
+                </div>
+              ))}
             </div>
           </div>
 

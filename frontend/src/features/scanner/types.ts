@@ -437,6 +437,45 @@ export interface SpatialCoverageDebug {
   liveSurface: PersistentLiveSurfaceDebug
 }
 
+export interface LivePerformanceWindowDebug {
+  label: '0-10 s' | '10-20 s' | '20-40 s' | '40+ s'
+  frameCount: number
+  averageFrameTimeMs: number
+  fps: number
+  slowFramePercentage: number
+}
+
+export interface LivePerformanceDebug {
+  frameCount: number
+  fps: number
+  averageFrameIntervalMs: number
+  averageFrameTimeMs: number
+  p95FrameTimeMs: number
+  /** Approximate missed-60Hz-slot count: processing time over 33 ms. */
+  droppedFrameCount: number
+  frameOver16Point7MsCount: number
+  frameOver22MsCount: number
+  frameOver33MsCount: number
+  frameOver16Point7MsPercentage: number
+  frameOver22MsPercentage: number
+  frameOver33MsPercentage: number
+  depthAcquisitionMs: number
+  candidateGenerationMs: number
+  normalFilteringMs: number
+  fusionUpdateMs: number
+  coverageUpdateMs: number
+  candidateVisualizationMs: number
+  persistentRenderPreparationMs: number
+  webGlDrawMs: number
+  reactDiagnosticsMs: number
+  activeSurfelCount: number
+  renderedSurfelCount: number
+  candidatePatchCount: number
+  coverageCellCount: number
+  xrSessionElapsedMs: number
+  performanceWindows: readonly LivePerformanceWindowDebug[]
+}
+
 export interface DenseCoverageMesh {
   revision: number
   vertexData: Float32Array
@@ -493,6 +532,7 @@ export interface ViewerPoseDebug {
   depth: XRDepthDebug
   spatial: SpatialPointDebug
   coverage: SpatialCoverageDebug
+  performance: LivePerformanceDebug
 }
 
 export interface ScannerSessionState {
