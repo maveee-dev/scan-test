@@ -256,6 +256,8 @@ export interface StructuralPairSupportEvidence {
   readonly supportsNearTheoreticalIntersection: boolean
 }
 
+export type StructuralTriadGateStatus = 'pass' | 'fail'
+
 export interface StructuralMultiSurfaceCoherenceDiagnostic {
   readonly candidatePlaneId: string
   readonly existingWallPlaneId: string
@@ -280,6 +282,14 @@ export interface StructuralMultiSurfaceCoherenceDiagnostic {
   }
   readonly triplePointSupportScore: number
   readonly multiSurfaceCoherenceScore: number
+  /** Mandatory evidence gates are evaluated before coherence can select a triad. */
+  readonly wallWallSupportGate: StructuralTriadGateStatus
+  readonly wallHorizontalSupportGateA: StructuralTriadGateStatus
+  readonly wallHorizontalSupportGateB: StructuralTriadGateStatus
+  readonly triplePointSupportGate: StructuralTriadGateStatus
+  readonly geometryGate: StructuralTriadGateStatus
+  readonly coherenceGate: StructuralTriadGateStatus
+  readonly decision: 'selected' | 'rejected'
   readonly selected: boolean
   readonly reason: string
 }

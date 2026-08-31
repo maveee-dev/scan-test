@@ -64,6 +64,7 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly multiSurfaceRedundancyAngleDegrees: number
   readonly minimumTriadCandidateAngleDegrees: number
   readonly triadPointSupportDistanceMeters: number
+  readonly minimumTriadPointSupportCountPerSurface: number
   readonly minimumTriadPointSupportScore: number
   readonly minimumTriadPlaneDeterminant: number
 }
@@ -101,6 +102,7 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   multiSurfaceRedundancyAngleDegrees: 18,
   minimumTriadCandidateAngleDegrees: 45,
   triadPointSupportDistanceMeters: 0.2,
+  minimumTriadPointSupportCountPerSurface: 2,
   minimumTriadPointSupportScore: 0.35,
   minimumTriadPlaneDeterminant: 0.2,
 }
@@ -1377,9 +1379,17 @@ function getBestMultiSurfaceCoherence(
       clamp(existingPointSupport.supportCount / 4, 0, 1) *
       clamp(horizontalPointSupport.supportCount / 4, 0, 1),
     )
-    const hasWallWallSupport = wallWallSupport.supportsNearTheoreticalIntersection
-    const hasTriplePointSupport = triplePointSupportCounts.candidate > 0 &&
-      triplePointSupportCounts.existing > 0 && triplePointSupportCounts.horizontal > 0
+    const geometryGate = triplePointResult.point ? 'pass' : 'fail'
+    const wallWallSupportGate = wallWallSupport.supportsNearTheoreticalIntersection ? 'pass' : 'fail'
+    const wallHorizontalSupportGateA = candidateHorizontalSupport.supportsNearTheoreticalIntersection ? 'pass' : 'fail'
+    const wallHorizontalSupportGateB = existingHorizontalSupport?.supportsNearTheoreticalIntersection ? 'pass' : 'fail'
+    const triplePointSupportGate = geometryGate === 'pass' &&
+      triplePointSupportScore >= config.minimumTriadPointSupportScore &&
+      triplePointSupportCounts.candidate >= config.minimumTriadPointSupportCountPerSurface &&
+      triplePointSupportCounts.existing >= config.minimumTriadPointSupportCountPerSurface &&
+      triplePointSupportCounts.horizontal >= config.minimumTriadPointSupportCountPerSurface
+      ? 'pass'
+      : 'fail'
     const wallWallEdge = getBestGraphEdgeBetween(
       candidate.context.plane.id,
       selectedWall.context.plane.id,
@@ -1400,7 +1410,10 @@ function getBestMultiSurfaceCoherence(
     )
       const existingNodeQuality = getMultiSurfaceNodeQuality(selectedWall)
       const horizontalNodeQuality = getMultiSurfaceNodeQuality(horizontalSurface)
-      const wallWallQuality = hasWallWallSupport ? wallWallSupport.intersectionSupportScore : triplePointSupportScore * 0.7
+      // A triple point cannot substitute for missing evidence along the
+      // proposed wall-wall boundary. Keep the score honest; acceptance is
+      // gated separately below.
+      const wallWallQuality = wallWallSupportGate === 'pass' ? wallWallSupport.intersectionSupportScore : 0
       const candidateHorizontalQuality = candidateHorizontalSupport.intersectionSupportScore
       const existingHorizontalQuality = existingHorizontalSupport?.intersectionSupportScore ?? 0
       const pairQuality = existingHorizontalSupport
@@ -1412,6 +1425,30 @@ function getBestMultiSurfaceCoherence(
         0,
         1,
       )
+      const coherenceGate = multiSurfaceCoherenceScore >= config.minimumMultiSurfaceCoherenceScore ? 'pass' : 'fail'
+      const decision = geometryGate === 'pass' &&
+        wallWallSupportGate === 'pass' &&
+        wallHorizontalSupportGateA === 'pass' &&
+        wallHorizontalSupportGateB === 'pass' &&
+        triplePointSupportGate === 'pass' &&
+        coherenceGate === 'pass'
+        ? 'selected'
+        : 'rejected'
+      const reason = geometryGate === 'fail'
+        ? 'triad rejected: three-plane point is unstable'
+        : wallWallSupportGate === 'fail'
+          ? 'triad rejected: insufficient wall-wall support'
+          : wallHorizontalSupportGateA === 'fail'
+            ? 'triad rejected: insufficient candidate wall-horizontal support'
+            : wallHorizontalSupportGateB === 'fail'
+              ? 'triad rejected: insufficient existing wall-horizontal support'
+              : triplePointSupportGate === 'fail'
+                ? 'triad rejected: insufficient balanced triple-point support'
+                : coherenceGate === 'fail'
+                  ? 'triad rejected: insufficient multi-surface coherence score'
+                  : existingHorizontalEdge
+                    ? 'coherent wall-wall-horizontal triad'
+                    : 'coherent wall-wall-horizontal triad; anchor horizontal relationship unavailable'
       options.push({
         candidatePlaneId: candidate.context.plane.id,
         existingWallPlaneId: selectedWall.context.plane.id,
@@ -1432,14 +1469,15 @@ function getBestMultiSurfaceCoherence(
         triplePointSupportCounts,
         triplePointSupportScore,
         multiSurfaceCoherenceScore,
+        wallWallSupportGate,
+        wallHorizontalSupportGateA,
+        wallHorizontalSupportGateB,
+        triplePointSupportGate,
+        geometryGate,
+        coherenceGate,
+        decision,
         selected: false,
-        reason: !triplePointResult.point
-          ? 'triad rejected: three-plane point is unstable'
-          : !hasWallWallSupport && !hasTriplePointSupport
-            ? 'triad rejected: insufficient support near wall-wall line and triple point'
-            : existingHorizontalEdge
-              ? 'coherent wall-wall-horizontal triad'
-              : 'coherent wall-wall-horizontal triad; anchor horizontal relationship unavailable',
+        reason,
       })
     }
   }
@@ -1817,14 +1855,16 @@ export class StructuralSurfaceInterpretationService {
         if (!multiSurfaceDiagnosticByKey.has(key)) {
           multiSurfaceDiagnosticByKey.set(key, diagnostic)
         }
-        const hasPairOrTripleSupport = diagnostic.wallWallSupport.supportsNearTheoreticalIntersection ||
-          diagnostic.triplePointSupportScore >= this.config.minimumTriadPointSupportScore
-        if (!hasPairOrTripleSupport || diagnostic.multiSurfaceCoherenceScore < this.config.minimumMultiSurfaceCoherenceScore) {
+        const mandatoryGatesPassed = diagnostic.geometryGate === 'pass' &&
+          diagnostic.wallWallSupportGate === 'pass' &&
+          diagnostic.wallHorizontalSupportGateA === 'pass' &&
+          diagnostic.wallHorizontalSupportGateB === 'pass' &&
+          diagnostic.triplePointSupportGate === 'pass'
+        if (!mandatoryGatesPassed || diagnostic.coherenceGate === 'fail') {
           multiSurfaceDiagnosticByKey.set(key, {
             ...diagnostic,
-            reason: !hasPairOrTripleSupport
-              ? 'insufficient actual support near wall-wall line and triple point'
-              : 'insufficient multi-surface coherence score',
+            decision: 'rejected',
+            selected: false,
           })
           continue
         }
@@ -1836,7 +1876,7 @@ export class StructuralSurfaceInterpretationService {
           candidate.context.plane.id,
           Math.max(multiSurfaceCoherenceByPlaneId.get(candidate.context.plane.id) ?? 0, diagnostic.multiSurfaceCoherenceScore),
         )
-        multiSurfaceDiagnosticByKey.set(key, { ...diagnostic, selected: true })
+        multiSurfaceDiagnosticByKey.set(key, { ...diagnostic, decision: 'selected', selected: true })
         addSelectedWall(candidate, 'coherent wall-wall-horizontal triad')
         addedTriadWall = true
         break

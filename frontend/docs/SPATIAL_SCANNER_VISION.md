@@ -527,11 +527,16 @@ Triad discovery is intentionally broader than graph-edge acceptance. When two
 meaningfully different wall directions both have actual near-theoretical-line
 support against the same selected ceiling or floor, they can form a provisional
 three-surface candidate even if noisy wall normals prevented a qualifying
-wall-wall graph edge. The candidate is accepted only after a stable three-plane
-point, wall-wall evidence or direct triple-point support, and a bounded
-multi-surface coherence score agree. This prevents mobile-depth angle noise from
-blocking a real wall-plus-wall-plus-horizontal structure without promoting
-surfaces that merely touch a horizontal plane in unrelated locations.
+wall-wall graph edge. Candidate discovery remains broad, but acceptance has
+mandatory evidence gates before the continuous coherence score is considered:
+the three-plane geometry must be stable, both wall-horizontal relationships
+must have observed support, the wall-wall theoretical intersection must have
+actual two-sided support, and each of the three surfaces must contribute
+meaningful support near the common triple point. A high aggregate coherence
+score cannot compensate for an essential relationship with no observed
+support. This prevents mobile-depth angle noise from blocking a real
+wall-plus-wall-plus-horizontal structure without promoting surfaces that merely
+touch a horizontal plane in unrelated locations.
 
 Selected structural surfaces then feed the M7.2 intersection stage:
 
