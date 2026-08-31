@@ -248,17 +248,37 @@ export interface StructuralCorePairCandidate {
   readonly selected: boolean
 }
 
+export interface StructuralPairSupportEvidence {
+  readonly intersectionSupportScore: number
+  readonly nearLineSupportCountA: number
+  readonly nearLineSupportCountB: number
+  readonly closestSupportDistanceMeters: number | null
+  readonly supportsNearTheoreticalIntersection: boolean
+}
+
 export interface StructuralMultiSurfaceCoherenceDiagnostic {
   readonly candidatePlaneId: string
   readonly existingWallPlaneId: string
   readonly horizontalPlaneId: string
   readonly wallWallEdgeScore: number
+  readonly wallWallAngleDegrees: number
+  readonly wallWallSupport: StructuralPairSupportEvidence
+  readonly candidateHorizontalSupport: StructuralPairSupportEvidence
+  readonly existingHorizontalSupport: StructuralPairSupportEvidence | null
   readonly candidateHorizontalEdgeScore: number
   readonly existingHorizontalEdgeScore: number
   readonly candidateNodeQuality: number
   readonly existingNodeQuality: number
   readonly horizontalNodeQuality: number
   readonly orientationNoveltyScore: number
+  readonly threePlanePoint: SpatialPoint | null
+  readonly threePlaneDeterminant: number
+  readonly triplePointSupportCounts: {
+    readonly candidate: number
+    readonly existing: number
+    readonly horizontal: number
+  }
+  readonly triplePointSupportScore: number
   readonly multiSurfaceCoherenceScore: number
   readonly selected: boolean
   readonly reason: string

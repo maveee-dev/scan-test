@@ -297,7 +297,7 @@ function StructuralSurfaceSummary({
       {topTriadCandidates.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>
-            Multi-surface coherence: {topTriadCandidates.map((candidate) => `${candidate.candidatePlaneId} with ${candidate.existingWallPlaneId} + ${candidate.horizontalPlaneId} | wall-wall ${candidate.wallWallEdgeScore.toFixed(2)} | candidate-horizontal ${candidate.candidateHorizontalEdgeScore.toFixed(2)} | node ${candidate.candidateNodeQuality.toFixed(2)} | coherence ${candidate.multiSurfaceCoherenceScore.toFixed(2)}${candidate.selected ? ' [selected]' : ` [${candidate.reason}]`}`).join(' | ')}
+            Multi-surface candidates: {topTriadCandidates.map((candidate) => `${candidate.candidatePlaneId} with ${candidate.existingWallPlaneId} + ${candidate.horizontalPlaneId} | wall angle ${candidate.wallWallAngleDegrees.toFixed(1)} deg | line support A/B ${candidate.wallWallSupport.nearLineSupportCountA}/${candidate.wallWallSupport.nearLineSupportCountB} (${candidate.wallWallSupport.intersectionSupportScore.toFixed(2)}) | horizontal support ${candidate.candidateHorizontalSupport.intersectionSupportScore.toFixed(2)} | triple support ${candidate.triplePointSupportCounts.candidate}/${candidate.triplePointSupportCounts.existing}/${candidate.triplePointSupportCounts.horizontal} (${candidate.triplePointSupportScore.toFixed(2)}) | triple point ${candidate.threePlanePoint ? formatPoint(candidate.threePlanePoint) : 'none'} | node ${candidate.candidateNodeQuality.toFixed(2)} | coherence ${candidate.multiSurfaceCoherenceScore.toFixed(2)}${candidate.selected ? ' [selected]' : ` [${candidate.reason}]`}`).join(' | ')}
           </span>
         </div>
       ) : null}

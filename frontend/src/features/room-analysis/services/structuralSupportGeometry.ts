@@ -40,6 +40,17 @@ export interface PlaneIntersectionCalculation {
   readonly reason: string | null
 }
 
+export interface ThreePlaneIntersectionCalculation {
+  readonly point: SpatialPoint | null
+  readonly determinant: number
+  readonly reason: string | null
+}
+
+export interface PointSupportSummary {
+  readonly supportCount: number
+  readonly minimumDistance: number
+}
+
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -152,8 +163,62 @@ export function computePlanePlaneIntersectionLine(
   return { line: { origin, direction }, reason: null }
 }
 
+/** Solve the exact intersection of three planes represented as n dot x = c. */
+export function computeThreePlaneIntersectionPoint(
+  first: NormalizedSupportPlane,
+  second: NormalizedSupportPlane,
+  third: NormalizedSupportPlane,
+  minimumDeterminantMagnitude: number,
+): ThreePlaneIntersectionCalculation {
+  const secondCrossThird = cross(second.normal, third.normal)
+  const thirdCrossFirst = cross(third.normal, first.normal)
+  const firstCrossSecond = cross(first.normal, second.normal)
+  const determinant = dot(first.normal, secondCrossThird)
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= minimumDeterminantMagnitude) {
+    return { point: null, determinant, reason: 'three-plane system is singular or nearly singular' }
+  }
+  const point = scale({
+    x: first.planeConstant * secondCrossThird.x +
+      second.planeConstant * thirdCrossFirst.x +
+      third.planeConstant * firstCrossSecond.x,
+    y: first.planeConstant * secondCrossThird.y +
+      second.planeConstant * thirdCrossFirst.y +
+      third.planeConstant * firstCrossSecond.y,
+    z: first.planeConstant * secondCrossThird.z +
+      second.planeConstant * thirdCrossFirst.z +
+      third.planeConstant * firstCrossSecond.z,
+  }, 1 / determinant)
+  if (!isFinitePoint(point)) {
+    return { point: null, determinant, reason: 'three-plane point was not finite' }
+  }
+  return { point, determinant, reason: null }
+}
+
 export function distancePointToLine(point: SpatialPoint, line: StructuralIntersectionLine): number {
   return magnitude(cross(subtract(point, line.origin), line.direction))
+}
+
+export function collectSupportNearPoint(
+  points: readonly SpatialPoint[],
+  target: SpatialPoint,
+  maximumDistanceMeters: number,
+): PointSupportSummary {
+  let supportCount = 0
+  let minimumDistance = Infinity
+  for (const point of points) {
+    if (!isFinitePoint(point)) {
+      continue
+    }
+    const pointDistance = magnitude(subtract(point, target))
+    if (!Number.isFinite(pointDistance)) {
+      continue
+    }
+    minimumDistance = Math.min(minimumDistance, pointDistance)
+    if (pointDistance <= maximumDistanceMeters) {
+      supportCount += 1
+    }
+  }
+  return { supportCount, minimumDistance }
 }
 
 export function collectNearLineSupport(

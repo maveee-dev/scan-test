@@ -9,6 +9,7 @@ import type {
   StructuralGraphNode,
   StructuralCorePairCandidate,
   StructuralMultiSurfaceCoherenceDiagnostic,
+  StructuralPairSupportEvidence,
   StructuralParallelLane,
   StructuralRelationshipType,
   StructuralSurfaceCandidate,
@@ -20,8 +21,10 @@ import type {
 } from '../types'
 import {
   associateFinalizedSupportPoints,
+  collectSupportNearPoint,
   collectNearLineSupport,
   computePlanePlaneIntersectionLine,
+  computeThreePlaneIntersectionPoint,
   normalizeSupportPlane,
   type SupportPlaneGeometry,
 } from './structuralSupportGeometry'
@@ -59,6 +62,10 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly selectedWallRedundancyAngleDegrees: number
   readonly minimumMultiSurfaceCoherenceScore: number
   readonly multiSurfaceRedundancyAngleDegrees: number
+  readonly minimumTriadCandidateAngleDegrees: number
+  readonly triadPointSupportDistanceMeters: number
+  readonly minimumTriadPointSupportScore: number
+  readonly minimumTriadPlaneDeterminant: number
 }
 
 export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurfaceInterpretationConfig = {
@@ -92,6 +99,10 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   selectedWallRedundancyAngleDegrees: 18,
   minimumMultiSurfaceCoherenceScore: 0.62,
   multiSurfaceRedundancyAngleDegrees: 18,
+  minimumTriadCandidateAngleDegrees: 45,
+  triadPointSupportDistanceMeters: 0.2,
+  minimumTriadPointSupportScore: 0.35,
+  minimumTriadPlaneDeterminant: 0.2,
 }
 
 const WORLD_UP = { x: 0, y: 1, z: 0 }
@@ -1224,14 +1235,56 @@ function getMultiSurfaceNodeQuality(evaluation: RoleEvaluation): number {
   return getStructuralNodeQuality(evaluation)
 }
 
+function getPairSupportEvidence(
+  relationship: StructuralSurfaceRelationship | null,
+): StructuralPairSupportEvidence {
+  return relationship
+    ? {
+      intersectionSupportScore: relationship.intersectionSupportScore,
+      nearLineSupportCountA: relationship.nearTheoreticalLineSupportCountA,
+      nearLineSupportCountB: relationship.nearTheoreticalLineSupportCountB,
+      closestSupportDistanceMeters: relationship.closestSurfaceSupportDistanceMeters,
+      supportsNearTheoreticalIntersection: relationship.supportsNearTheoreticalIntersection,
+    }
+    : {
+      intersectionSupportScore: 0,
+      nearLineSupportCountA: 0,
+      nearLineSupportCountB: 0,
+      closestSupportDistanceMeters: null,
+      supportsNearTheoreticalIntersection: false,
+    }
+}
+
+function getNormalizedPlane(
+  plane: PlaneCandidate,
+): ReturnType<typeof normalizeSupportPlane> {
+  return normalizeSupportPlane({
+    id: plane.id,
+    normal: plane.normal,
+    planeConstant: plane.planeConstant,
+    centroid: plane.centroid,
+    localBounds: plane.localBounds,
+    tangentU: plane.tangentU,
+    tangentV: plane.tangentV,
+  })
+}
+
 function getBestMultiSurfaceCoherence(
   candidate: RoleEvaluation,
   selectedWalls: readonly RoleEvaluation[],
   horizontalSurfaces: readonly RoleEvaluation[],
+  relationships: readonly StructuralSurfaceRelationship[],
+  supportIndex: RelationshipSupportIndex | null,
   graphEdges: readonly StructuralGraphEdge[],
   config: StructuralSurfaceInterpretationConfig,
 ): StructuralMultiSurfaceCoherenceDiagnostic | null {
   if (candidate.role !== 'wall' || !isEnvelopeEligible(candidate, config)) {
+    return null
+  }
+  const redundantWithSelected = selectedWalls.some((selectedWall) =>
+    getNormalAngleDegrees(candidate.context.plane, selectedWall.context.plane) <= config.multiSurfaceRedundancyAngleDegrees &&
+    !isIndependentParallelWall(selectedWall, candidate, config))
+  if (redundantWithSelected) {
     return null
   }
   const candidateNodeQuality = getMultiSurfaceNodeQuality(candidate)
@@ -1240,44 +1293,122 @@ function getBestMultiSurfaceCoherence(
     if (selectedWall.context.plane.id === candidate.context.plane.id) {
       continue
     }
-    const orientationNoveltyScore = getOrientationNoveltyScore(candidate, selectedWall, config)
-    if (orientationNoveltyScore <= 0) {
+    const wallWallAngleDegrees = getNormalAngleDegrees(candidate.context.plane, selectedWall.context.plane)
+    if (wallWallAngleDegrees < config.minimumTriadCandidateAngleDegrees) {
       continue
     }
+    const orientationNoveltyScore = getOrientationNoveltyScore(candidate, selectedWall, config)
+    for (const horizontalSurface of horizontalSurfaces) {
+    const wallWallRelationship = getRelationshipBetween(
+      candidate.context.plane.id,
+      selectedWall.context.plane.id,
+      relationships,
+    )
+    const candidateToHorizontalRelationship = getRelationshipBetween(
+      candidate.context.plane.id,
+      horizontalSurface.context.plane.id,
+      relationships,
+    )
+    const existingToHorizontalRelationship = getRelationshipBetween(
+      selectedWall.context.plane.id,
+      horizontalSurface.context.plane.id,
+      relationships,
+    )
+    const candidateHorizontalSupport = getPairSupportEvidence(candidateToHorizontalRelationship)
+    const existingHorizontalSupport = existingToHorizontalRelationship
+      ? getPairSupportEvidence(existingToHorizontalRelationship)
+      : null
+    // Discovery intentionally starts from two independent, supported
+    // wall-horizontal relationships. A wall-wall graph edge is optional here;
+    // its quality is evaluated later rather than used as a gate.
+    if (!candidateToHorizontalRelationship ||
+      candidateToHorizontalRelationship.relationshipType !== 'perpendicular-like' ||
+      !candidateToHorizontalRelationship.supportsNearTheoreticalIntersection ||
+      !existingToHorizontalRelationship ||
+      existingToHorizontalRelationship.relationshipType !== 'perpendicular-like' ||
+      !existingToHorizontalRelationship.supportsNearTheoreticalIntersection) {
+      continue
+    }
+
+    const wallWallSupport = getPairSupportEvidence(wallWallRelationship)
+    const candidatePlane = getNormalizedPlane(candidate.context.plane)
+    const existingPlane = getNormalizedPlane(selectedWall.context.plane)
+    const horizontalPlane = getNormalizedPlane(horizontalSurface.context.plane)
+    const triplePointResult = candidatePlane && existingPlane && horizontalPlane
+      ? computeThreePlaneIntersectionPoint(
+        candidatePlane,
+        existingPlane,
+        horizontalPlane,
+        config.minimumTriadPlaneDeterminant,
+      )
+      : {
+        point: null,
+        determinant: 0,
+        reason: 'one or more triad plane normals are invalid',
+      }
+    const candidatePointSupport = triplePointResult.point
+      ? collectSupportNearPoint(
+      supportIndex?.pointsBySurfaceId.get(candidate.context.plane.id) ?? [],
+      triplePointResult.point,
+      config.triadPointSupportDistanceMeters,
+      )
+      : { supportCount: 0, minimumDistance: Infinity }
+    const existingPointSupport = triplePointResult.point
+      ? collectSupportNearPoint(
+      supportIndex?.pointsBySurfaceId.get(selectedWall.context.plane.id) ?? [],
+      triplePointResult.point,
+      config.triadPointSupportDistanceMeters,
+      )
+      : { supportCount: 0, minimumDistance: Infinity }
+    const horizontalPointSupport = triplePointResult.point
+      ? collectSupportNearPoint(
+      supportIndex?.pointsBySurfaceId.get(horizontalSurface.context.plane.id) ?? [],
+      triplePointResult.point,
+      config.triadPointSupportDistanceMeters,
+      )
+      : { supportCount: 0, minimumDistance: Infinity }
+    const triplePointSupportCounts = {
+      candidate: candidatePointSupport.supportCount,
+      existing: existingPointSupport.supportCount,
+      horizontal: horizontalPointSupport.supportCount,
+    }
+    const triplePointSupportScore = Math.cbrt(
+      clamp(candidatePointSupport.supportCount / 4, 0, 1) *
+      clamp(existingPointSupport.supportCount / 4, 0, 1) *
+      clamp(horizontalPointSupport.supportCount / 4, 0, 1),
+    )
+    const hasWallWallSupport = wallWallSupport.supportsNearTheoreticalIntersection
+    const hasTriplePointSupport = triplePointSupportCounts.candidate > 0 &&
+      triplePointSupportCounts.existing > 0 && triplePointSupportCounts.horizontal > 0
     const wallWallEdge = getBestGraphEdgeBetween(
       candidate.context.plane.id,
       selectedWall.context.plane.id,
       'corner',
       graphEdges,
     )
-    if (!wallWallEdge || !wallWallEdge.supportNearIntersection) {
-      continue
-    }
-
-    for (const horizontalSurface of horizontalSurfaces) {
-      const candidateHorizontalEdge = getBestGraphEdgeBetween(
-        candidate.context.plane.id,
-        horizontalSurface.context.plane.id,
-        'wall-horizontal',
-        graphEdges,
-      )
-      if (!candidateHorizontalEdge || !candidateHorizontalEdge.supportNearIntersection) {
-        continue
-      }
-      const existingHorizontalEdge = getBestGraphEdgeBetween(
-        selectedWall.context.plane.id,
-        horizontalSurface.context.plane.id,
-        'wall-horizontal',
-        graphEdges,
-      )
+    const candidateHorizontalEdge = getBestGraphEdgeBetween(
+      candidate.context.plane.id,
+      horizontalSurface.context.plane.id,
+      'wall-horizontal',
+      graphEdges,
+    )
+    const existingHorizontalEdge = getBestGraphEdgeBetween(
+      selectedWall.context.plane.id,
+      horizontalSurface.context.plane.id,
+      'wall-horizontal',
+      graphEdges,
+    )
       const existingNodeQuality = getMultiSurfaceNodeQuality(selectedWall)
       const horizontalNodeQuality = getMultiSurfaceNodeQuality(horizontalSurface)
-      const pairQuality = existingHorizontalEdge
-        ? wallWallEdge.edgeScore * 0.45 + candidateHorizontalEdge.edgeScore * 0.35 + existingHorizontalEdge.edgeScore * 0.2
-        : wallWallEdge.edgeScore * 0.55 + candidateHorizontalEdge.edgeScore * 0.45
+      const wallWallQuality = hasWallWallSupport ? wallWallSupport.intersectionSupportScore : triplePointSupportScore * 0.7
+      const candidateHorizontalQuality = candidateHorizontalSupport.intersectionSupportScore
+      const existingHorizontalQuality = existingHorizontalSupport?.intersectionSupportScore ?? 0
+      const pairQuality = existingHorizontalSupport
+        ? wallWallQuality * 0.4 + candidateHorizontalQuality * 0.3 + existingHorizontalQuality * 0.3
+        : wallWallQuality * 0.5 + candidateHorizontalQuality * 0.5
       const nodeQuality = Math.cbrt(candidateNodeQuality * existingNodeQuality * horizontalNodeQuality)
       const multiSurfaceCoherenceScore = clamp(
-        pairQuality * 0.58 + nodeQuality * 0.27 + orientationNoveltyScore * 0.15,
+        pairQuality * 0.46 + nodeQuality * 0.24 + orientationNoveltyScore * 0.12 + triplePointSupportScore * 0.18,
         0,
         1,
       )
@@ -1285,18 +1416,30 @@ function getBestMultiSurfaceCoherence(
         candidatePlaneId: candidate.context.plane.id,
         existingWallPlaneId: selectedWall.context.plane.id,
         horizontalPlaneId: horizontalSurface.context.plane.id,
-        wallWallEdgeScore: wallWallEdge.edgeScore,
-        candidateHorizontalEdgeScore: candidateHorizontalEdge.edgeScore,
+        wallWallEdgeScore: wallWallEdge?.edgeScore ?? 0,
+        wallWallAngleDegrees,
+        wallWallSupport,
+        candidateHorizontalSupport,
+        existingHorizontalSupport,
+        candidateHorizontalEdgeScore: candidateHorizontalEdge?.edgeScore ?? 0,
         existingHorizontalEdgeScore: existingHorizontalEdge?.edgeScore ?? 0,
         candidateNodeQuality,
         existingNodeQuality,
         horizontalNodeQuality,
         orientationNoveltyScore,
+        threePlanePoint: triplePointResult.point,
+        threePlaneDeterminant: triplePointResult.determinant,
+        triplePointSupportCounts,
+        triplePointSupportScore,
         multiSurfaceCoherenceScore,
         selected: false,
-        reason: existingHorizontalEdge
-          ? 'coherent wall-wall-horizontal triad'
-          : 'coherent wall-wall-horizontal triad; anchor horizontal relationship unavailable',
+        reason: !triplePointResult.point
+          ? 'triad rejected: three-plane point is unstable'
+          : !hasWallWallSupport && !hasTriplePointSupport
+            ? 'triad rejected: insufficient support near wall-wall line and triple point'
+            : existingHorizontalEdge
+              ? 'coherent wall-wall-horizontal triad'
+              : 'coherent wall-wall-horizontal triad; anchor horizontal relationship unavailable',
       })
     }
   }
@@ -1660,6 +1803,8 @@ export class StructuralSurfaceInterpretationService {
           evaluation,
           selectedEvaluations,
           selectedHorizontalEvaluations,
+          relationships,
+          relationshipSupportIndex,
           graph.edges,
           this.config,
         ))
@@ -1672,10 +1817,14 @@ export class StructuralSurfaceInterpretationService {
         if (!multiSurfaceDiagnosticByKey.has(key)) {
           multiSurfaceDiagnosticByKey.set(key, diagnostic)
         }
-        if (diagnostic.multiSurfaceCoherenceScore < this.config.minimumMultiSurfaceCoherenceScore) {
+        const hasPairOrTripleSupport = diagnostic.wallWallSupport.supportsNearTheoreticalIntersection ||
+          diagnostic.triplePointSupportScore >= this.config.minimumTriadPointSupportScore
+        if (!hasPairOrTripleSupport || diagnostic.multiSurfaceCoherenceScore < this.config.minimumMultiSurfaceCoherenceScore) {
           multiSurfaceDiagnosticByKey.set(key, {
             ...diagnostic,
-            reason: 'insufficient multi-surface coherence score',
+            reason: !hasPairOrTripleSupport
+              ? 'insufficient actual support near wall-wall line and triple point'
+              : 'insufficient multi-surface coherence score',
           })
           continue
         }

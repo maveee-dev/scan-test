@@ -523,6 +523,16 @@ does not lower the global strong-edge rule and does not average or rewrite any
 plane. A candidate without actual near-line support remains alternate or
 uncertain, even when its fitted planes are mathematically perpendicular.
 
+Triad discovery is intentionally broader than graph-edge acceptance. When two
+meaningfully different wall directions both have actual near-theoretical-line
+support against the same selected ceiling or floor, they can form a provisional
+three-surface candidate even if noisy wall normals prevented a qualifying
+wall-wall graph edge. The candidate is accepted only after a stable three-plane
+point, wall-wall evidence or direct triple-point support, and a bounded
+multi-surface coherence score agree. This prevents mobile-depth angle noise from
+blocking a real wall-plus-wall-plus-horizontal structure without promoting
+surfaces that merely touch a horizontal plane in unrelated locations.
+
 Selected structural surfaces then feed the M7.2 intersection stage:
 
 ```text
