@@ -556,6 +556,8 @@ export interface StructuralBoundaryNode {
   readonly edgeEvaluations: readonly StructuralCornerEdgeEvaluation[]
   readonly maximumExtensionMeters: number
   readonly meanExtensionMeters: number
+  readonly discoverySources: readonly StructuralCornerCandidateSource[]
+  readonly mergedCandidateIds: readonly string[]
   readonly reason: string
 }
 
@@ -577,6 +579,8 @@ export interface StructuralCorner {
   readonly edgeEvaluations: readonly StructuralCornerEdgeEvaluation[]
   readonly maximumExtensionMeters: number
   readonly meanExtensionMeters: number
+  readonly discoverySources: readonly StructuralCornerCandidateSource[]
+  readonly mergedCandidateIds: readonly string[]
   readonly reason: string
 }
 
@@ -626,6 +630,15 @@ export interface StructuralCornerCandidateDiagnostic {
   readonly reason: string
 }
 
+export interface StructuralCornerDeduplicationDiagnostic {
+  readonly duplicateCandidateId: string
+  readonly canonicalCandidateId: string
+  readonly distanceMeters: number
+  readonly surfaceSetMatch: boolean
+  readonly sourceEdgeTopologyMatch: boolean
+  readonly reason: string
+}
+
 export interface ObservedWallBoundary {
   readonly wallId: string
   readonly wallWallEdgeIds: readonly string[]
@@ -649,6 +662,7 @@ export interface RoomBoundaryResult {
   readonly cornerCandidates: readonly StructuralCornerCandidateDiagnostic[]
   readonly wallBoundaries: readonly ObservedWallBoundary[]
   readonly components: readonly StructuralBoundaryComponent[]
+  readonly cornerDeduplicationDiagnostics: readonly StructuralCornerDeduplicationDiagnostic[]
   readonly stats: {
     readonly selectedSurfaceCount: number
     readonly boundaryEdgeCount: number
@@ -657,6 +671,9 @@ export interface RoomBoundaryResult {
     readonly wallFloorEdgeCount: number
     readonly cornerNodeCount: number
     readonly cornerCandidateCount: number
+    readonly rawCornerCandidateCount: number
+    readonly validatedCornerCandidateCount: number
+    readonly deduplicatedDuplicateCount: number
     readonly supportedCornerCount: number
     readonly partialCornerCount: number
     readonly rejectedCornerCandidateCount: number

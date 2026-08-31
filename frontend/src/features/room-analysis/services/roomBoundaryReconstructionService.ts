@@ -10,7 +10,9 @@ import type {
   StructuralBoundaryStatus,
   StructuralCorner,
   StructuralCornerCandidateDiagnostic,
+  StructuralCornerCandidateSource,
   StructuralCornerEdgeEvaluation,
+  StructuralCornerDeduplicationDiagnostic,
   StructuralCornerSupport,
   StructuralIntersectionResult,
   StructuralIntersectionCandidate,
@@ -39,6 +41,8 @@ export interface RoomBoundaryReconstructionConfig {
   minimumStructuralCornerSupportCountPerSurface: number
   /** Lower support floor for retaining a partial, explicitly uncertain corner. */
   minimumPartialStructuralCornerSupportCountPerSurface: number
+  /** Separate final identity radius; does not change endpoint clustering or corner acceptance. */
+  cornerDeduplicationToleranceMeters: number
 }
 
 export const DEFAULT_ROOM_BOUNDARY_RECONSTRUCTION_CONFIG: RoomBoundaryReconstructionConfig = {
@@ -52,6 +56,7 @@ export const DEFAULT_ROOM_BOUNDARY_RECONSTRUCTION_CONFIG: RoomBoundaryReconstruc
   structuralCornerNumericalEpsilonMeters: 1e-5,
   minimumStructuralCornerSupportCountPerSurface: 2,
   minimumPartialStructuralCornerSupportCountPerSurface: 1,
+  cornerDeduplicationToleranceMeters: 0.12,
 }
 
 interface NormalizedPlane {
@@ -96,6 +101,18 @@ interface CornerSolution {
 interface TriadCornerCandidate {
   readonly diagnostic: StructuralCornerCandidateDiagnostic
   readonly edgeEndpointNodeIds: ReadonlyMap<string, string>
+}
+
+interface CornerRecord {
+  readonly corner: StructuralCorner
+  readonly node: StructuralBoundaryNode
+  readonly candidate: StructuralCornerCandidateDiagnostic
+  readonly source: StructuralCornerCandidateSource
+}
+
+interface CanonicalCornerGroup {
+  readonly representative: CornerRecord
+  readonly members: readonly CornerRecord[]
 }
 
 const STATUS_ORDER: Record<StructuralBoundaryStatus, number> = {
@@ -936,6 +953,7 @@ function createBoundaryNode(
   endpoints: readonly EndpointObservation[],
   edgeById: Map<string, StructuralBoundaryEdge>,
   corner: CornerSolution | null,
+  candidate: StructuralCornerCandidateDiagnostic | null,
 ): StructuralBoundaryNode {
   const edgeIds = uniqueSorted(cluster.endpointIndices.map((index) => endpoints[index].edgeId))
   const sourceIntersectionIds = uniqueSorted(edgeIds.flatMap((edgeId) => {
@@ -964,7 +982,7 @@ function createBoundaryNode(
     extensionDistances,
     planeResiduals: corner?.planeResiduals ?? [],
     cornerId: corner ? `corner-${id}` : null,
-    candidateDiagnosticId: null,
+    candidateDiagnosticId: corner && candidate ? candidate.id : null,
     threePlaneSolverStatus: corner ? 'solved' : 'not-attempted',
     supportNearCorner: [],
     edgeEvaluations: [],
@@ -972,6 +990,8 @@ function createBoundaryNode(
     meanExtensionMeters: extensionDistances.length > 0
       ? extensionDistances.reduce((total, extension) => total + extension.distanceMeters, 0) / extensionDistances.length
       : 0,
+    discoverySources: corner && candidate ? [candidate.source] : [],
+    mergedCandidateIds: corner && candidate ? [candidate.id] : [],
     reason: corner ? 'endpoint-cluster corner validated' : 'endpoint cluster did not produce a validated corner',
   }
 }
@@ -1005,6 +1025,8 @@ function createTriadBoundaryNode(
     edgeEvaluations: candidate.edgeEvaluations,
     maximumExtensionMeters: candidate.maximumExtensionMeters,
     meanExtensionMeters: candidate.meanExtensionMeters,
+    discoverySources: [candidate.source],
+    mergedCandidateIds: [candidate.id],
     reason: candidate.reason,
   }
 }
@@ -1031,7 +1053,213 @@ function createCornerFromNode(node: StructuralBoundaryNode): StructuralCorner | 
     edgeEvaluations: node.edgeEvaluations,
     maximumExtensionMeters: node.maximumExtensionMeters,
     meanExtensionMeters: node.meanExtensionMeters,
+    discoverySources: node.discoverySources,
+    mergedCandidateIds: node.mergedCandidateIds,
     reason: node.reason,
+  }
+}
+
+function getSetIntersectionSize(first: readonly string[], second: readonly string[]): number {
+  const secondSet = new Set(second)
+  return new Set(first).size === 0
+    ? 0
+    : [...new Set(first)].filter((value) => secondSet.has(value)).length
+}
+
+function getCornerIdentityEvidence(
+  first: CornerRecord,
+  second: CornerRecord,
+  toleranceMeters: number,
+): { matches: boolean; distanceMeters: number; surfaceSetMatch: boolean; sourceEdgeTopologyMatch: boolean } {
+  const distanceMeters = distance(first.corner.position, second.corner.position)
+  const firstSurfaces = uniqueSorted(first.corner.surfaceIds)
+  const secondSurfaces = uniqueSorted(second.corner.surfaceIds)
+  const firstEdges = uniqueSorted(first.corner.sourceEdgeIds)
+  const secondEdges = uniqueSorted(second.corner.sourceEdgeIds)
+  const surfaceIntersection = getSetIntersectionSize(firstSurfaces, secondSurfaces)
+  const edgeIntersection = getSetIntersectionSize(firstEdges, secondEdges)
+  const surfaceSetMatch = firstSurfaces.length === secondSurfaces.length && surfaceIntersection === firstSurfaces.length
+  const minimumSurfaceCount = Math.max(1, Math.min(firstSurfaces.length, secondSurfaces.length))
+  const sourceEdgeTopologyMatch = edgeIntersection >= 2 && edgeIntersection / Math.max(1, Math.min(firstEdges.length, secondEdges.length)) >= 0.5
+  const overlappingSurfaceSet = surfaceIntersection / minimumSurfaceCount >= 0.67
+  return {
+    matches: Number.isFinite(distanceMeters) && distanceMeters <= toleranceMeters &&
+      (surfaceSetMatch || (overlappingSurfaceSet && sourceEdgeTopologyMatch)),
+    distanceMeters,
+    surfaceSetMatch,
+    sourceEdgeTopologyMatch,
+  }
+}
+
+function compareCornerRecords(first: CornerRecord, second: CornerRecord): number {
+  const firstStatus = first.corner.status === 'supported' ? 0 : 1
+  const secondStatus = second.corner.status === 'supported' ? 0 : 1
+  const firstSource = first.source === 'triad-backed' ? 0 : 1
+  const secondSource = second.source === 'triad-backed' ? 0 : 1
+  return firstStatus - secondStatus ||
+    firstSource - secondSource ||
+    second.corner.confidence - first.corner.confidence ||
+    first.corner.maximumExtensionMeters - second.corner.maximumExtensionMeters ||
+    first.candidate.id.localeCompare(second.candidate.id)
+}
+
+function mergeCornerRecords(
+  records: readonly CornerRecord[],
+): CanonicalCornerGroup {
+  const ordered = [...records].sort(compareCornerRecords)
+  const representative = ordered[0]
+  const surfaceIds = uniqueSorted(records.flatMap((record) => record.corner.surfaceIds))
+  const sourceEdgeIds = uniqueSorted(records.flatMap((record) => record.corner.sourceEdgeIds))
+  const sourceIntersectionIds = uniqueSorted(records.flatMap((record) => record.corner.sourceIntersectionIds))
+  const supportBySurfaceId = new Map<string, StructuralCornerSupport>()
+  for (const record of records) {
+    for (const support of record.corner.supportNearCorner) {
+      const current = supportBySurfaceId.get(support.surfaceId)
+      if (!current || support.supportCount > current.supportCount) {
+        supportBySurfaceId.set(support.surfaceId, support)
+      }
+    }
+  }
+  const extensionByEdgeId = new Map<string, StructuralBoundaryExtension>()
+  for (const record of records) {
+    for (const extension of record.corner.extensionDistances) {
+      if (!extensionByEdgeId.has(extension.edgeId)) {
+        extensionByEdgeId.set(extension.edgeId, extension)
+      }
+    }
+  }
+  const edgeEvaluationById = new Map<string, StructuralCornerEdgeEvaluation>()
+  for (const record of records) {
+    for (const evaluation of record.corner.edgeEvaluations) {
+      if (!edgeEvaluationById.has(evaluation.edgeId)) {
+        edgeEvaluationById.set(evaluation.edgeId, evaluation)
+      }
+    }
+  }
+  const residualBySurfaceId = new Map<string, StructuralPlaneResidual>()
+  for (const record of records) {
+    for (const residual of record.corner.planeResiduals) {
+      const current = residualBySurfaceId.get(residual.surfaceId)
+      if (!current || residual.residualMeters < current.residualMeters) {
+        residualBySurfaceId.set(residual.surfaceId, residual)
+      }
+    }
+  }
+  const discoverySources = [...new Set(records.flatMap((record) => record.corner.discoverySources))]
+    .sort((first, second) => (first === 'triad-backed' ? 0 : 1) - (second === 'triad-backed' ? 0 : 1))
+  const mergedCandidateIds = uniqueSorted(records.flatMap((record) => record.corner.mergedCandidateIds))
+  const status: StructuralBoundaryStatus = records.some((record) => record.corner.status === 'supported') ? 'supported' : 'partial'
+  const reason = discoverySources.length > 1
+    ? 'canonical structural corner merged from triad-backed and endpoint-cluster discovery'
+    : representative.corner.reason
+  const corner: StructuralCorner = {
+    ...representative.corner,
+    surfaceIds,
+    sourceEdgeIds,
+    sourceIntersectionIds,
+    status,
+    supportNearCorner: [...supportBySurfaceId.values()].sort((first, second) => first.surfaceId.localeCompare(second.surfaceId)),
+    extensionDistances: [...extensionByEdgeId.values()].sort((first, second) => first.edgeId.localeCompare(second.edgeId)),
+    planeResiduals: [...residualBySurfaceId.values()].sort((first, second) => first.surfaceId.localeCompare(second.surfaceId)),
+    edgeEvaluations: [...edgeEvaluationById.values()].sort((first, second) => first.edgeId.localeCompare(second.edgeId)),
+    discoverySources,
+    mergedCandidateIds,
+    reason,
+  }
+  const node: StructuralBoundaryNode = {
+    ...representative.node,
+    position: corner.position,
+    surfaceIds,
+    sourceEdgeIds,
+    sourceIntersectionIds,
+    status,
+    confidence: corner.confidence,
+    extensionDistances: corner.extensionDistances,
+    planeResiduals: corner.planeResiduals,
+    candidateDiagnosticId: representative.candidate.id,
+    supportNearCorner: corner.supportNearCorner,
+    edgeEvaluations: corner.edgeEvaluations,
+    maximumExtensionMeters: corner.maximumExtensionMeters,
+    meanExtensionMeters: corner.meanExtensionMeters,
+    discoverySources,
+    mergedCandidateIds,
+    reason,
+  }
+  return {
+    representative: { ...representative, corner, node },
+    members: records,
+  }
+}
+
+function canonicalizeCorners(
+  records: readonly CornerRecord[],
+  toleranceMeters: number,
+): {
+  readonly groups: readonly CanonicalCornerGroup[]
+  readonly nodeIdAliases: ReadonlyMap<string, string>
+  readonly diagnostics: readonly StructuralCornerDeduplicationDiagnostic[]
+} {
+  const parent = records.map((_, index) => index)
+  const findRoot = (index: number): number => {
+    let root = index
+    while (parent[root] !== root) {
+      root = parent[root]
+    }
+    while (parent[index] !== index) {
+      const next = parent[index]
+      parent[index] = root
+      index = next
+    }
+    return root
+  }
+  const union = (first: number, second: number): void => {
+    const firstRoot = findRoot(first)
+    const secondRoot = findRoot(second)
+    if (firstRoot !== secondRoot) {
+      parent[secondRoot] = firstRoot
+    }
+  }
+  for (let firstIndex = 0; firstIndex < records.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < records.length; secondIndex += 1) {
+      if (getCornerIdentityEvidence(records[firstIndex], records[secondIndex], toleranceMeters).matches) {
+        union(firstIndex, secondIndex)
+      }
+    }
+  }
+  const grouped = new Map<number, CornerRecord[]>()
+  records.forEach((record, index) => {
+    const root = findRoot(index)
+    const group = grouped.get(root) ?? []
+    group.push(record)
+    grouped.set(root, group)
+  })
+  const groups = [...grouped.values()]
+    .sort((first, second) => compareCornerRecords(first[0], second[0]))
+    .map((members) => mergeCornerRecords(members))
+  const nodeIdAliases = new Map<string, string>()
+  const diagnostics: StructuralCornerDeduplicationDiagnostic[] = []
+  for (const group of groups) {
+    const canonical = group.representative
+    for (const member of group.members) {
+      nodeIdAliases.set(member.node.id, canonical.node.id)
+      if (member.node.id === canonical.node.id) {
+        continue
+      }
+      const evidence = getCornerIdentityEvidence(canonical, member, toleranceMeters)
+      diagnostics.push({
+        duplicateCandidateId: member.candidate.id,
+        canonicalCandidateId: canonical.candidate.id,
+        distanceMeters: evidence.distanceMeters,
+        surfaceSetMatch: evidence.surfaceSetMatch,
+        sourceEdgeTopologyMatch: evidence.sourceEdgeTopologyMatch,
+        reason: 'same structural corner',
+      })
+    }
+  }
+  return {
+    groups,
+    nodeIdAliases,
+    diagnostics: diagnostics.sort((first, second) => first.duplicateCandidateId.localeCompare(second.duplicateCandidateId)),
   }
 }
 
@@ -1039,20 +1267,23 @@ function createBoundaryEdges(
   drafts: readonly BoundaryEdgeDraft[],
   endpoints: readonly EndpointObservation[],
   clusters: readonly EndpointCluster[],
+  endpointNodeIds: readonly string[],
   nodes: readonly StructuralBoundaryNode[],
   triadEndpointNodeIds: ReadonlyMap<string, string>,
+  nodeIdAliases: ReadonlyMap<string, string>,
 ): StructuralBoundaryEdge[] {
   const nodeIdByEndpointIndex = new Map<number, string>()
   clusters.forEach((cluster, clusterIndex) => {
     for (const endpointIndex of cluster.endpointIndices) {
-      nodeIdByEndpointIndex.set(endpointIndex, nodes[clusterIndex].id)
+      nodeIdByEndpointIndex.set(endpointIndex, endpointNodeIds[clusterIndex])
     }
   })
+  const resolveNodeId = (nodeId: string | null): string | null => nodeId === null ? null : nodeIdAliases.get(nodeId) ?? nodeId
   return drafts.map((draft, edgeIndex) => {
     const startEndpointIndex = endpoints.findIndex((endpoint) => endpoint.edgeIndex === edgeIndex && endpoint.endpoint === 'start')
     const endEndpointIndex = endpoints.findIndex((endpoint) => endpoint.edgeIndex === edgeIndex && endpoint.endpoint === 'end')
-    const startNodeId = triadEndpointNodeIds.get(`${draft.edge.id}:start`) ?? nodeIdByEndpointIndex.get(startEndpointIndex) ?? null
-    const endNodeId = triadEndpointNodeIds.get(`${draft.edge.id}:end`) ?? nodeIdByEndpointIndex.get(endEndpointIndex) ?? null
+    const startNodeId = resolveNodeId(triadEndpointNodeIds.get(`${draft.edge.id}:start`) ?? nodeIdByEndpointIndex.get(startEndpointIndex) ?? null)
+    const endNodeId = resolveNodeId(triadEndpointNodeIds.get(`${draft.edge.id}:end`) ?? nodeIdByEndpointIndex.get(endEndpointIndex) ?? null)
     const extensionDistances = [startNodeId, endNodeId]
       .filter((nodeId, index, ids): nodeId is string => nodeId !== null && ids.indexOf(nodeId) === index)
       .flatMap((nodeId) => {
@@ -1191,17 +1422,17 @@ export class RoomBoundaryReconstructionService {
 
     const cornerStartedAt = timestamp()
     const cornersByCluster = clusters.map((cluster) => solveCorner(cluster, endpoints, edgeById, planesById, this.config))
+    const endpointCandidatesByCluster = clusters.map((cluster, clusterIndex) =>
+      createEndpointClusterDiagnostic(cluster, endpoints, edgeById, cornersByCluster[clusterIndex]))
+    const endpointClusterCandidates = endpointCandidatesByCluster.flatMap((candidate) => candidate ? [candidate] : [])
     const endpointNodes = clusters.map((cluster, clusterIndex) => createBoundaryNode(
       `boundary-node-${clusterIndex + 1}`,
       cluster,
       endpoints,
       edgeById,
       cornersByCluster[clusterIndex],
+      endpointCandidatesByCluster[clusterIndex],
     ))
-    const endpointClusterCandidates = clusters.flatMap((cluster, clusterIndex) => {
-      const candidate = createEndpointClusterDiagnostic(cluster, endpoints, edgeById, cornersByCluster[clusterIndex])
-      return candidate ? [candidate] : []
-    })
     const triadCornerCandidates = [...new Map(
       interpretation.multiSurfaceCoherenceDiagnostics
         .filter((triad) => triad.selected && triad.finalDecision === 'selected')
@@ -1220,38 +1451,59 @@ export class RoomBoundaryReconstructionService {
           return [candidate.diagnostic.triadKey ?? candidate.diagnostic.id, candidate] as const
         }),
     ).values()]
-    const genericCorners = endpointNodes.flatMap((node) => {
-      const corner = createCornerFromNode(node)
-      return corner ? [corner] : []
-    })
-    const genericCornerEdgeKeys = new Set(genericCorners.map((corner) => [...corner.sourceEdgeIds].sort((first, second) => first.localeCompare(second)).join('|')))
-    const acceptedTriadCornerCandidates = triadCornerCandidates.filter((candidate) =>
-      candidate.diagnostic.status !== 'rejected' && candidate.diagnostic.position !== null &&
-      !genericCornerEdgeKeys.has([...candidate.diagnostic.sourceEdgeIds].sort((first, second) => first.localeCompare(second)).join('|')))
     const triadNodes: StructuralBoundaryNode[] = []
     const triadEndpointNodeIds = new Map<string, string>()
-    acceptedTriadCornerCandidates.forEach((candidate, candidateIndex) => {
-      const node = createTriadBoundaryNode(candidate.diagnostic, candidateIndex)
-      if (!node) {
-        return
-      }
-      triadNodes.push(node)
-      for (const [endpointKey, candidateId] of candidate.edgeEndpointNodeIds) {
-        if (candidateId === candidate.diagnostic.id && !triadEndpointNodeIds.has(endpointKey)) {
-          triadEndpointNodeIds.set(endpointKey, node.id)
+    triadCornerCandidates
+      .filter((candidate) => candidate.diagnostic.status !== 'rejected' && candidate.diagnostic.position !== null)
+      .forEach((candidate, candidateIndex) => {
+        const node = createTriadBoundaryNode(candidate.diagnostic, candidateIndex)
+        if (!node) {
+          return
         }
-      }
-    })
-    const nodes = [...endpointNodes, ...triadNodes]
-    const corners = [...genericCorners, ...triadNodes.flatMap((node) => {
+        triadNodes.push(node)
+        for (const [endpointKey, candidateId] of candidate.edgeEndpointNodeIds) {
+          if (candidateId === candidate.diagnostic.id && !triadEndpointNodeIds.has(endpointKey)) {
+            triadEndpointNodeIds.set(endpointKey, node.id)
+          }
+        }
+      })
+    const endpointCornerRecords: CornerRecord[] = endpointNodes.flatMap((node) => {
       const corner = createCornerFromNode(node)
-      return corner ? [corner] : []
-    })]
+      const candidate = endpointClusterCandidates.find((entry) => entry.id === node.candidateDiagnosticId) ?? null
+      return corner && candidate
+        ? [{ corner, node, candidate, source: 'endpoint-cluster' }]
+        : []
+    })
+    const triadCornerRecords: CornerRecord[] = triadNodes.flatMap((node) => {
+      const corner = createCornerFromNode(node)
+      const candidate = triadCornerCandidates.find((entry) => entry.diagnostic.id === node.candidateDiagnosticId)?.diagnostic ?? null
+      return corner && candidate
+        ? [{ corner, node, candidate, source: 'triad-backed' }]
+        : []
+    })
+    const canonicalCorners = canonicalizeCorners(
+      [...endpointCornerRecords, ...triadCornerRecords],
+      this.config.cornerDeduplicationToleranceMeters,
+    )
+    const canonicalNodeIds = new Set(canonicalCorners.groups.map((group) => group.representative.node.id))
+    const nodes = [
+      ...endpointNodes.filter((node) => !node.cornerId || canonicalNodeIds.has(node.id)),
+      ...triadNodes.filter((node) => canonicalNodeIds.has(node.id)),
+    ]
+    const corners = canonicalCorners.groups.map((group) => group.representative.corner)
     const cornerCandidates = [...endpointClusterCandidates, ...triadCornerCandidates.map((candidate) => candidate.diagnostic)]
       .sort((first, second) => STATUS_ORDER[first.status] - STATUS_ORDER[second.status] || first.id.localeCompare(second.id))
     const cornerSolvingMs = timestamp() - cornerStartedAt
 
-    const edges = createBoundaryEdges(drafts, endpoints, clusters, nodes, triadEndpointNodeIds).sort(compareEdges)
+    const edges = createBoundaryEdges(
+      drafts,
+      endpoints,
+      clusters,
+      endpointNodes.map((node) => node.id),
+      nodes,
+      triadEndpointNodeIds,
+      canonicalCorners.nodeIdAliases,
+    ).sort(compareEdges)
     const components = createComponents(selectedSurfaceIds, edges, nodes)
     const wallBoundaries = createWallBoundaries(interpretation, edges)
     const finalCorners = [...corners].sort((first, second) => STATUS_ORDER[first.status] - STATUS_ORDER[second.status] || second.confidence - first.confidence || first.id.localeCompare(second.id))
@@ -1263,6 +1515,7 @@ export class RoomBoundaryReconstructionService {
       nodes,
       corners: finalCorners,
       cornerCandidates,
+      cornerDeduplicationDiagnostics: canonicalCorners.diagnostics,
       wallBoundaries,
       components,
       stats: {
@@ -1273,6 +1526,9 @@ export class RoomBoundaryReconstructionService {
         wallFloorEdgeCount: edges.filter((edge) => edge.type === 'wall-floor').length,
         cornerNodeCount: finalCorners.length,
         cornerCandidateCount: cornerCandidates.length,
+        rawCornerCandidateCount: cornerCandidates.length,
+        validatedCornerCandidateCount: cornerCandidates.filter((candidate) => candidate.status !== 'rejected').length,
+        deduplicatedDuplicateCount: canonicalCorners.diagnostics.length,
         supportedCornerCount: finalCorners.filter((corner) => corner.status === 'supported').length,
         partialCornerCount: finalCorners.filter((corner) => corner.status === 'partial').length,
         rejectedCornerCandidateCount: cornerCandidates.filter((candidate) => candidate.status === 'rejected').length,

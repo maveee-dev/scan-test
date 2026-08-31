@@ -606,6 +606,17 @@ corner is supported. Rejected candidates remain in diagnostics, so a missing
 endpoint cluster, weak support, unstable solve, or excessive extension is
 visible rather than silently treated as an absent corner.
 
+M7.3.2 performs canonical corner deduplication after all endpoint-cluster and
+triad-backed candidates have been generated and validated. Candidate identity
+requires bounded spatial proximity plus an unordered compatible structural
+surface set; partial surface matches also require compatible source-edge
+topology. An exact triad-backed corner is preferred over an endpoint-cluster
+approximation, while the final node merges discovery sources and provenance.
+Boundary edges are rewired through the canonical node so multiple discovery
+paths produce one room-topology corner. Rejected candidates remain diagnostics,
+and spatially distinct corners or corners with unrelated structural topology
+remain separate.
+
 The longer-term post-scan direction is:
 
 ```text

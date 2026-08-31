@@ -584,6 +584,14 @@ function RoomBoundarySummary({
           <strong>{result.stats.cornerCandidateCount}</strong>
         </div>
         <div>
+          <span>Raw / validated candidates</span>
+          <strong>{result.stats.rawCornerCandidateCount} / {result.stats.validatedCornerCandidateCount}</strong>
+        </div>
+        <div>
+          <span>Deduplicated duplicates</span>
+          <strong>{result.stats.deduplicatedDuplicateCount}</strong>
+        </div>
+        <div>
           <span>Supported / partial corners</span>
           <strong>{supportedCorners.length} / {partialCorners.length}</strong>
         </div>
@@ -641,7 +649,25 @@ function RoomBoundarySummary({
                   <small>{corner.status} | surfaces {corner.surfaceIds.join(', ')} | edges {corner.sourceEdgeIds.join(', ')}</small>
                 </span>
                 <span>
-                  position {formatPoint(corner.position)} | confidence {corner.confidence.toFixed(2)} | solver {corner.threePlaneSolverStatus} | support {corner.supportNearCorner.map((support) => `${support.surfaceId} ${support.supportCount}`).join(', ') || 'n/a'} | segment gap {corner.segmentGapMeters.toFixed(2)} m | max/mean extension {corner.maximumExtensionMeters.toFixed(2)} / {corner.meanExtensionMeters.toFixed(2)} m | extensions {corner.extensionDistances.map((extension) => `${extension.edgeId} ${extension.distanceMeters.toFixed(2)} m`).join(', ') || 'none'} | edge parameters {corner.edgeEvaluations.map((evaluation) => `${evaluation.edgeId} t ${evaluation.tCorner === null ? 'n/a' : evaluation.tCorner.toFixed(3)} in [${evaluation.tStart === null ? 'n/a' : evaluation.tStart.toFixed(3)},${evaluation.tEnd === null ? 'n/a' : evaluation.tEnd.toFixed(3)}]`).join(', ') || 'n/a'} | plane residuals {corner.planeResiduals.map((residual) => `${residual.surfaceId} ${residual.residualMeters.toExponential(1)}`).join(', ') || 'none'} | {corner.reason}
+                  position {formatPoint(corner.position)} | confidence {corner.confidence.toFixed(2)} | discovery {corner.discoverySources.join(' + ') || 'unknown'} | merged candidates {corner.mergedCandidateIds.join(', ') || 'none'} | solver {corner.threePlaneSolverStatus} | support {corner.supportNearCorner.map((support) => `${support.surfaceId} ${support.supportCount}`).join(', ') || 'n/a'} | segment gap {corner.segmentGapMeters.toFixed(2)} m | max/mean extension {corner.maximumExtensionMeters.toFixed(2)} / {corner.meanExtensionMeters.toFixed(2)} m | extensions {corner.extensionDistances.map((extension) => `${extension.edgeId} ${extension.distanceMeters.toFixed(2)} m`).join(', ') || 'none'} | edge parameters {corner.edgeEvaluations.map((evaluation) => `${evaluation.edgeId} t ${evaluation.tCorner === null ? 'n/a' : evaluation.tCorner.toFixed(3)} in [${evaluation.tStart === null ? 'n/a' : evaluation.tStart.toFixed(3)},${evaluation.tEnd === null ? 'n/a' : evaluation.tEnd.toFixed(3)}]`).join(', ') || 'n/a'} | plane residuals {corner.planeResiduals.map((residual) => `${residual.surfaceId} ${residual.residualMeters.toExponential(1)}`).join(', ') || 'none'} | {corner.reason}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {result.cornerDeduplicationDiagnostics.length > 0 ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Canonical corner deduplication</span></div>
+          <div className="scanner-plane-list">
+            {result.cornerDeduplicationDiagnostics.map((diagnostic) => (
+              <div className="scanner-plane-row scanner-plane-row-secondary" key={diagnostic.duplicateCandidateId}>
+                <span>
+                  <strong>{diagnostic.duplicateCandidateId}</strong>
+                  <small>suppressed duplicate of {diagnostic.canonicalCandidateId}</small>
+                </span>
+                <span>
+                  distance {diagnostic.distanceMeters.toFixed(3)} m | surface set match {diagnostic.surfaceSetMatch ? 'yes' : 'no'} | source-edge topology match {diagnostic.sourceEdgeTopologyMatch ? 'yes' : 'no'} | {diagnostic.reason}
                 </span>
               </div>
             ))}
