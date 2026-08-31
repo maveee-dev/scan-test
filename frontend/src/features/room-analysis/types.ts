@@ -111,6 +111,7 @@ export interface StructuralSurfaceSelectionEvidence {
   readonly relationshipScore: number
   readonly competitionScore: number
   readonly graphSupportScore: number
+  readonly multiSurfaceCoherenceScore: number
 }
 
 export interface StructuralSurfaceCandidate {
@@ -125,6 +126,8 @@ export interface StructuralSurfaceCandidate {
   readonly envelopeSelectionScore: number
   /** Support supplied by selected structural relationships. */
   readonly graphSupportScore: number
+  /** Bounded wall/horizontal multi-surface coherence evidence. */
+  readonly multiSurfaceCoherenceScore: number
   /** Final deterministic score used by structural subset selection. */
   readonly finalSelectionScore: number
   readonly evidence: StructuralSurfaceEvidence
@@ -166,8 +169,18 @@ export interface StructuralSurfaceRelationship {
   readonly parallelismScore: number
   readonly relationshipType: StructuralRelationshipType
   readonly planeIntersectionPossible: boolean
-  /** Whether finite support is close enough to a mathematical intersection to be meaningful. */
+  /** Compatibility alias for supportsNearTheoreticalIntersection. */
   readonly supportNearIntersection: boolean
+  /** Actual finalized support counts within the theoretical line-distance gate. */
+  readonly nearTheoreticalLineSupportCountA: number
+  readonly nearTheoreticalLineSupportCountB: number
+  readonly nearTheoreticalLineSupportDistanceA: number | null
+  readonly nearTheoreticalLineSupportDistanceB: number | null
+  /** True only when both owned support sets reach the theoretical line. */
+  readonly supportsNearTheoreticalIntersection: boolean
+  readonly intersectionSupportScore: number
+  /** Actual support distance to the theoretical intersection line, when available. */
+  readonly closestSurfaceSupportDistanceMeters: number | null
   readonly verticalHorizontalEvidence: number
 }
 
@@ -212,6 +225,7 @@ export interface StructuralGraphEdge {
   readonly perpendicularityScore: number
   readonly closestSupportDistanceMeters: number
   readonly supportNearIntersection: boolean
+  readonly intersectionSupportScore: number
   readonly verticalOverlapScore: number
   readonly proximityScore: number
   readonly edgeScore: number
@@ -232,6 +246,22 @@ export interface StructuralCorePairCandidate {
   readonly secondNodeQuality: number
   readonly jointCoreScore: number
   readonly selected: boolean
+}
+
+export interface StructuralMultiSurfaceCoherenceDiagnostic {
+  readonly candidatePlaneId: string
+  readonly existingWallPlaneId: string
+  readonly horizontalPlaneId: string
+  readonly wallWallEdgeScore: number
+  readonly candidateHorizontalEdgeScore: number
+  readonly existingHorizontalEdgeScore: number
+  readonly candidateNodeQuality: number
+  readonly existingNodeQuality: number
+  readonly horizontalNodeQuality: number
+  readonly orientationNoveltyScore: number
+  readonly multiSurfaceCoherenceScore: number
+  readonly selected: boolean
+  readonly reason: string
 }
 
 export interface RoomStructureInterpretationResult {
@@ -255,6 +285,7 @@ export interface RoomStructureInterpretationResult {
   readonly structuralGraphComponents: readonly StructuralGraphComponent[]
   readonly selectedWallCorePlaneIds: readonly string[]
   readonly structuralCorePairCandidates: readonly StructuralCorePairCandidate[]
+  readonly multiSurfaceCoherenceDiagnostics: readonly StructuralMultiSurfaceCoherenceDiagnostic[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
@@ -279,6 +310,8 @@ export interface RoomStructureInterpretationResult {
     readonly structuralGraphComponentCount: number
     readonly selectedWallCoreCount: number
     readonly eligibleStrongWallEdgeCount: number
+    readonly multiSurfaceCoherenceCandidateCount: number
+    readonly selectedMultiSurfaceCoherenceCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number

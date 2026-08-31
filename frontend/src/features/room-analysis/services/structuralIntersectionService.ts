@@ -10,6 +10,13 @@ import type {
   StructuralIntersectionType,
   StructuralSurfaceCandidate,
 } from '../types'
+import {
+  associateFinalizedSupportPoints,
+  collectNearLineSupport,
+  computePlanePlaneIntersectionLine,
+  type SupportAssociation,
+  type SupportPlaneGeometry,
+} from './structuralSupportGeometry'
 
 export interface StructuralIntersectionConfig {
   /** Reject planes whose normalized cross product is too small to define a line. */
@@ -76,18 +83,6 @@ interface PreparedPair extends PairDefinition {
   lineRejectionReason: string | null
 }
 
-interface SupportLineSummary {
-  nearLineValues: number[]
-  minimumDistance: number
-  interval: StructuralIntersectionRange | null
-}
-
-interface SupportAssociation {
-  pointsBySurfaceId: Map<string, SpatialPoint[]>
-  rmsBySurfaceId: Map<string, number>
-  supportPointsEvaluated: number
-}
-
 const TYPE_ORDER: Record<StructuralIntersectionType, number> = {
   'wall-wall': 0,
   'wall-ceiling': 1,
@@ -114,14 +109,6 @@ function dot(first: SpatialPoint, second: SpatialPoint): number {
   return first.x * second.x + first.y * second.y + first.z * second.z
 }
 
-function cross(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
-  return {
-    x: first.y * second.z - first.z * second.y,
-    y: first.z * second.x - first.x * second.z,
-    z: first.x * second.y - first.y * second.x,
-  }
-}
-
 function subtract(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
   return {
     x: first.x - second.x,
@@ -146,25 +133,6 @@ function magnitude(point: SpatialPoint): number {
   return Math.hypot(point.x, point.y, point.z)
 }
 
-function normalize(point: SpatialPoint): SpatialPoint | null {
-  const length = magnitude(point)
-  if (!isFiniteNumber(length) || length <= Number.EPSILON) {
-    return null
-  }
-  return scale(point, 1 / length)
-}
-
-function canonicalizeDirection(direction: SpatialPoint): SpatialPoint {
-  const components = [direction.x, direction.y, direction.z]
-  let largestIndex = 0
-  for (let index = 1; index < components.length; index += 1) {
-    if (Math.abs(components[index]) > Math.abs(components[largestIndex])) {
-      largestIndex = index
-    }
-  }
-  return components[largestIndex] < 0 ? scale(direction, -1) : direction
-}
-
 function normalizeSurface(surface: StructuralSurfaceCandidate): NormalizedSurface | null {
   const normalLength = magnitude(surface.normal)
   if (!isFiniteNumber(normalLength) || normalLength <= Number.EPSILON) {
@@ -176,170 +144,6 @@ function normalizeSurface(surface: StructuralSurfaceCandidate): NormalizedSurfac
     return null
   }
   return { surface, normal, planeConstant }
-}
-
-/** Solve the exact intersection of n1 dot x = c1 and n2 dot x = c2. */
-function calculatePlaneIntersection(
-  first: NormalizedSurface,
-  second: NormalizedSurface,
-  minimumCrossMagnitude: number,
-): { line: StructuralIntersectionLine | null; reason: string | null } {
-  const directionCross = cross(first.normal, second.normal)
-  const crossMagnitude = magnitude(directionCross)
-  if (!isFiniteNumber(crossMagnitude) || crossMagnitude <= minimumCrossMagnitude) {
-    return { line: null, reason: 'planes are parallel or nearly parallel' }
-  }
-
-  const direction = canonicalizeDirection(scale(directionCross, 1 / crossMagnitude))
-  const firstTerm = scale(cross(second.normal, direction), first.planeConstant)
-  const secondTerm = scale(cross(direction, first.normal), second.planeConstant)
-  const origin = scale({
-    x: firstTerm.x + secondTerm.x,
-    y: firstTerm.y + secondTerm.y,
-    z: firstTerm.z + secondTerm.z,
-  }, 1 / (crossMagnitude * crossMagnitude))
-
-  if (!isFinitePoint(origin) || !isFinitePoint(direction)) {
-    return { line: null, reason: 'intersection line was not finite' }
-  }
-  return { line: { origin, direction }, reason: null }
-}
-
-function isWithinSurfaceExtent(
-  point: SpatialPoint,
-  normalizedSurface: NormalizedSurface,
-  paddingMeters: number,
-): boolean {
-  const relative = subtract(point, normalizedSurface.surface.centroid)
-  const u = dot(relative, normalizedSurface.surface.tangentU)
-  const v = dot(relative, normalizedSurface.surface.tangentV)
-  const bounds = normalizedSurface.surface.localBounds
-  return u >= bounds.minU - paddingMeters &&
-    u <= bounds.maxU + paddingMeters &&
-    v >= bounds.minV - paddingMeters &&
-    v <= bounds.maxV + paddingMeters
-}
-
-function createSupportAssociation(
-  scan: FinalizedSpatialScan,
-  selectedSurfaces: readonly NormalizedSurface[],
-  config: StructuralIntersectionConfig,
-): SupportAssociation {
-  const pointsBySurfaceId = new Map<string, SpatialPoint[]>()
-  const squaredResidualsBySurfaceId = new Map<string, number>()
-  for (const selectedSurface of selectedSurfaces) {
-    pointsBySurfaceId.set(selectedSurface.surface.planeId, [])
-    squaredResidualsBySurfaceId.set(selectedSurface.surface.planeId, 0)
-  }
-
-  for (const surfel of scan.fusedSurface) {
-    if (!isFinitePoint(surfel.position)) {
-      continue
-    }
-
-    let bestSurface: NormalizedSurface | null = null
-    let bestScore = Infinity
-    const surfelNormal = normalize(surfel.normal)
-
-    for (const selectedSurface of selectedSurfaces) {
-      const residual = Math.abs(dot(selectedSurface.normal, surfel.position) - selectedSurface.planeConstant)
-      if (!isFiniteNumber(residual) || residual > config.maximumSupportPlaneResidualMeters) {
-        continue
-      }
-      if (!isWithinSurfaceExtent(surfel.position, selectedSurface, config.supportBoundsPaddingMeters)) {
-        continue
-      }
-
-      let normalPenalty = 0
-      if (surfelNormal) {
-        const normalAgreement = Math.abs(dot(selectedSurface.normal, surfelNormal))
-        if (normalAgreement < config.minimumSupportNormalDot) {
-          continue
-        }
-        normalPenalty = 1 - normalAgreement
-      }
-
-      const score = residual / Math.max(config.maximumSupportPlaneResidualMeters, Number.EPSILON) + normalPenalty * 0.5
-      if (score < bestScore) {
-        bestScore = score
-        bestSurface = selectedSurface
-      }
-    }
-
-    if (bestSurface) {
-      pointsBySurfaceId.get(bestSurface.surface.planeId)?.push(surfel.position)
-      const currentSquaredResidual = squaredResidualsBySurfaceId.get(bestSurface.surface.planeId) ?? 0
-      const residual = dot(bestSurface.normal, surfel.position) - bestSurface.planeConstant
-      squaredResidualsBySurfaceId.set(bestSurface.surface.planeId, currentSquaredResidual + residual * residual)
-    }
-  }
-
-  const rmsBySurfaceId = new Map<string, number>()
-  for (const [surfaceId, points] of pointsBySurfaceId) {
-    const squaredResidual = squaredResidualsBySurfaceId.get(surfaceId) ?? 0
-    rmsBySurfaceId.set(surfaceId, points.length > 0 ? Math.sqrt(squaredResidual / points.length) : 0)
-  }
-
-  return {
-    pointsBySurfaceId,
-    rmsBySurfaceId,
-    supportPointsEvaluated: scan.fusedSurface.length,
-  }
-}
-
-function quantile(sortedValues: readonly number[], fraction: number): number {
-  if (sortedValues.length === 0) {
-    return 0
-  }
-  const position = clamp(fraction, 0, 1) * (sortedValues.length - 1)
-  const lower = Math.floor(position)
-  const upper = Math.ceil(position)
-  if (lower === upper) {
-    return sortedValues[lower]
-  }
-  const amount = position - lower
-  return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * amount
-}
-
-function trimmedRange(values: readonly number[], trimFraction: number): StructuralIntersectionRange | null {
-  if (values.length === 0) {
-    return null
-  }
-  const sortedValues = [...values].sort((first, second) => first - second)
-  if (sortedValues.length < 5) {
-    return { minimum: sortedValues[0], maximum: sortedValues[sortedValues.length - 1] }
-  }
-  return {
-    minimum: quantile(sortedValues, clamp(trimFraction, 0, 0.45)),
-    maximum: quantile(sortedValues, 1 - clamp(trimFraction, 0, 0.45)),
-  }
-}
-
-function summarizeSupportNearLine(
-  points: readonly SpatialPoint[],
-  line: StructuralIntersectionLine,
-  maximumDistanceMeters: number,
-  trimFraction: number,
-): SupportLineSummary {
-  const nearLineValues: number[] = []
-  let minimumDistance = Infinity
-  for (const point of points) {
-    const fromOrigin = subtract(point, line.origin)
-    const lineDistance = magnitude(cross(fromOrigin, line.direction))
-    if (!isFiniteNumber(lineDistance)) {
-      continue
-    }
-    minimumDistance = Math.min(minimumDistance, lineDistance)
-    if (lineDistance <= maximumDistanceMeters) {
-      nearLineValues.push(dot(fromOrigin, line.direction))
-    }
-  }
-
-  return {
-    nearLineValues,
-    minimumDistance,
-    interval: trimmedRange(nearLineValues, trimFraction),
-  }
 }
 
 function calculateContinuity(
@@ -479,13 +283,13 @@ function buildCandidate(
 
   const pointsA = association.pointsBySurfaceId.get(pair.surfaceA.planeId) ?? []
   const pointsB = association.pointsBySurfaceId.get(pair.surfaceB.planeId) ?? []
-  const supportA = summarizeSupportNearLine(
+  const supportA = collectNearLineSupport(
     pointsA,
     pair.line,
     config.maximumLineSupportDistanceMeters,
     config.intervalTrimFraction,
   )
-  const supportB = summarizeSupportNearLine(
+  const supportB = collectNearLineSupport(
     pointsB,
     pair.line,
     config.maximumLineSupportDistanceMeters,
@@ -600,6 +404,32 @@ function compareCandidates(
     first.surfaceBId.localeCompare(second.surfaceBId)
 }
 
+/**
+ * Development-only audit helper. It never changes selection or intersection
+ * status; it only catches drift between M7.1 relationship claims and M7.2's
+ * two-sided finalized-support validation.
+ */
+export function getStructuralSupportConsistencyWarnings(
+  interpretation: RoomStructureInterpretationResult,
+  result: StructuralIntersectionResult,
+): readonly string[] {
+  const warnings: string[] = []
+  for (const intersection of result.intersections) {
+    const relationship = interpretation.relationships.find((candidate) =>
+      (candidate.firstPlaneId === intersection.surfaceAId && candidate.secondPlaneId === intersection.surfaceBId) ||
+      (candidate.firstPlaneId === intersection.surfaceBId && candidate.secondPlaneId === intersection.surfaceAId))
+    if (!relationship || !relationship.supportsNearTheoreticalIntersection) {
+      continue
+    }
+    if (intersection.supportCountA === 0 || intersection.supportCountB === 0) {
+      warnings.push(
+        `${intersection.id}: M7.1 claimed two-sided theoretical-line support, but M7.2 found ${intersection.supportCountA}/${intersection.supportCountB} near-line support points`,
+      )
+    }
+  }
+  return Object.freeze(warnings)
+}
+
 function createPairDefinitions(interpretation: RoomStructureInterpretationResult): PairDefinition[] {
   const walls = interpretation.selectedWalls
     .filter((surface) => surface.selection === 'selected' && surface.role === 'wall')
@@ -649,7 +479,7 @@ export class StructuralIntersectionService {
       const normalizedA = normalizeSurface(pair.surfaceA)
       const normalizedB = normalizeSurface(pair.surfaceB)
       const lineResult = normalizedA && normalizedB
-        ? calculatePlaneIntersection(normalizedA, normalizedB, this.config.minimumPlaneCrossMagnitude)
+        ? computePlanePlaneIntersectionLine(normalizedA, normalizedB, this.config.minimumPlaneCrossMagnitude)
         : { line: null, reason: 'selected surface normal is invalid' }
       return { ...pair, normalizedA, normalizedB, line: lineResult.line, lineRejectionReason: lineResult.reason }
     })
@@ -659,7 +489,20 @@ export class StructuralIntersectionService {
     const normalizedSurfaces = preparedPairs.flatMap((pair) => [pair.normalizedA, pair.normalizedB])
       .filter((surface): surface is NormalizedSurface => surface !== null)
       .filter((surface, index, surfaces) => surfaces.findIndex((candidate) => candidate.surface.planeId === surface.surface.planeId) === index)
-    const association = createSupportAssociation(scan, normalizedSurfaces, this.config)
+    const supportPlanes: SupportPlaneGeometry[] = normalizedSurfaces.map((surface) => ({
+      id: surface.surface.planeId,
+      normal: surface.normal,
+      planeConstant: surface.planeConstant,
+      centroid: surface.surface.centroid,
+      localBounds: surface.surface.localBounds,
+      tangentU: surface.surface.tangentU,
+      tangentV: surface.surface.tangentV,
+    }))
+    const association = associateFinalizedSupportPoints(scan, supportPlanes, {
+      maximumPlaneResidualMeters: this.config.maximumSupportPlaneResidualMeters,
+      minimumNormalDot: this.config.minimumSupportNormalDot,
+      boundsPaddingMeters: this.config.supportBoundsPaddingMeters,
+    })
     const intersections = preparedPairs.map((pair) => buildCandidate(pair, association, this.config))
     const supportValidationMs = now() - supportValidationStartedAt
     const sortedIntersections = intersections.sort(compareCandidates)

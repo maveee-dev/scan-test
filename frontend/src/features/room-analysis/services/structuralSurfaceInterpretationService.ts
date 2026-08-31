@@ -1,3 +1,4 @@
+import type { FinalizedSpatialScan, SpatialPoint } from '../../scanner/types'
 import type {
   PlaneCandidate,
   RoomAnalysisResult,
@@ -7,6 +8,7 @@ import type {
   StructuralGraphComponent,
   StructuralGraphNode,
   StructuralCorePairCandidate,
+  StructuralMultiSurfaceCoherenceDiagnostic,
   StructuralParallelLane,
   StructuralRelationshipType,
   StructuralSurfaceCandidate,
@@ -16,6 +18,13 @@ import type {
   StructuralSurfaceSelection,
   StructuralSurfaceSelectionEvidence,
 } from '../types'
+import {
+  associateFinalizedSupportPoints,
+  collectNearLineSupport,
+  computePlanePlaneIntersectionLine,
+  normalizeSupportPlane,
+  type SupportPlaneGeometry,
+} from './structuralSupportGeometry'
 
 export interface StructuralSurfaceInterpretationConfig {
   readonly minimumWallConfidence: number
@@ -31,7 +40,12 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly sameRolePlaneOffsetToleranceMeters: number
   readonly sameRoleMaximumOffsetSpanMeters: number
   readonly sameRoleSupportGapMeters: number
-  readonly supportIntersectionDistanceMeters: number
+  /** Shared finalized-support association parameters used before line tests. */
+  readonly supportAssociationPlaneResidualMeters: number
+  readonly supportAssociationNormalDot: number
+  readonly supportAssociationBoundsPaddingMeters: number
+  /** Distance from the exact theoretical line for lightweight M7.1 evidence. */
+  readonly supportLineDistanceMeters: number
   readonly minimumWallOrientationScore: number
   readonly minimumWallRelationshipScore: number
   readonly minimumWallNoRelationshipAreaScore: number
@@ -43,6 +57,8 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly minimumGraphEdgeScore: number
   readonly minimumStrongGraphEdgeScore: number
   readonly selectedWallRedundancyAngleDegrees: number
+  readonly minimumMultiSurfaceCoherenceScore: number
+  readonly multiSurfaceRedundancyAngleDegrees: number
 }
 
 export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurfaceInterpretationConfig = {
@@ -59,7 +75,10 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   sameRolePlaneOffsetToleranceMeters: 0.22,
   sameRoleMaximumOffsetSpanMeters: 0.36,
   sameRoleSupportGapMeters: 0.55,
-  supportIntersectionDistanceMeters: 0.12,
+  supportAssociationPlaneResidualMeters: 0.12,
+  supportAssociationNormalDot: 0.45,
+  supportAssociationBoundsPaddingMeters: 0.2,
+  supportLineDistanceMeters: 0.15,
   minimumWallOrientationScore: 0.68,
   minimumWallRelationshipScore: 0.32,
   minimumWallNoRelationshipAreaScore: 0.7,
@@ -71,6 +90,8 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   minimumGraphEdgeScore: 0.42,
   minimumStrongGraphEdgeScore: 0.84,
   selectedWallRedundancyAngleDegrees: 18,
+  minimumMultiSurfaceCoherenceScore: 0.62,
+  multiSurfaceRedundancyAngleDegrees: 18,
 }
 
 const WORLD_UP = { x: 0, y: 1, z: 0 }
@@ -106,12 +127,17 @@ interface RoleEvaluation {
   readonly envelopeSelectionScore: number
   readonly selectionEvidence: StructuralSurfaceSelectionEvidence
   readonly graphSupportScore: number
+  readonly multiSurfaceCoherenceScore: number
   readonly finalSelectionScore: number
 }
 
 interface StructuralOrientationGroup {
   readonly role: 'wall' | 'floor' | 'ceiling'
   readonly members: readonly RoleEvaluation[]
+}
+
+interface RelationshipSupportIndex {
+  readonly pointsBySurfaceId: ReadonlyMap<string, readonly SpatialPoint[]>
 }
 
 function getTimestamp(): number {
@@ -199,22 +225,110 @@ function getOrientationScores(plane: PlaneCandidate): {
   }
 }
 
+function createRelationshipSupportIndex(
+  scan: FinalizedSpatialScan | undefined,
+  planes: readonly PlaneCandidate[],
+  config: StructuralSurfaceInterpretationConfig,
+): RelationshipSupportIndex | null {
+  if (!scan) {
+    return null
+  }
+  const supportPlanes: SupportPlaneGeometry[] = planes.map((plane) => ({
+    id: plane.id,
+    normal: plane.normal,
+    planeConstant: plane.planeConstant,
+    centroid: plane.centroid,
+    localBounds: plane.localBounds,
+    tangentU: plane.tangentU,
+    tangentV: plane.tangentV,
+  }))
+  const association = associateFinalizedSupportPoints(scan, supportPlanes, {
+    maximumPlaneResidualMeters: config.supportAssociationPlaneResidualMeters,
+    minimumNormalDot: config.supportAssociationNormalDot,
+    boundsPaddingMeters: config.supportAssociationBoundsPaddingMeters,
+  })
+  return { pointsBySurfaceId: association.pointsBySurfaceId }
+}
+
 function createRelationship(
   first: PlaneCandidate,
   second: PlaneCandidate,
   config: StructuralSurfaceInterpretationConfig,
+  supportIndex: RelationshipSupportIndex | null,
 ): StructuralSurfaceRelationship {
   const normalAngleDegrees = getNormalAngleDegrees(first, second)
   const planeOffsetDifferenceMeters = getPlaneOffsetDifference(first, second)
   const supportBoundsGapMeters = getSupportBoundsGap(first, second)
   const relationshipType = getRelationshipType(normalAngleDegrees, config)
-  // For parallel surfaces, the plane separation is the useful closest-support
-  // approximation when their finite bounds overlap. It must not collapse to
-  // zero just because their mathematical planes do not intersect.
-  const closestSupportDistanceMeters = relationshipType === 'parallel'
+  const normalizedFirst = normalizeSupportPlane({
+    id: first.id,
+    normal: first.normal,
+    planeConstant: first.planeConstant,
+    centroid: first.centroid,
+    localBounds: first.localBounds,
+    tangentU: first.tangentU,
+    tangentV: first.tangentV,
+  })
+  const normalizedSecond = normalizeSupportPlane({
+    id: second.id,
+    normal: second.normal,
+    planeConstant: second.planeConstant,
+    centroid: second.centroid,
+    localBounds: second.localBounds,
+    tangentU: second.tangentU,
+    tangentV: second.tangentV,
+  })
+  const lineResult = computePlanePlaneIntersectionLine(
+    normalizedFirst ?? { normal: first.normal, planeConstant: first.planeConstant },
+    normalizedSecond ?? { normal: second.normal, planeConstant: second.planeConstant },
+    0.001,
+  )
+  const supportA = lineResult.line && supportIndex
+    ? collectNearLineSupport(
+      supportIndex.pointsBySurfaceId.get(first.id) ?? [],
+      lineResult.line,
+      config.supportLineDistanceMeters,
+      0,
+    )
+    : null
+  const supportB = lineResult.line && supportIndex
+    ? collectNearLineSupport(
+      supportIndex.pointsBySurfaceId.get(second.id) ?? [],
+      lineResult.line,
+      config.supportLineDistanceMeters,
+      0,
+    )
+    : null
+  const nearTheoreticalLineSupportCountA = supportA?.nearLineValues.length ?? 0
+  const nearTheoreticalLineSupportCountB = supportB?.nearLineValues.length ?? 0
+  const nearTheoreticalLineSupportDistanceA = supportA && Number.isFinite(supportA.minimumDistance)
+    ? supportA.minimumDistance
+    : null
+  const nearTheoreticalLineSupportDistanceB = supportB && Number.isFinite(supportB.minimumDistance)
+    ? supportB.minimumDistance
+    : null
+  const supportsNearTheoreticalIntersection = Boolean(
+    lineResult.line && nearTheoreticalLineSupportCountA > 0 && nearTheoreticalLineSupportCountB > 0,
+  )
+  const closestSurfaceSupportDistanceMeters = supportsNearTheoreticalIntersection
+    ? Math.max(nearTheoreticalLineSupportDistanceA ?? Infinity, nearTheoreticalLineSupportDistanceB ?? Infinity)
+    : null
+  const intersectionSupportScore = supportsNearTheoreticalIntersection
+    ? Math.min(
+      clamp(1 - (nearTheoreticalLineSupportDistanceA ?? config.supportLineDistanceMeters) / config.supportLineDistanceMeters, 0, 1),
+      clamp(1 - (nearTheoreticalLineSupportDistanceB ?? config.supportLineDistanceMeters) / config.supportLineDistanceMeters, 0, 1),
+    )
+    : 0
+  // For parallel surfaces, the plane separation is a useful generic support
+  // proximity signal. For intersecting planes, use only actual support near
+  // the theoretical line so M7.1 and M7.2 cannot disagree about the claim.
+  const genericClosestSupportDistanceMeters = relationshipType === 'parallel'
     ? Math.max(supportBoundsGapMeters, planeOffsetDifferenceMeters)
     : supportBoundsGapMeters
-  const proximityScore = getProximityScore(closestSupportDistanceMeters, config)
+  const closestSupportDistanceMeters = closestSurfaceSupportDistanceMeters ?? genericClosestSupportDistanceMeters
+  const proximityScore = lineResult.line
+    ? intersectionSupportScore
+    : getProximityScore(genericClosestSupportDistanceMeters, config)
   const firstOrientation = getOrientationScores(first)
   const secondOrientation = getOrientationScores(second)
   const firstVertical = firstOrientation.orientationScore >= 0.5
@@ -225,7 +339,7 @@ function createRelationship(
   const perpendicularityScore = clamp(1 - Math.abs(normalAngleDegrees - 90) / 90, 0, 1)
   const parallelismScore = clamp(1 - normalAngleDegrees / Math.max(1, config.parallelAngleToleranceDegrees), 0, 1)
   const verticalHorizontalEvidence = relationshipType === 'perpendicular-like'
-    ? perpendicularityScore * proximityScore * (isVerticalHorizontal || (firstVertical && secondVertical) ? 1 : 0.5)
+    ? perpendicularityScore * intersectionSupportScore * (isVerticalHorizontal || (firstVertical && secondVertical) ? 1 : 0.5)
     : 0
 
   return {
@@ -242,11 +356,17 @@ function createRelationship(
     perpendicularityScore,
     parallelismScore,
     relationshipType,
-    // This is a mathematical relationship only. Whether finite measured
-    // support is near it is reported separately by supportNearIntersection.
+    // This is a mathematical relationship only. Support claims below require
+    // actual finalized support on both sides of this exact line.
     planeIntersectionPossible: normalAngleDegrees > config.parallelAngleToleranceDegrees,
-    supportNearIntersection: relationshipType === 'perpendicular-like' &&
-      supportBoundsGapMeters <= config.supportIntersectionDistanceMeters,
+    supportNearIntersection: supportsNearTheoreticalIntersection,
+    nearTheoreticalLineSupportCountA,
+    nearTheoreticalLineSupportCountB,
+    nearTheoreticalLineSupportDistanceA,
+    nearTheoreticalLineSupportDistanceB,
+    supportsNearTheoreticalIntersection,
+    intersectionSupportScore,
+    closestSurfaceSupportDistanceMeters,
     verticalHorizontalEvidence,
   }
 }
@@ -265,7 +385,10 @@ function getRelationshipScore(
     const relationshipScore = relationship.verticalHorizontalEvidence > 0
       ? relationship.verticalHorizontalEvidence
       : relationship.relationshipType === 'perpendicular-like'
-        ? relationship.perpendicularityScore * relationship.proximityScore * 0.5
+        // A perpendicular pair without actual support at its theoretical
+        // intersection is only weak geometric context, never envelope proof.
+        ? relationship.perpendicularityScore * relationship.proximityScore *
+          (relationship.supportsNearTheoreticalIntersection ? 0.5 : 0.15)
         : 0
     return Math.max(best, relationshipScore)
   }, 0), 0, 1)
@@ -497,6 +620,7 @@ function createRoleEvaluation(
     heightScore,
     envelopeSelectionScore,
     graphSupportScore: 0,
+    multiSurfaceCoherenceScore: 0,
     finalSelectionScore: envelopeSelectionScore,
     selectionEvidence: {
       roleConfidence,
@@ -507,6 +631,7 @@ function createRoleEvaluation(
       relationshipScore: context.relationshipScore,
       competitionScore: envelopeSelectionScore,
       graphSupportScore: 0,
+      multiSurfaceCoherenceScore: 0,
     },
   }
 }
@@ -761,6 +886,7 @@ function createSurfaceCandidate(
     confidence: clamp(evaluation.confidence, 0, 1),
     envelopeSelectionScore: evaluation.envelopeSelectionScore,
     graphSupportScore: evaluation.graphSupportScore,
+    multiSurfaceCoherenceScore: evaluation.multiSurfaceCoherenceScore,
     finalSelectionScore: evaluation.finalSelectionScore,
     evidence: createEvidence(context, evaluation.heightScore),
     selectionEvidence: evaluation.selectionEvidence,
@@ -926,6 +1052,7 @@ function createStructuralGraphEdge(
     perpendicularityScore: relationship.perpendicularityScore,
     closestSupportDistanceMeters: relationship.closestSupportDistanceMeters,
     supportNearIntersection: relationship.supportNearIntersection,
+    intersectionSupportScore: relationship.intersectionSupportScore,
     verticalOverlapScore: getVerticalOverlapScore(first.context.plane, second.context.plane),
     proximityScore: relationship.proximityScore,
     edgeScore: clamp(edgeScore, 0, 1),
@@ -1039,11 +1166,13 @@ function applyGraphEvidence(
     return {
       ...evaluation,
       graphSupportScore,
+      multiSurfaceCoherenceScore: evaluation.multiSurfaceCoherenceScore,
       finalSelectionScore,
       selectionEvidence: {
         ...evaluation.selectionEvidence,
         competitionScore: finalSelectionScore,
         graphSupportScore,
+        multiSurfaceCoherenceScore: evaluation.multiSurfaceCoherenceScore,
       },
     }
   })
@@ -1061,6 +1190,119 @@ function getBestWallEdgeToSelected(
       selectedPlaneIds.has(edge.firstPlaneId === planeId ? edge.secondPlaneId : edge.firstPlaneId))
     .reduce<StructuralGraphEdge | null>((best, edge) =>
       !best || edge.edgeScore > best.edgeScore ? edge : best, null)
+}
+
+function getBestGraphEdgeBetween(
+  firstPlaneId: string,
+  secondPlaneId: string,
+  edgeType: StructuralGraphEdge['edgeType'],
+  edges: readonly StructuralGraphEdge[],
+): StructuralGraphEdge | null {
+  return edges
+    .filter((edge) => edge.edgeType === edgeType &&
+      ((edge.firstPlaneId === firstPlaneId && edge.secondPlaneId === secondPlaneId) ||
+        (edge.firstPlaneId === secondPlaneId && edge.secondPlaneId === firstPlaneId)))
+    .reduce<StructuralGraphEdge | null>((best, edge) =>
+      !best || edge.edgeScore > best.edgeScore ? edge : best, null)
+}
+
+function getOrientationNoveltyScore(
+  candidate: RoleEvaluation,
+  selectedWall: RoleEvaluation,
+  config: StructuralSurfaceInterpretationConfig,
+): number {
+  const angle = getNormalAngleDegrees(candidate.context.plane, selectedWall.context.plane)
+  return clamp(
+    (angle - config.multiSurfaceRedundancyAngleDegrees) /
+      Math.max(1, 90 - config.multiSurfaceRedundancyAngleDegrees),
+    0,
+    1,
+  )
+}
+
+function getMultiSurfaceNodeQuality(evaluation: RoleEvaluation): number {
+  return getStructuralNodeQuality(evaluation)
+}
+
+function getBestMultiSurfaceCoherence(
+  candidate: RoleEvaluation,
+  selectedWalls: readonly RoleEvaluation[],
+  horizontalSurfaces: readonly RoleEvaluation[],
+  graphEdges: readonly StructuralGraphEdge[],
+  config: StructuralSurfaceInterpretationConfig,
+): StructuralMultiSurfaceCoherenceDiagnostic | null {
+  if (candidate.role !== 'wall' || !isEnvelopeEligible(candidate, config)) {
+    return null
+  }
+  const candidateNodeQuality = getMultiSurfaceNodeQuality(candidate)
+  const options: StructuralMultiSurfaceCoherenceDiagnostic[] = []
+  for (const selectedWall of selectedWalls) {
+    if (selectedWall.context.plane.id === candidate.context.plane.id) {
+      continue
+    }
+    const orientationNoveltyScore = getOrientationNoveltyScore(candidate, selectedWall, config)
+    if (orientationNoveltyScore <= 0) {
+      continue
+    }
+    const wallWallEdge = getBestGraphEdgeBetween(
+      candidate.context.plane.id,
+      selectedWall.context.plane.id,
+      'corner',
+      graphEdges,
+    )
+    if (!wallWallEdge || !wallWallEdge.supportNearIntersection) {
+      continue
+    }
+
+    for (const horizontalSurface of horizontalSurfaces) {
+      const candidateHorizontalEdge = getBestGraphEdgeBetween(
+        candidate.context.plane.id,
+        horizontalSurface.context.plane.id,
+        'wall-horizontal',
+        graphEdges,
+      )
+      if (!candidateHorizontalEdge || !candidateHorizontalEdge.supportNearIntersection) {
+        continue
+      }
+      const existingHorizontalEdge = getBestGraphEdgeBetween(
+        selectedWall.context.plane.id,
+        horizontalSurface.context.plane.id,
+        'wall-horizontal',
+        graphEdges,
+      )
+      const existingNodeQuality = getMultiSurfaceNodeQuality(selectedWall)
+      const horizontalNodeQuality = getMultiSurfaceNodeQuality(horizontalSurface)
+      const pairQuality = existingHorizontalEdge
+        ? wallWallEdge.edgeScore * 0.45 + candidateHorizontalEdge.edgeScore * 0.35 + existingHorizontalEdge.edgeScore * 0.2
+        : wallWallEdge.edgeScore * 0.55 + candidateHorizontalEdge.edgeScore * 0.45
+      const nodeQuality = Math.cbrt(candidateNodeQuality * existingNodeQuality * horizontalNodeQuality)
+      const multiSurfaceCoherenceScore = clamp(
+        pairQuality * 0.58 + nodeQuality * 0.27 + orientationNoveltyScore * 0.15,
+        0,
+        1,
+      )
+      options.push({
+        candidatePlaneId: candidate.context.plane.id,
+        existingWallPlaneId: selectedWall.context.plane.id,
+        horizontalPlaneId: horizontalSurface.context.plane.id,
+        wallWallEdgeScore: wallWallEdge.edgeScore,
+        candidateHorizontalEdgeScore: candidateHorizontalEdge.edgeScore,
+        existingHorizontalEdgeScore: existingHorizontalEdge?.edgeScore ?? 0,
+        candidateNodeQuality,
+        existingNodeQuality,
+        horizontalNodeQuality,
+        orientationNoveltyScore,
+        multiSurfaceCoherenceScore,
+        selected: false,
+        reason: existingHorizontalEdge
+          ? 'coherent wall-wall-horizontal triad'
+          : 'coherent wall-wall-horizontal triad; anchor horizontal relationship unavailable',
+      })
+    }
+  }
+  return options.sort((left, right) => right.multiSurfaceCoherenceScore - left.multiSurfaceCoherenceScore ||
+    left.existingWallPlaneId.localeCompare(right.existingWallPlaneId) ||
+    left.horizontalPlaneId.localeCompare(right.horizontalPlaneId))[0] ?? null
 }
 
 function getClosestSelectedWall(
@@ -1226,9 +1468,15 @@ export class StructuralSurfaceInterpretationService {
   public interpret(
     analysisResult: RoomAnalysisResult,
     referenceSpaceType: 'local-floor' | 'local',
+    finalizedScan?: FinalizedSpatialScan,
   ): RoomStructureInterpretationResult {
     const totalStartedAt = getTimestamp()
     const relationshipStartedAt = getTimestamp()
+    const relationshipSupportIndex = createRelationshipSupportIndex(
+      finalizedScan,
+      analysisResult.planes,
+      this.config,
+    )
     const relationships: StructuralSurfaceRelationship[] = []
     for (let firstIndex = 0; firstIndex < analysisResult.planes.length; firstIndex += 1) {
       for (let secondIndex = firstIndex + 1; secondIndex < analysisResult.planes.length; secondIndex += 1) {
@@ -1236,6 +1484,7 @@ export class StructuralSurfaceInterpretationService {
           analysisResult.planes[firstIndex],
           analysisResult.planes[secondIndex],
           this.config,
+          relationshipSupportIndex,
         ))
       }
     }
@@ -1270,7 +1519,7 @@ export class StructuralSurfaceInterpretationService {
       this.config,
     )
     const evaluations = applyGraphEvidence(initialEvaluations, graph.graphSupportByPlaneId)
-    const evaluationByPlaneId = new Map(evaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
+    let evaluationByPlaneId = new Map(evaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
     const structuralCorePairCandidates = getWallCorePairCandidates(evaluations, graph.edges, this.config)
     const getUpdatedGroupMembers = (group: StructuralOrientationGroup): RoleEvaluation[] =>
       group.members
@@ -1299,6 +1548,16 @@ export class StructuralSurfaceInterpretationService {
 
     const eligibleWalls = evaluations
       .filter((evaluation) => evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config))
+    const floorEligible = floorOrientationGroups.flatMap((group) => getUpdatedGroupMembers(group))
+      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
+      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+    const ceilingEligible = ceilingOrientationGroups.flatMap((group) => getUpdatedGroupMembers(group))
+      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
+      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
+    const selectedFloorEvaluation = floorEligible[0]
+    const selectedCeilingEvaluation = ceilingEligible[0]
+    const selectedFloorId = selectedFloorEvaluation?.context.plane.id ?? null
+    const selectedCeilingId = selectedCeilingEvaluation?.context.plane.id ?? null
     const seedPair = structuralCorePairCandidates[0]
     const seedEdge = seedPair
       ? graph.edges.find((edge) => edge.firstPlaneId === seedPair.firstPlaneId && edge.secondPlaneId === seedPair.secondPlaneId)
@@ -1385,6 +1644,74 @@ export class StructuralSurfaceInterpretationService {
       }
     }
 
+    const selectedHorizontalEvaluations = [selectedFloorEvaluation, selectedCeilingEvaluation]
+      .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation))
+    const multiSurfaceCoherenceByPlaneId = new Map<string, number>()
+    const multiSurfaceDiagnosticByKey = new Map<string, StructuralMultiSurfaceCoherenceDiagnostic>()
+    let addedTriadWall = true
+    while (addedTriadWall && selectedHorizontalEvaluations.length > 0) {
+      addedTriadWall = false
+      const selectedEvaluations = [...selectedWallIds]
+        .map((planeId) => evaluationByPlaneId.get(planeId))
+        .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall'))
+      const triadOptions = eligibleWalls
+        .filter((evaluation) => !selectedWallIds.has(evaluation.context.plane.id))
+        .map((evaluation) => getBestMultiSurfaceCoherence(
+          evaluation,
+          selectedEvaluations,
+          selectedHorizontalEvaluations,
+          graph.edges,
+          this.config,
+        ))
+        .filter((diagnostic): diagnostic is StructuralMultiSurfaceCoherenceDiagnostic => Boolean(diagnostic))
+        .sort((left, right) => right.multiSurfaceCoherenceScore - left.multiSurfaceCoherenceScore ||
+          left.candidatePlaneId.localeCompare(right.candidatePlaneId))
+
+      for (const diagnostic of triadOptions) {
+        const key = `${diagnostic.candidatePlaneId}/${diagnostic.existingWallPlaneId}/${diagnostic.horizontalPlaneId}`
+        if (!multiSurfaceDiagnosticByKey.has(key)) {
+          multiSurfaceDiagnosticByKey.set(key, diagnostic)
+        }
+        if (diagnostic.multiSurfaceCoherenceScore < this.config.minimumMultiSurfaceCoherenceScore) {
+          multiSurfaceDiagnosticByKey.set(key, {
+            ...diagnostic,
+            reason: 'insufficient multi-surface coherence score',
+          })
+          continue
+        }
+        const candidate = evaluationByPlaneId.get(diagnostic.candidatePlaneId)
+        if (!candidate || candidate.role !== 'wall') {
+          continue
+        }
+        multiSurfaceCoherenceByPlaneId.set(
+          candidate.context.plane.id,
+          Math.max(multiSurfaceCoherenceByPlaneId.get(candidate.context.plane.id) ?? 0, diagnostic.multiSurfaceCoherenceScore),
+        )
+        multiSurfaceDiagnosticByKey.set(key, { ...diagnostic, selected: true })
+        addSelectedWall(candidate, 'coherent wall-wall-horizontal triad')
+        addedTriadWall = true
+        break
+      }
+    }
+
+    const finalEvaluations = evaluations.map((evaluation) => {
+      const multiSurfaceCoherenceScore = multiSurfaceCoherenceByPlaneId.get(evaluation.context.plane.id) ?? 0
+      const finalSelectionScore = multiSurfaceCoherenceScore > 0
+        ? clamp(evaluation.finalSelectionScore * 0.8 + multiSurfaceCoherenceScore * 0.2, 0, 1)
+        : evaluation.finalSelectionScore
+      return {
+        ...evaluation,
+        multiSurfaceCoherenceScore,
+        finalSelectionScore,
+        selectionEvidence: {
+          ...evaluation.selectionEvidence,
+          competitionScore: finalSelectionScore,
+          multiSurfaceCoherenceScore,
+        },
+      }
+    })
+    evaluationByPlaneId = new Map(finalEvaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
+
     const selectedWallComponents = new Set<number>()
     for (const [componentIndex, component] of graph.components.entries()) {
       if ([...selectedWallIds].some((planeId) => component.has(planeId))) {
@@ -1410,16 +1737,6 @@ export class StructuralSurfaceInterpretationService {
       ))
     }
 
-    const floorEligible = floorOrientationGroups.flatMap((group) => getUpdatedGroupMembers(group))
-      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
-      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
-    const ceilingEligible = ceilingOrientationGroups.flatMap((group) => getUpdatedGroupMembers(group))
-      .filter((evaluation) => isEnvelopeEligible(evaluation, this.config))
-      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left))
-    const selectedFloorEvaluation = floorEligible[0]
-    const selectedCeilingEvaluation = ceilingEligible[0]
-    const selectedFloorId = selectedFloorEvaluation?.context.plane.id ?? null
-    const selectedCeilingId = selectedCeilingEvaluation?.context.plane.id ?? null
     const alternateFloorIds = new Set(floorOrientationGroups.flatMap((group) =>
       getUpdatedGroupMembers(group).filter((member) => member.context.plane.id !== selectedFloorId).map((member) => member.context.plane.id)))
     const alternateCeilingIds = new Set(ceilingOrientationGroups.flatMap((group) =>
@@ -1444,7 +1761,7 @@ export class StructuralSurfaceInterpretationService {
       return 'unselected'
     }
 
-    const surfaces = evaluations.map((evaluation) => {
+    const surfaces = finalEvaluations.map((evaluation) => {
       const selection = getSelection(evaluation)
       const reason = evaluation.role === 'wall'
         ? wallSelectionReasons.get(evaluation.context.plane.id) ?? getSelectionReason(evaluation, selection, false, this.config)
@@ -1488,6 +1805,10 @@ export class StructuralSurfaceInterpretationService {
       ...candidate,
       selected: selectedWallIds.has(candidate.firstPlaneId) && selectedWallIds.has(candidate.secondPlaneId),
     }))
+    const multiSurfaceCoherenceDiagnostics = [...multiSurfaceDiagnosticByKey.values()]
+      .sort((left, right) => right.multiSurfaceCoherenceScore - left.multiSurfaceCoherenceScore ||
+        left.candidatePlaneId.localeCompare(right.candidatePlaneId) ||
+        left.existingWallPlaneId.localeCompare(right.existingWallPlaneId))
 
     return Object.freeze({
       sourceScanId: analysisResult.sourceScanId,
@@ -1508,6 +1829,7 @@ export class StructuralSurfaceInterpretationService {
       structuralGraphComponents: graph.componentRecords,
       selectedWallCorePlaneIds: Object.freeze([...selectedWallIds]),
       structuralCorePairCandidates: Object.freeze(corePairDiagnostics),
+      multiSurfaceCoherenceDiagnostics: Object.freeze(multiSurfaceCoherenceDiagnostics),
       likelyWalls: freezeSurfaceArray(selectedWalls),
       floorCandidate: selectedFloor,
       ceilingCandidate: selectedCeiling,
@@ -1535,6 +1857,8 @@ export class StructuralSurfaceInterpretationService {
         structuralGraphComponentCount: graph.componentRecords.length,
         selectedWallCoreCount: selectedWallIds.size,
         eligibleStrongWallEdgeCount: structuralCorePairCandidates.length,
+        multiSurfaceCoherenceCandidateCount: multiSurfaceCoherenceDiagnostics.length,
+        selectedMultiSurfaceCoherenceCount: multiSurfaceCoherenceDiagnostics.filter((candidate) => candidate.selected).length,
       },
       timings: {
         relationshipAnalysisMs: Math.max(0, relationshipFinishedAt - relationshipStartedAt),

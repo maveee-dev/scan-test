@@ -3,7 +3,10 @@ import { BUILD_INFO } from '../../../config/buildInfo'
 import type { FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
 import { RoomBoundaryReconstructionService } from '../../room-analysis/services/roomBoundaryReconstructionService'
-import { StructuralIntersectionService } from '../../room-analysis/services/structuralIntersectionService'
+import {
+  getStructuralSupportConsistencyWarnings,
+  StructuralIntersectionService,
+} from '../../room-analysis/services/structuralIntersectionService'
 import { StructuralSurfaceInterpretationService } from '../../room-analysis/services/structuralSurfaceInterpretationService'
 import type {
   RoomAnalysisResult,
@@ -194,6 +197,7 @@ function StructuralSurfaceSummary({
   const strongGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'strong')
   const supportingGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'supporting')
   const topCoreCandidates = interpretation.structuralCorePairCandidates.slice(0, 6)
+  const topTriadCandidates = interpretation.multiSurfaceCoherenceDiagnostics.slice(0, 6)
 
   return (
     <section className="scanner-analysis-result" aria-labelledby="structural-surfaces-title">
@@ -257,6 +261,10 @@ function StructuralSurfaceSummary({
           <span>Eligible strong wall edges</span>
           <strong>{interpretation.stats.eligibleStrongWallEdgeCount}</strong>
         </div>
+        <div>
+          <span>Multi-surface candidates / selected</span>
+          <strong>{interpretation.stats.multiSurfaceCoherenceCandidateCount} / {interpretation.stats.selectedMultiSurfaceCoherenceCount}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
@@ -283,6 +291,13 @@ function StructuralSurfaceSummary({
               const second = planeById.get(candidate.secondPlaneId)
               return `${candidate.firstPlaneId}/${candidate.secondPlaneId} edge ${candidate.edgeScore.toFixed(2)}, nodes ${candidate.firstNodeQuality.toFixed(2)}/${candidate.secondNodeQuality.toFixed(2)}, area ${first?.occupiedArea.toFixed(2) ?? 'n/a'}/${second?.occupiedArea.toFixed(2) ?? 'n/a'} m2, support ${first?.finalOwnedSupport ?? 'n/a'}/${second?.finalOwnedSupport ?? 'n/a'}, joint ${candidate.jointCoreScore.toFixed(2)}${candidate.selected ? ' [selected]' : ''}`
             }).join(' | ')}
+          </span>
+        </div>
+      ) : null}
+      {topTriadCandidates.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Multi-surface coherence: {topTriadCandidates.map((candidate) => `${candidate.candidatePlaneId} with ${candidate.existingWallPlaneId} + ${candidate.horizontalPlaneId} | wall-wall ${candidate.wallWallEdgeScore.toFixed(2)} | candidate-horizontal ${candidate.candidateHorizontalEdgeScore.toFixed(2)} | node ${candidate.candidateNodeQuality.toFixed(2)} | coherence ${candidate.multiSurfaceCoherenceScore.toFixed(2)}${candidate.selected ? ' [selected]' : ` [${candidate.reason}]`}`).join(' | ')}
           </span>
         </div>
       ) : null}
@@ -322,8 +337,10 @@ function StructuralSurfaceSummary({
             Key relationships: {relevantRelationships.map((relationship) => {
               const first = planeById.get(relationship.firstPlaneId)
               const second = planeById.get(relationship.secondPlaneId)
-              const supportDistance = relationship.closestSupportDistanceMeters.toFixed(2)
-              return `${relationship.firstPlaneId} (${first ? getStructuralRoleLabel(first.role) : 'surface'}) / ${relationship.secondPlaneId} (${second ? getStructuralRoleLabel(second.role) : 'surface'}) ${relationship.relationshipType}, angle ${relationship.normalAngleDegrees.toFixed(1)} deg, closest support ${supportDistance} m, ${relationship.supportNearIntersection ? 'supports near intersection' : 'supports not near intersection'}`
+              const supportDistance = relationship.closestSurfaceSupportDistanceMeters === null
+                ? 'n/a'
+                : `${relationship.closestSurfaceSupportDistanceMeters.toFixed(2)} m`
+              return `${relationship.firstPlaneId} (${first ? getStructuralRoleLabel(first.role) : 'surface'}) / ${relationship.secondPlaneId} (${second ? getStructuralRoleLabel(second.role) : 'surface'}) ${relationship.relationshipType}, angle ${relationship.normalAngleDegrees.toFixed(1)} deg, bounds gap ${relationship.supportBoundsGapMeters.toFixed(2)} m, line support ${supportDistance}, near-line ${relationship.nearTheoreticalLineSupportCountA}/${relationship.nearTheoreticalLineSupportCountB}, ${relationship.supportsNearTheoreticalIntersection ? 'supports near theoretical intersection' : 'no two-sided theoretical-line support'}`
             }).join(' | ')}
           </span>
         </div>
@@ -334,7 +351,7 @@ function StructuralSurfaceSummary({
             Structural graph edges: {[...interpretation.structuralGraphEdges]
               .sort((left, right) => right.edgeScore - left.edgeScore)
               .slice(0, 6)
-              .map((edge) => `${edge.firstPlaneId}/${edge.secondPlaneId} ${edge.edgeType} (${edge.edgeStrength}), score ${edge.edgeScore.toFixed(2)}, angle ${edge.normalAngleDegrees.toFixed(1)} deg, closest support ${edge.closestSupportDistanceMeters.toFixed(2)} m`)
+              .map((edge) => `${edge.firstPlaneId}/${edge.secondPlaneId} ${edge.edgeType} (${edge.edgeStrength}), score ${edge.edgeScore.toFixed(2)}, angle ${edge.normalAngleDegrees.toFixed(1)} deg, intersection support ${edge.intersectionSupportScore.toFixed(2)}, closest support ${edge.closestSupportDistanceMeters.toFixed(2)} m`)
               .join(' | ')}
           </span>
         </div>
@@ -358,7 +375,7 @@ function StructuralSurfaceRow({
         <small>{selectionLabel} | {getStructuralRoleLabel(surface.role)} | role confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m | normal ({surface.normal.x.toFixed(2)}, {surface.normal.y.toFixed(2)}, {surface.normal.z.toFixed(2)}) | d {(-surface.planeConstant).toFixed(3)}</small>
       </span>
       <span>
-        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | envelope score {surface.envelopeSelectionScore.toFixed(2)} | graph support {surface.graphSupportScore.toFixed(2)} | final selection {surface.finalSelectionScore.toFixed(2)} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)} | {surface.selectionReason}
+        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | envelope score {surface.envelopeSelectionScore.toFixed(2)} | graph support {surface.graphSupportScore.toFixed(2)} | multi-surface coherence {surface.multiSurfaceCoherenceScore.toFixed(2)} | final selection {surface.finalSelectionScore.toFixed(2)} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)} | {surface.selectionReason}
       </span>
     </div>
   )
@@ -374,8 +391,10 @@ function formatRange(range: { minimum: number; maximum: number } | null): string
 
 function StructuralIntersectionSummary({
   result,
+  consistencyWarnings = [],
 }: {
   result: StructuralIntersectionResult
+  consistencyWarnings?: readonly string[]
 }) {
   const supported = result.intersections.filter((intersection) => intersection.status === 'supported')
   const partial = result.intersections.filter((intersection) => intersection.status === 'partial')
@@ -433,6 +452,11 @@ function StructuralIntersectionSummary({
           Timing: pair preparation {result.timings.pairPreparationMs.toFixed(1)} ms | line calculation {result.timings.lineCalculationMs.toFixed(1)} ms | support validation {result.timings.supportValidationMs.toFixed(1)} ms | total {result.timings.totalMs.toFixed(1)} ms
         </span>
       </div>
+      {import.meta.env.DEV && consistencyWarnings.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>Development support-consistency warnings: {consistencyWarnings.join(' | ')}</span>
+        </div>
+      ) : null}
       {result.intersections.length > 0 ? (
         <div className="scanner-plane-list">
           {result.intersections.map((intersection) => (
@@ -600,6 +624,7 @@ function ScannerFinishedView({
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
   const [interpretationResult, setInterpretationResult] = useState<RoomStructureInterpretationResult | null>(null)
   const [intersectionResult, setIntersectionResult] = useState<StructuralIntersectionResult | null>(null)
+  const [supportConsistencyWarnings, setSupportConsistencyWarnings] = useState<readonly string[]>([])
   const [boundaryResult, setBoundaryResult] = useState<RoomBoundaryResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
@@ -625,6 +650,7 @@ function ScannerFinishedView({
     setAnalysisResult(null)
     setInterpretationResult(null)
     setIntersectionResult(null)
+    setSupportConsistencyWarnings([])
     setBoundaryResult(null)
     analysisTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) {
@@ -633,12 +659,16 @@ function ScannerFinishedView({
 
       try {
         const nextAnalysisResult = analysisService.analyze(scan)
-        const nextInterpretationResult = interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType)
+        const nextInterpretationResult = interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType, scan)
         const nextIntersectionResult = intersectionService.analyze(nextInterpretationResult, scan)
         const nextBoundaryResult = boundaryService.reconstruct(nextInterpretationResult, nextIntersectionResult)
+        const nextSupportConsistencyWarnings = import.meta.env.DEV
+          ? getStructuralSupportConsistencyWarnings(nextInterpretationResult, nextIntersectionResult)
+          : []
         setAnalysisResult(nextAnalysisResult)
         setInterpretationResult(nextInterpretationResult)
         setIntersectionResult(nextIntersectionResult)
+        setSupportConsistencyWarnings(nextSupportConsistencyWarnings)
         setBoundaryResult(nextBoundaryResult)
       } catch (error: unknown) {
         setAnalysisError(
@@ -706,7 +736,7 @@ function ScannerFinishedView({
         <>
           <AnalysisResultSummary analysisResult={analysisResult} />
           {interpretationResult ? <StructuralSurfaceSummary interpretation={interpretationResult} /> : null}
-          {intersectionResult ? <StructuralIntersectionSummary result={intersectionResult} /> : null}
+          {intersectionResult ? <StructuralIntersectionSummary result={intersectionResult} consistencyWarnings={supportConsistencyWarnings} /> : null}
           {boundaryResult ? <RoomBoundarySummary result={boundaryResult} /> : null}
           {analysisResult.stats.provisionalPlaneCount > 0 ? (
         <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">

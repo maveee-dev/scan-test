@@ -492,6 +492,15 @@ wall-like candidates remain alternate or uncertain unless they have compelling
 independent boundary evidence. This graph is a selection aid only: it does not
 construct exact intersection lines or merge geometric planes.
 
+Relationship support has one shared geometric meaning across interpretation and
+intersection analysis. A mathematical plane intersection is calculated first;
+"support near the theoretical intersection" then means that each involved
+surface has actual exclusive finalized fused support within the bounded distance
+of that exact line. A generic support-bounds gap is reported separately and is
+not enough to claim an observed corner. M7.1 uses this lightweight two-sided
+test for graph evidence, while M7.2 remains responsible for finite interval,
+continuity, and supported/partial/rejected segment validation.
+
 Final room-envelope selection is seeded from the strongest coherent structural
 edges rather than promoting every node in a connected graph component. Candidate
 growth checks the whole selected set for redundant wall directions, admits a
@@ -505,6 +514,14 @@ surface support, occupied extent, orientation, fit quality, and room-envelope
 evidence prevent a tiny high-angle fragment from displacing a dominant measured
 surface. The selected core continues to reference the original geometric planes
 for later intersection processing.
+
+For a two-wall-plus-horizontal observation, structural interpretation can also
+evaluate a bounded multi-surface coherence hypothesis. A candidate wall may be
+admitted when its wall-wall relationship, wall-ceiling or wall-floor relationship,
+node quality, and orientation novelty jointly support one coherent triad. This
+does not lower the global strong-edge rule and does not average or rewrite any
+plane. A candidate without actual near-line support remains alternate or
+uncertain, even when its fitted planes are mathematically perpendicular.
 
 Selected structural surfaces then feed the M7.2 intersection stage:
 
