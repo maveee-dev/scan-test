@@ -485,6 +485,13 @@ planes, while alternates preserve useful evidence. The interpretation preserves
 uncertainty and does not yet create plane intersections, a room boundary, or a
 final room mesh.
 
+Structural selection also builds a bounded relationship graph over viable
+surface candidates. Strong wall-wall corner relationships and wall-horizontal
+envelope relationships support a coherent selected subset, while disconnected
+wall-like candidates remain alternate or uncertain unless they have compelling
+independent boundary evidence. This graph is a selection aid only: it does not
+construct exact intersection lines or merge geometric planes.
+
 The longer-term post-scan direction is:
 
 ```text

@@ -110,6 +110,7 @@ export interface StructuralSurfaceSelectionEvidence {
   readonly heightScore: number
   readonly relationshipScore: number
   readonly competitionScore: number
+  readonly graphSupportScore: number
 }
 
 export interface StructuralSurfaceCandidate {
@@ -122,6 +123,10 @@ export interface StructuralSurfaceCandidate {
   readonly confidence: number
   /** Confidence that this candidate belongs in the room envelope. */
   readonly envelopeSelectionScore: number
+  /** Support supplied by selected structural relationships. */
+  readonly graphSupportScore: number
+  /** Final deterministic score used by structural subset selection. */
+  readonly finalSelectionScore: number
   readonly evidence: StructuralSurfaceEvidence
   readonly selectionEvidence: StructuralSurfaceSelectionEvidence
   readonly selectionReason: string
@@ -186,6 +191,31 @@ export interface StructuralParallelLane {
   readonly planeOffsetSpanMeters: number
 }
 
+export interface StructuralGraphNode {
+  readonly planeId: string
+  readonly role: 'wall' | 'floor' | 'ceiling'
+  readonly orientationGroupId: string | null
+  readonly roleConfidence: number
+  readonly envelopeSelectionScore: number
+  readonly ownedSupport: number
+  readonly occupiedArea: number
+  readonly normal: SpatialPoint
+  readonly planeConstant: number
+}
+
+export interface StructuralGraphEdge {
+  readonly firstPlaneId: string
+  readonly secondPlaneId: string
+  readonly edgeType: 'corner' | 'wall-horizontal' | 'parallel-boundary'
+  readonly normalAngleDegrees: number
+  readonly perpendicularityScore: number
+  readonly closestSupportDistanceMeters: number
+  readonly supportNearIntersection: boolean
+  readonly verticalOverlapScore: number
+  readonly proximityScore: number
+  readonly edgeScore: number
+}
+
 export interface RoomStructureInterpretationResult {
   readonly sourceScanId: string
   readonly referenceSpaceType: 'local-floor' | 'local'
@@ -202,6 +232,8 @@ export interface RoomStructureInterpretationResult {
   readonly directionGroups: readonly StructuralDirectionGroup[]
   readonly wallOrientationGroups: readonly StructuralDirectionGroup[]
   readonly parallelLanes: readonly StructuralParallelLane[]
+  readonly structuralGraphNodes: readonly StructuralGraphNode[]
+  readonly structuralGraphEdges: readonly StructuralGraphEdge[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
@@ -220,6 +252,9 @@ export interface RoomStructureInterpretationResult {
     readonly selectedCeilingCount: number
     readonly alternateCeilingCount: number
     readonly wallDirectionGroupCount: number
+    readonly selectedWallComponentCount: number
+    readonly structuralGraphNodeCount: number
+    readonly structuralGraphEdgeCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number

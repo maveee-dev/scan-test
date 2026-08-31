@@ -178,7 +178,7 @@ function StructuralSurfaceSummary({
   interpretation: RoomStructureInterpretationResult
 }) {
   const planeById = new Map(interpretation.surfaces.map((surface) => [surface.planeId, surface]))
-  const relevantRelationships = interpretation.relationships
+  const relevantRelationships = [...interpretation.relationships]
     .filter((relationship) => relationship.relationshipType !== 'other')
     .sort((left, right) => right.verticalHorizontalEvidence - left.verticalHorizontalEvidence ||
       right.perpendicularityScore - left.perpendicularityScore)
@@ -229,10 +229,18 @@ function StructuralSurfaceSummary({
           <span>Unknown</span>
           <strong>{interpretation.stats.unknownCount}</strong>
         </div>
+        <div>
+          <span>Structural graph nodes / edges</span>
+          <strong>{interpretation.stats.structuralGraphNodeCount} / {interpretation.stats.structuralGraphEdgeCount}</strong>
+        </div>
+        <div>
+          <span>Selected wall components</span>
+          <strong>{interpretation.stats.selectedWallComponentCount}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
-          Reference space: {interpretation.referenceSpaceType} | wall direction groups {interpretation.stats.wallDirectionGroupCount} | relationships {interpretation.relationships.length} | timing relationships {interpretation.timings.relationshipAnalysisMs.toFixed(1)} ms | interpretation {interpretation.timings.interpretationMs.toFixed(1)} ms | total {interpretation.timings.totalMs.toFixed(1)} ms
+          Reference space: {interpretation.referenceSpaceType} | wall direction groups {interpretation.stats.wallDirectionGroupCount} | graph nodes {interpretation.stats.structuralGraphNodeCount} | graph edges {interpretation.stats.structuralGraphEdgeCount} | relationships {interpretation.relationships.length} | timing relationships {interpretation.timings.relationshipAnalysisMs.toFixed(1)} ms | interpretation {interpretation.timings.interpretationMs.toFixed(1)} ms | total {interpretation.timings.totalMs.toFixed(1)} ms
         </span>
       </div>
       {interpretation.directionGroups.length > 0 ? (
@@ -284,6 +292,17 @@ function StructuralSurfaceSummary({
           </span>
         </div>
       ) : null}
+      {interpretation.structuralGraphEdges.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Structural graph edges: {[...interpretation.structuralGraphEdges]
+              .sort((left, right) => right.edgeScore - left.edgeScore)
+              .slice(0, 6)
+              .map((edge) => `${edge.firstPlaneId}/${edge.secondPlaneId} ${edge.edgeType}, score ${edge.edgeScore.toFixed(2)}, angle ${edge.normalAngleDegrees.toFixed(1)} deg, closest support ${edge.closestSupportDistanceMeters.toFixed(2)} m`)
+              .join(' | ')}
+          </span>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -303,7 +322,7 @@ function StructuralSurfaceRow({
         <small>{selectionLabel} | {getStructuralRoleLabel(surface.role)} | role confidence {surface.confidence.toFixed(2)} | height {surface.centroidHeight.toFixed(2)} m | normal ({surface.normal.x.toFixed(2)}, {surface.normal.y.toFixed(2)}, {surface.normal.z.toFixed(2)}) | d {(-surface.planeConstant).toFixed(3)}</small>
       </span>
       <span>
-        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | envelope score {surface.envelopeSelectionScore.toFixed(2)} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)} | {surface.selectionReason}
+        area {surface.occupiedArea.toFixed(2)} m2 | final owned support {surface.finalOwnedSupport} | envelope score {surface.envelopeSelectionScore.toFixed(2)} | graph support {surface.graphSupportScore.toFixed(2)} | final selection {surface.finalSelectionScore.toFixed(2)} | orientation {surface.evidence.orientationScore.toFixed(2)} | size {surface.evidence.sizeScore.toFixed(2)} | support {surface.evidence.supportScore.toFixed(2)} | height {surface.evidence.heightScore.toFixed(2)} | relationships {surface.evidence.relationshipScore.toFixed(2)} | {surface.selectionReason}
       </span>
     </div>
   )
