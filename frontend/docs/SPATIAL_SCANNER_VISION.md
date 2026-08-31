@@ -556,7 +556,15 @@ Intersection candidates use only selected surfaces and the real finalized
 fused-surface support. Infinite mathematical lines are not treated as room
 edges until both surfaces provide nearby measured support. Supported and
 partial finite segments are retained with their uncertainty and continuity;
-missing support is not completed or extended into a room mesh in M7.2.
+missing support is not completed or extended into a room mesh in M7.2. Raw
+support points validate the theoretical line but do not become its endpoints:
+near-line points are projected to scalar parameters on the line, robust
+supported intervals are trimmed, and finite segment endpoints are rebuilt as
+`origin + direction * t`. The canonical plane convention is
+`normal dot position = planeConstant`, equivalent to
+`normal dot position + d = 0` with `d = -planeConstant`. M7.2 audits the line
+origin, direction, and segment endpoints against both source planes so a
+support-validated segment cannot drift into a parallel offset line.
 
 M7.3 consumes those finite intersections as a structural boundary graph. It
 clusters nearby segment endpoints, keeps selected surface IDs attached to each

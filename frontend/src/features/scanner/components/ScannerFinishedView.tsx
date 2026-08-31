@@ -495,10 +495,14 @@ function StructuralIntersectionRow({
         </small>
       </span>
       <span>
-        segment {segmentText} | length {intersection.lengthMeters.toFixed(2)} m | support {intersection.supportCountA}/{intersection.supportCountB} ({intersection.intervalSupportCountA}/{intersection.intervalSupportCountB} in interval) | intervals {formatRange(intersection.supportIntervalA)} / {formatRange(intersection.supportIntervalB)} | closest support {supportDistanceText} | near line {intersection.supportNearIntersection ? 'yes' : 'no'} | continuity {(intersection.segmentContinuity * 100).toFixed(0)}% | confidence {intersection.confidence.toFixed(2)}{intersection.rejectionReason ? ` | ${intersection.rejectionReason}` : ''}
+        segment {segmentText} | length {intersection.lengthMeters.toFixed(2)} m | support {intersection.supportCountA}/{intersection.supportCountB} ({intersection.intervalSupportCountA}/{intersection.intervalSupportCountB} in interval) | intervals {formatRange(intersection.supportIntervalA)} / {formatRange(intersection.supportIntervalB)} | closest support {supportDistanceText} | near line {intersection.supportNearIntersection ? 'yes' : 'no'} | continuity {(intersection.segmentContinuity * 100).toFixed(0)}% | confidence {intersection.confidence.toFixed(2)} | line residual origin {formatResidual(intersection.lineOriginResidualA)}/{formatResidual(intersection.lineOriginResidualB)} | endpoint residual start {formatResidual(intersection.segmentStartResidualA)}/{formatResidual(intersection.segmentStartResidualB)} end {formatResidual(intersection.segmentEndResidualA)}/{formatResidual(intersection.segmentEndResidualB)} | endpoint line distance {formatResidual(intersection.segmentStartLineDistanceMeters)}/{formatResidual(intersection.segmentEndLineDistanceMeters)} | t {formatRange(intersection.tStart !== null && intersection.tEnd !== null ? { minimum: intersection.tStart, maximum: intersection.tEnd } : null)}{intersection.rejectionReason ? ` | ${intersection.rejectionReason}` : ''}
       </span>
     </div>
   )
+}
+
+function formatResidual(value: number | null): string {
+  return value === null ? 'n/a' : value.toExponential(1)
 }
 
 function RoomBoundarySummary({

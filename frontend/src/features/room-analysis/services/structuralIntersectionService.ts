@@ -12,11 +12,15 @@ import type {
 } from '../types'
 import {
   associateFinalizedSupportPoints,
+  absoluteDistanceToPlane,
+  auditPlaneIntersectionLine,
   collectNearLineSupport,
   computePlanePlaneIntersectionLine,
+  distancePointToLine,
   type SupportAssociation,
   type SupportPlaneGeometry,
 } from './structuralSupportGeometry'
+import type { PlaneIntersectionLineInvariantDiagnostics } from './structuralSupportGeometry'
 
 export interface StructuralIntersectionConfig {
   /** Reject planes whose normalized cross product is too small to define a line. */
@@ -232,6 +236,7 @@ function createRejectedCandidate(
   pair: PreparedPair,
   reason: string,
   angleDegrees: number,
+  lineDiagnostics: PlaneIntersectionLineInvariantDiagnostics | null = null,
 ): StructuralIntersectionCandidate {
   return {
     id: `intersection-${pair.type}-${pair.surfaceA.planeId}-${pair.surfaceB.planeId}`,
@@ -242,6 +247,20 @@ function createRejectedCandidate(
     status: 'rejected',
     line: pair.line,
     segment: null,
+    lineOriginResidualA: lineDiagnostics?.lineOriginResidualA ?? null,
+    lineOriginResidualB: lineDiagnostics?.lineOriginResidualB ?? null,
+    lineDirectionPlaneDotA: lineDiagnostics?.lineDirectionPlaneDotA ?? null,
+    lineDirectionPlaneDotB: lineDiagnostics?.lineDirectionPlaneDotB ?? null,
+    maximumLineSampleResidualA: lineDiagnostics?.maximumSampleResidualA ?? null,
+    maximumLineSampleResidualB: lineDiagnostics?.maximumSampleResidualB ?? null,
+    tStart: null,
+    tEnd: null,
+    segmentStartResidualA: null,
+    segmentStartResidualB: null,
+    segmentEndResidualA: null,
+    segmentEndResidualB: null,
+    segmentStartLineDistanceMeters: null,
+    segmentEndLineDistanceMeters: null,
     lengthMeters: 0,
     surfaceAngleDegrees: angleDegrees,
     verticalityScore: pair.line ? Math.abs(pair.line.direction.y) : 0,
@@ -280,6 +299,10 @@ function buildCandidate(
   if (!pair.line) {
     return createRejectedCandidate(pair, pair.lineRejectionReason ?? 'intersection line could not be calculated', surfaceAngleDegrees)
   }
+  const lineDiagnostics = auditPlaneIntersectionLine(pair.normalizedA, pair.normalizedB, pair.line)
+  if (!lineDiagnostics.valid) {
+    return createRejectedCandidate(pair, 'intersection line failed numerical invariants', surfaceAngleDegrees, lineDiagnostics)
+  }
 
   const pointsA = association.pointsBySurfaceId.get(pair.surfaceA.planeId) ?? []
   const pointsB = association.pointsBySurfaceId.get(pair.surfaceB.planeId) ?? []
@@ -311,6 +334,12 @@ function buildCandidate(
     : null
   const segment = createSegment(pair.line, overlapInterval)
   const segmentLength = segment ? magnitude(subtract(segment.end, segment.start)) : 0
+  const segmentStartResidualA = segment ? absoluteDistanceToPlane(segment.start, pair.normalizedA) : null
+  const segmentStartResidualB = segment ? absoluteDistanceToPlane(segment.start, pair.normalizedB) : null
+  const segmentEndResidualA = segment ? absoluteDistanceToPlane(segment.end, pair.normalizedA) : null
+  const segmentEndResidualB = segment ? absoluteDistanceToPlane(segment.end, pair.normalizedB) : null
+  const segmentStartLineDistanceMeters = segment ? distancePointToLine(segment.start, pair.line) : null
+  const segmentEndLineDistanceMeters = segment ? distancePointToLine(segment.end, pair.line) : null
   const continuityA = calculateContinuity(supportA.nearLineValues, overlapInterval, config)
   const continuityB = calculateContinuity(supportB.nearLineValues, overlapInterval, config)
   const segmentContinuity = Math.min(continuityA, continuityB)
@@ -374,6 +403,20 @@ function buildCandidate(
     status,
     line: pair.line,
     segment,
+    lineOriginResidualA: lineDiagnostics.lineOriginResidualA,
+    lineOriginResidualB: lineDiagnostics.lineOriginResidualB,
+    lineDirectionPlaneDotA: lineDiagnostics.lineDirectionPlaneDotA,
+    lineDirectionPlaneDotB: lineDiagnostics.lineDirectionPlaneDotB,
+    maximumLineSampleResidualA: lineDiagnostics.maximumSampleResidualA,
+    maximumLineSampleResidualB: lineDiagnostics.maximumSampleResidualB,
+    tStart: overlapInterval?.minimum ?? null,
+    tEnd: overlapInterval?.maximum ?? null,
+    segmentStartResidualA,
+    segmentStartResidualB,
+    segmentEndResidualA,
+    segmentEndResidualB,
+    segmentStartLineDistanceMeters,
+    segmentEndLineDistanceMeters,
     lengthMeters: segmentLength,
     surfaceAngleDegrees,
     verticalityScore: Math.abs(pair.line.direction.y),

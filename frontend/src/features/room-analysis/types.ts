@@ -384,6 +384,22 @@ export interface StructuralIntersectionCandidate {
   readonly status: StructuralIntersectionStatus
   readonly line: StructuralIntersectionLine | null
   readonly segment: StructuralIntersectionSegment | null
+  /** Numerical consistency checks for the exact theoretical line. */
+  readonly lineOriginResidualA: number | null
+  readonly lineOriginResidualB: number | null
+  readonly lineDirectionPlaneDotA: number | null
+  readonly lineDirectionPlaneDotB: number | null
+  readonly maximumLineSampleResidualA: number | null
+  readonly maximumLineSampleResidualB: number | null
+  /** Scalar interval used to reconstruct the finite segment on the line. */
+  readonly tStart: number | null
+  readonly tEnd: number | null
+  readonly segmentStartResidualA: number | null
+  readonly segmentStartResidualB: number | null
+  readonly segmentEndResidualA: number | null
+  readonly segmentEndResidualB: number | null
+  readonly segmentStartLineDistanceMeters: number | null
+  readonly segmentEndLineDistanceMeters: number | null
   readonly lengthMeters: number
   readonly surfaceAngleDegrees: number
   readonly verticalityScore: number

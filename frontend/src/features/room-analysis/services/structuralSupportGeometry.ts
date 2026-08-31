@@ -4,7 +4,7 @@ import type { PlaneLocalBounds, StructuralIntersectionLine, StructuralIntersecti
 export interface SupportPlaneGeometry {
   readonly id: string
   readonly normal: SpatialPoint
-  /** Plane representation used by the scanner: n dot x = planeConstant. */
+  /** Plane representation used by the scanner: n dot x = planeConstant (equivalent to n dot x - planeConstant = 0). */
   readonly planeConstant: number
   readonly centroid: SpatialPoint
   readonly localBounds: PlaneLocalBounds
@@ -14,6 +14,7 @@ export interface SupportPlaneGeometry {
 
 export interface NormalizedSupportPlane {
   readonly normal: SpatialPoint
+  /** Canonical scalar c in n dot x = c, equivalent to d = -c in n dot x + d = 0. */
   readonly planeConstant: number
 }
 
@@ -38,6 +39,16 @@ export interface NearLineSupportSummary {
 export interface PlaneIntersectionCalculation {
   readonly line: StructuralIntersectionLine | null
   readonly reason: string | null
+}
+
+export interface PlaneIntersectionLineInvariantDiagnostics {
+  readonly lineOriginResidualA: number
+  readonly lineOriginResidualB: number
+  readonly lineDirectionPlaneDotA: number
+  readonly lineDirectionPlaneDotB: number
+  readonly maximumSampleResidualA: number
+  readonly maximumSampleResidualB: number
+  readonly valid: boolean
 }
 
 export interface ThreePlaneIntersectionCalculation {
@@ -69,6 +80,14 @@ function cross(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
 
 function subtract(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
   return { x: first.x - second.x, y: first.y - second.y, z: first.z - second.z }
+}
+
+function addScaled(first: SpatialPoint, second: SpatialPoint, scalar: number): SpatialPoint {
+  return {
+    x: first.x + second.x * scalar,
+    y: first.y + second.y * scalar,
+    z: first.z + second.z * scalar,
+  }
 }
 
 function scale(point: SpatialPoint, scalar: number): SpatialPoint {
@@ -136,7 +155,12 @@ export function normalizeSupportPlane(surface: SupportPlaneGeometry): Normalized
   return { normal, planeConstant }
 }
 
-/** Solve n1 dot x = c1 and n2 dot x = c2 without constructing Three.js objects. */
+/**
+ * Solve n1 dot x = c1 and n2 dot x = c2 without constructing Three.js
+ * objects. The returned line uses the same canonical plane convention as the
+ * scanner: n dot x = planeConstant (or n dot x + d = 0 where d is negative
+ * planeConstant).
+ */
 export function computePlanePlaneIntersectionLine(
   first: NormalizedSupportPlane,
   second: NormalizedSupportPlane,
@@ -149,8 +173,11 @@ export function computePlanePlaneIntersectionLine(
   }
 
   const direction = canonicalizeDirection(scale(directionCross, 1 / crossMagnitude))
-  const firstTerm = scale(cross(second.normal, direction), first.planeConstant)
-  const secondTerm = scale(cross(direction, first.normal), second.planeConstant)
+  // Use the unnormalised cross product in the point-on-line formula. Using
+  // the normalized direction here while still dividing by |n1 x n2|^2 adds
+  // an extra cross-magnitude factor and produces a parallel, offset line.
+  const firstTerm = scale(cross(second.normal, directionCross), first.planeConstant)
+  const secondTerm = scale(cross(directionCross, first.normal), second.planeConstant)
   const origin = scale({
     x: firstTerm.x + secondTerm.x,
     y: firstTerm.y + secondTerm.y,
@@ -160,7 +187,12 @@ export function computePlanePlaneIntersectionLine(
   if (!isFinitePoint(origin) || !isFinitePoint(direction)) {
     return { line: null, reason: 'intersection line was not finite' }
   }
-  return { line: { origin, direction }, reason: null }
+  const line = { origin, direction }
+  const invariants = auditPlaneIntersectionLine(first, second, line)
+  if (!invariants.valid) {
+    return { line: null, reason: 'intersection line failed numerical invariants' }
+  }
+  return { line, reason: null }
 }
 
 /** Solve the exact intersection of three planes represented as n dot x = c. */
@@ -196,6 +228,59 @@ export function computeThreePlaneIntersectionPoint(
 
 export function distancePointToLine(point: SpatialPoint, line: StructuralIntersectionLine): number {
   return magnitude(cross(subtract(point, line.origin), line.direction))
+}
+
+export function signedDistanceToPlane(point: SpatialPoint, plane: NormalizedSupportPlane): number {
+  return dot(plane.normal, point) - plane.planeConstant
+}
+
+export function absoluteDistanceToPlane(point: SpatialPoint, plane: NormalizedSupportPlane): number {
+  return Math.abs(signedDistanceToPlane(point, plane))
+}
+
+/**
+ * Audit the mathematical invariants of an infinite intersection line. The
+ * sample parameters verify that the line remains on both planes away from
+ * its origin; these are numerical guards, not scan-quality thresholds.
+ */
+export function auditPlaneIntersectionLine(
+  first: NormalizedSupportPlane,
+  second: NormalizedSupportPlane,
+  line: StructuralIntersectionLine,
+  epsilonMeters = 1e-6,
+): PlaneIntersectionLineInvariantDiagnostics {
+  const sampleParameters = [0, 1, -1, 10, -10]
+  let maximumSampleResidualA = 0
+  let maximumSampleResidualB = 0
+  for (const parameter of sampleParameters) {
+    const sample = addScaled(line.origin, line.direction, parameter)
+    maximumSampleResidualA = Math.max(maximumSampleResidualA, absoluteDistanceToPlane(sample, first))
+    maximumSampleResidualB = Math.max(maximumSampleResidualB, absoluteDistanceToPlane(sample, second))
+  }
+  const lineOriginResidualA = absoluteDistanceToPlane(line.origin, first)
+  const lineOriginResidualB = absoluteDistanceToPlane(line.origin, second)
+  const lineDirectionPlaneDotA = Math.abs(dot(first.normal, line.direction))
+  const lineDirectionPlaneDotB = Math.abs(dot(second.normal, line.direction))
+  return {
+    lineOriginResidualA,
+    lineOriginResidualB,
+    lineDirectionPlaneDotA,
+    lineDirectionPlaneDotB,
+    maximumSampleResidualA,
+    maximumSampleResidualB,
+    valid: Number.isFinite(lineOriginResidualA) &&
+      Number.isFinite(lineOriginResidualB) &&
+      Number.isFinite(lineDirectionPlaneDotA) &&
+      Number.isFinite(lineDirectionPlaneDotB) &&
+      Number.isFinite(maximumSampleResidualA) &&
+      Number.isFinite(maximumSampleResidualB) &&
+      lineOriginResidualA <= epsilonMeters &&
+      lineOriginResidualB <= epsilonMeters &&
+      lineDirectionPlaneDotA <= epsilonMeters &&
+      lineDirectionPlaneDotB <= epsilonMeters &&
+      maximumSampleResidualA <= epsilonMeters &&
+      maximumSampleResidualB <= epsilonMeters,
+  }
 }
 
 export function collectSupportNearPoint(
