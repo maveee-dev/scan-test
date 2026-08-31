@@ -524,6 +524,13 @@ export interface StructuralBoundaryNode {
   readonly extensionDistances: readonly StructuralBoundaryExtension[]
   readonly planeResiduals: readonly StructuralPlaneResidual[]
   readonly cornerId: string | null
+  readonly candidateDiagnosticId: string | null
+  readonly threePlaneSolverStatus: 'solved' | 'unstable' | 'not-attempted'
+  readonly supportNearCorner: readonly StructuralCornerSupport[]
+  readonly edgeEvaluations: readonly StructuralCornerEdgeEvaluation[]
+  readonly maximumExtensionMeters: number
+  readonly meanExtensionMeters: number
+  readonly reason: string
 }
 
 export interface StructuralCorner {
@@ -538,6 +545,59 @@ export interface StructuralCorner {
   readonly segmentGapMeters: number
   readonly extensionDistances: readonly StructuralBoundaryExtension[]
   readonly planeResiduals: readonly StructuralPlaneResidual[]
+  readonly candidateDiagnosticId: string | null
+  readonly threePlaneSolverStatus: 'solved' | 'unstable' | 'not-attempted'
+  readonly supportNearCorner: readonly StructuralCornerSupport[]
+  readonly edgeEvaluations: readonly StructuralCornerEdgeEvaluation[]
+  readonly maximumExtensionMeters: number
+  readonly meanExtensionMeters: number
+  readonly reason: string
+}
+
+export interface StructuralCornerSupport {
+  readonly surfaceId: string
+  readonly supportCount: number
+}
+
+export interface StructuralCornerEdgeEvaluation {
+  readonly edgeId: string
+  readonly sourceIntersectionId: string
+  readonly status: StructuralBoundaryStatus
+  readonly tCorner: number | null
+  readonly tStart: number | null
+  readonly tEnd: number | null
+  readonly extensionBeforeMeters: number
+  readonly extensionAfterMeters: number
+  readonly extensionDistanceMeters: number
+  readonly nearestFiniteEndpointDistanceMeters: number
+  readonly lineDistanceMeters: number | null
+  readonly withinStructuralExtensionLimit: boolean
+  readonly reason: string | null
+}
+
+export type StructuralCornerCandidateSource = 'endpoint-cluster' | 'triad-backed'
+
+export interface StructuralCornerCandidateDiagnostic {
+  readonly id: string
+  readonly source: StructuralCornerCandidateSource
+  readonly triadKey: string | null
+  readonly endpointClusterCandidate: boolean
+  readonly surfaceIds: readonly string[]
+  readonly sourceEdgeIds: readonly string[]
+  readonly sourceIntersectionIds: readonly string[]
+  readonly position: SpatialPoint | null
+  readonly threePlaneSolverStatus: 'solved' | 'unstable' | 'not-attempted'
+  readonly threePlaneDeterminant: number | null
+  readonly supportNearCorner: readonly StructuralCornerSupport[]
+  readonly edgeEvaluations: readonly StructuralCornerEdgeEvaluation[]
+  readonly planeResiduals: readonly StructuralPlaneResidual[]
+  readonly maximumExtensionMeters: number
+  readonly meanExtensionMeters: number
+  readonly segmentGapMeters: number
+  readonly confidence: number
+  readonly status: StructuralBoundaryStatus
+  readonly failedGate: string | null
+  readonly reason: string
 }
 
 export interface ObservedWallBoundary {
@@ -560,6 +620,7 @@ export interface RoomBoundaryResult {
   readonly edges: readonly StructuralBoundaryEdge[]
   readonly nodes: readonly StructuralBoundaryNode[]
   readonly corners: readonly StructuralCorner[]
+  readonly cornerCandidates: readonly StructuralCornerCandidateDiagnostic[]
   readonly wallBoundaries: readonly ObservedWallBoundary[]
   readonly components: readonly StructuralBoundaryComponent[]
   readonly stats: {
@@ -569,8 +630,10 @@ export interface RoomBoundaryResult {
     readonly wallCeilingEdgeCount: number
     readonly wallFloorEdgeCount: number
     readonly cornerNodeCount: number
+    readonly cornerCandidateCount: number
     readonly supportedCornerCount: number
     readonly partialCornerCount: number
+    readonly rejectedCornerCandidateCount: number
     readonly connectedComponentCount: number
     readonly rejectedIntersectionCount: number
   }

@@ -563,8 +563,16 @@ function RoomBoundarySummary({
           <strong>{result.stats.cornerNodeCount}</strong>
         </div>
         <div>
+          <span>Corner candidates</span>
+          <strong>{result.stats.cornerCandidateCount}</strong>
+        </div>
+        <div>
           <span>Supported / partial corners</span>
           <strong>{supportedCorners.length} / {partialCorners.length}</strong>
+        </div>
+        <div>
+          <span>Rejected corner candidates</span>
+          <strong>{result.stats.rejectedCornerCandidateCount}</strong>
         </div>
         <div>
           <span>Connected components</span>
@@ -616,7 +624,25 @@ function RoomBoundarySummary({
                   <small>{corner.status} | surfaces {corner.surfaceIds.join(', ')} | edges {corner.sourceEdgeIds.join(', ')}</small>
                 </span>
                 <span>
-                  position {formatPoint(corner.position)} | confidence {corner.confidence.toFixed(2)} | segment gap {corner.segmentGapMeters.toFixed(2)} m | extensions {corner.extensionDistances.map((extension) => `${extension.edgeId} ${extension.distanceMeters.toFixed(2)} m`).join(', ') || 'none'} | plane residuals {corner.planeResiduals.map((residual) => `${residual.surfaceId} ${residual.residualMeters.toFixed(3)} m`).join(', ') || 'none'}
+                  position {formatPoint(corner.position)} | confidence {corner.confidence.toFixed(2)} | solver {corner.threePlaneSolverStatus} | support {corner.supportNearCorner.map((support) => `${support.surfaceId} ${support.supportCount}`).join(', ') || 'n/a'} | segment gap {corner.segmentGapMeters.toFixed(2)} m | max/mean extension {corner.maximumExtensionMeters.toFixed(2)} / {corner.meanExtensionMeters.toFixed(2)} m | extensions {corner.extensionDistances.map((extension) => `${extension.edgeId} ${extension.distanceMeters.toFixed(2)} m`).join(', ') || 'none'} | edge parameters {corner.edgeEvaluations.map((evaluation) => `${evaluation.edgeId} t ${evaluation.tCorner === null ? 'n/a' : evaluation.tCorner.toFixed(3)} in [${evaluation.tStart === null ? 'n/a' : evaluation.tStart.toFixed(3)},${evaluation.tEnd === null ? 'n/a' : evaluation.tEnd.toFixed(3)}]`).join(', ') || 'n/a'} | plane residuals {corner.planeResiduals.map((residual) => `${residual.surfaceId} ${residual.residualMeters.toExponential(1)}`).join(', ') || 'none'} | {corner.reason}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {result.cornerCandidates.some((candidate) => candidate.status === 'rejected') ? (
+        <>
+          <div className="scanner-analysis-timings"><span>Corner candidate diagnostics</span></div>
+          <div className="scanner-plane-list">
+            {result.cornerCandidates.filter((candidate) => candidate.status === 'rejected').slice(0, 8).map((candidate) => (
+              <div className="scanner-plane-row scanner-plane-row-secondary" key={candidate.id}>
+                <span>
+                  <strong>{candidate.id}</strong>
+                  <small>{candidate.status} | {candidate.source} | endpoint cluster candidate {candidate.endpointClusterCandidate ? 'yes' : 'no'} | surfaces {candidate.surfaceIds.join(', ')}</small>
+                </span>
+                <span>
+                  point {candidate.position ? formatPoint(candidate.position) : 'none'} | solver {candidate.threePlaneSolverStatus} | edges {candidate.sourceEdgeIds.join(', ') || 'none'} | support {candidate.supportNearCorner.map((support) => `${support.surfaceId} ${support.supportCount}`).join(', ') || 'n/a'} | max extension {candidate.maximumExtensionMeters.toFixed(2)} m | gate {candidate.failedGate ?? 'none'} | {candidate.reason}
                 </span>
               </div>
             ))}

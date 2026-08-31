@@ -9,10 +9,20 @@ import type {
   StructuralBoundaryNode,
   StructuralBoundaryStatus,
   StructuralCorner,
+  StructuralCornerCandidateDiagnostic,
+  StructuralCornerEdgeEvaluation,
+  StructuralCornerSupport,
   StructuralIntersectionResult,
+  StructuralIntersectionCandidate,
+  StructuralMultiSurfaceCoherenceDiagnostic,
   StructuralPlaneResidual,
   StructuralSurfaceCandidate,
 } from '../types'
+import {
+  computeThreePlaneIntersectionPoint,
+  distancePointToLine,
+  type NormalizedSupportPlane,
+} from './structuralSupportGeometry'
 
 export interface RoomBoundaryReconstructionConfig {
   endpointClusterToleranceMeters: number
@@ -21,6 +31,14 @@ export interface RoomBoundaryReconstructionConfig {
   maximumSegmentGapMeters: number
   minimumThreePlaneDeterminant: number
   maximumPlaneResidualMeters: number
+  /** Separate bounded allowance for a validated triad corner beyond M7.2's robust interval. */
+  maximumStructuralCornerExtensionMeters: number
+  /** Numerical line/plane consistency epsilon, not a scan-quality tolerance. */
+  structuralCornerNumericalEpsilonMeters: number
+  /** Minimum finalized-support samples reported by M7.1 near each triad corner. */
+  minimumStructuralCornerSupportCountPerSurface: number
+  /** Lower support floor for retaining a partial, explicitly uncertain corner. */
+  minimumPartialStructuralCornerSupportCountPerSurface: number
 }
 
 export const DEFAULT_ROOM_BOUNDARY_RECONSTRUCTION_CONFIG: RoomBoundaryReconstructionConfig = {
@@ -30,6 +48,10 @@ export const DEFAULT_ROOM_BOUNDARY_RECONSTRUCTION_CONFIG: RoomBoundaryReconstruc
   maximumSegmentGapMeters: 0.12,
   minimumThreePlaneDeterminant: 0.001,
   maximumPlaneResidualMeters: 0.1,
+  maximumStructuralCornerExtensionMeters: 0.25,
+  structuralCornerNumericalEpsilonMeters: 1e-5,
+  minimumStructuralCornerSupportCountPerSurface: 2,
+  minimumPartialStructuralCornerSupportCountPerSurface: 1,
 }
 
 interface NormalizedPlane {
@@ -71,6 +93,11 @@ interface CornerSolution {
   confidence: number
 }
 
+interface TriadCornerCandidate {
+  readonly diagnostic: StructuralCornerCandidateDiagnostic
+  readonly edgeEndpointNodeIds: ReadonlyMap<string, string>
+}
+
 const STATUS_ORDER: Record<StructuralBoundaryStatus, number> = {
   supported: 0,
   partial: 1,
@@ -88,14 +115,6 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 function dot(first: SpatialPoint, second: SpatialPoint): number {
   return first.x * second.x + first.y * second.y + first.z * second.z
-}
-
-function cross(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
-  return {
-    x: first.y * second.z - first.z * second.y,
-    y: first.z * second.x - first.x * second.z,
-    z: first.x * second.y - first.y * second.x,
-  }
 }
 
 function subtract(first: SpatialPoint, second: SpatialPoint): SpatialPoint {
@@ -332,26 +351,19 @@ function solveThreePlanes(
   third: NormalizedPlane,
   minimumDeterminant: number,
 ): SpatialPoint | null {
-  const secondCrossThird = cross(second.normal, third.normal)
-  const determinant = dot(first.normal, secondCrossThird)
-  if (!Number.isFinite(determinant) || Math.abs(determinant) <= minimumDeterminant) {
-    return null
-  }
-  const thirdCrossFirst = cross(third.normal, first.normal)
-  const firstCrossSecond = cross(first.normal, second.normal)
-  const numerator = {
-    x: secondCrossThird.x * first.planeConstant + thirdCrossFirst.x * second.planeConstant + firstCrossSecond.x * third.planeConstant,
-    y: secondCrossThird.y * first.planeConstant + thirdCrossFirst.y * second.planeConstant + firstCrossSecond.y * third.planeConstant,
-    z: secondCrossThird.z * first.planeConstant + thirdCrossFirst.z * second.planeConstant + firstCrossSecond.z * third.planeConstant,
-  }
-  const point = scale(numerator, 1 / determinant)
-  return isFinitePoint(point) ? point : null
+  const result = computeThreePlaneIntersectionPoint(
+    first as NormalizedSupportPlane,
+    second as NormalizedSupportPlane,
+    third as NormalizedSupportPlane,
+    minimumDeterminant,
+  )
+  return result.point
 }
 
 function calculatePlaneResiduals(
   point: SpatialPoint,
   surfaceIds: readonly string[],
-  planesById: Map<string, NormalizedPlane>,
+  planesById: ReadonlyMap<string, NormalizedPlane>,
 ): StructuralPlaneResidual[] {
   return surfaceIds.flatMap((surfaceId) => {
     const plane = planesById.get(surfaceId)
@@ -523,6 +535,401 @@ function solveCorner(
   }
 }
 
+function intersectionMatchesPair(
+  intersection: StructuralIntersectionCandidate,
+  firstSurfaceId: string,
+  secondSurfaceId: string,
+): boolean {
+  return (intersection.surfaceAId === firstSurfaceId && intersection.surfaceBId === secondSurfaceId) ||
+    (intersection.surfaceAId === secondSurfaceId && intersection.surfaceBId === firstSurfaceId)
+}
+
+function findIntersectionForPair(
+  intersections: StructuralIntersectionResult,
+  firstSurfaceId: string,
+  secondSurfaceId: string,
+  preferredType: StructuralIntersectionCandidate['type'],
+): StructuralIntersectionCandidate | null {
+  const candidates = intersections.intersections
+    .filter((intersection) => intersectionMatchesPair(intersection, firstSurfaceId, secondSurfaceId))
+    .sort((first, second) => {
+      const firstPreferred = first.type === preferredType ? 0 : 1
+      const secondPreferred = second.type === preferredType ? 0 : 1
+      const firstStatus = first.status === 'supported' ? 0 : first.status === 'partial' ? 1 : 2
+      const secondStatus = second.status === 'supported' ? 0 : second.status === 'partial' ? 1 : 2
+      return firstPreferred - secondPreferred || firstStatus - secondStatus ||
+        second.confidence - first.confidence || first.id.localeCompare(second.id)
+    })
+  return candidates[0] ?? null
+}
+
+function getTriadKey(
+  candidatePlaneId: string,
+  existingWallPlaneId: string,
+  horizontalPlaneId: string,
+): string {
+  return `${candidatePlaneId}/${existingWallPlaneId}/${horizontalPlaneId}`
+}
+
+function hasCompleteEndpointCluster(
+  edgeIds: readonly string[],
+  clusters: readonly EndpointCluster[],
+  endpoints: readonly EndpointObservation[],
+): boolean {
+  return clusters.some((cluster) => {
+    const clusterEdgeIds = new Set(cluster.endpointIndices.map((index) => endpoints[index].edgeId))
+    return edgeIds.every((edgeId) => clusterEdgeIds.has(edgeId))
+  })
+}
+
+function getLineParameter(point: SpatialPoint, line: { origin: SpatialPoint; direction: SpatialPoint }): number | null {
+  const directionLength = magnitude(line.direction)
+  if (!Number.isFinite(directionLength) || directionLength <= Number.EPSILON) {
+    return null
+  }
+  return dot(subtract(point, line.origin), scale(line.direction, 1 / directionLength))
+}
+
+function evaluateStructuralCornerEdge(
+  intersection: StructuralIntersectionCandidate,
+  point: SpatialPoint,
+  config: RoomBoundaryReconstructionConfig,
+): StructuralCornerEdgeEvaluation {
+  const status: StructuralBoundaryStatus = intersection.status === 'supported' ? 'supported' :
+    intersection.status === 'partial' ? 'partial' : 'rejected'
+  if (!intersection.line) {
+    return {
+      edgeId: `boundary-${intersection.id}`,
+      sourceIntersectionId: intersection.id,
+      status,
+      tCorner: null,
+      tStart: null,
+      tEnd: null,
+      extensionBeforeMeters: 0,
+      extensionAfterMeters: 0,
+      extensionDistanceMeters: 0,
+      nearestFiniteEndpointDistanceMeters: Infinity,
+      lineDistanceMeters: null,
+      withinStructuralExtensionLimit: false,
+      reason: 'intersection line is unavailable',
+    }
+  }
+  const tCorner = getLineParameter(point, intersection.line)
+  const segmentStartParameter = intersection.segment
+    ? getLineParameter(intersection.segment.start, intersection.line)
+    : null
+  const segmentEndParameter = intersection.segment
+    ? getLineParameter(intersection.segment.end, intersection.line)
+    : null
+  const tStart = intersection.tStart ?? segmentStartParameter
+  const tEnd = intersection.tEnd ?? segmentEndParameter
+  const minimum = tStart !== null && tEnd !== null ? Math.min(tStart, tEnd) : null
+  const maximum = tStart !== null && tEnd !== null ? Math.max(tStart, tEnd) : null
+  const extensionBeforeMeters = tCorner !== null && minimum !== null ? Math.max(0, minimum - tCorner) : 0
+  const extensionAfterMeters = tCorner !== null && maximum !== null ? Math.max(0, tCorner - maximum) : 0
+  const extensionDistanceMeters = Math.max(extensionBeforeMeters, extensionAfterMeters)
+  const nearestFiniteEndpointDistanceMeters = tCorner !== null && minimum !== null && maximum !== null
+    ? Math.min(Math.abs(tCorner - minimum), Math.abs(tCorner - maximum))
+    : Infinity
+  const lineDistanceMeters = distancePointToLine(point, intersection.line)
+  const withinStructuralExtensionLimit = tCorner !== null && minimum !== null && maximum !== null &&
+    Number.isFinite(lineDistanceMeters) &&
+    lineDistanceMeters <= config.structuralCornerNumericalEpsilonMeters &&
+    extensionDistanceMeters <= config.maximumStructuralCornerExtensionMeters
+  return {
+    edgeId: `boundary-${intersection.id}`,
+    sourceIntersectionId: intersection.id,
+    status,
+    tCorner,
+    tStart: minimum,
+    tEnd: maximum,
+    extensionBeforeMeters,
+    extensionAfterMeters,
+    extensionDistanceMeters,
+    nearestFiniteEndpointDistanceMeters,
+    lineDistanceMeters,
+    withinStructuralExtensionLimit,
+    reason: !intersection.segment
+      ? 'finite source segment is unavailable'
+      : !withinStructuralExtensionLimit
+        ? 'corner is outside the bounded structural extension or line-consistency limit'
+        : null,
+  }
+}
+
+function createCornerSupport(
+  surfaceIds: readonly string[],
+  counts: readonly number[],
+): StructuralCornerSupport[] {
+  return surfaceIds.map((surfaceId, index) => ({
+    surfaceId,
+    supportCount: counts[index] ?? 0,
+  }))
+}
+
+function calculateTriadSegmentGap(edges: readonly StructuralIntersectionCandidate[]): number {
+  const segments = edges.flatMap((edge) => edge.segment ? [edge.segment] : [])
+  let maximumGap = 0
+  for (let firstIndex = 0; firstIndex < segments.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < segments.length; secondIndex += 1) {
+      maximumGap = Math.max(
+        maximumGap,
+        segmentSegmentDistance(
+          segments[firstIndex].start,
+          segments[firstIndex].end,
+          segments[secondIndex].start,
+          segments[secondIndex].end,
+        ),
+      )
+    }
+  }
+  return maximumGap
+}
+
+function calculateTriadCornerConfidence(
+  triad: StructuralMultiSurfaceCoherenceDiagnostic,
+  surfaces: readonly StructuralSurfaceCandidate[],
+  edges: readonly StructuralIntersectionCandidate[],
+  edgeEvaluations: readonly StructuralCornerEdgeEvaluation[],
+  supportNearCorner: readonly StructuralCornerSupport[],
+  segmentGapMeters: number,
+  config: RoomBoundaryReconstructionConfig,
+  status: StructuralBoundaryStatus,
+): number {
+  const edgeConfidence = edges.length > 0
+    ? edges.reduce((total, edge) => total + edge.confidence, 0) / edges.length
+    : 0
+  const surfaceConfidence = surfaces.length > 0
+    ? Math.pow(surfaces.reduce((total, surface) => total * clamp(surface.roleConfidence, 0, 1), 1), 1 / surfaces.length)
+    : 0
+  const supportQuality = supportNearCorner.length > 0
+    ? Math.min(...supportNearCorner.map((support) => clamp(support.supportCount / 8, 0, 1)))
+    : 0
+  const maximumExtensionMeters = Math.max(...edgeEvaluations.map((evaluation) => evaluation.extensionDistanceMeters), 0)
+  const extensionQuality = clamp(1 - maximumExtensionMeters / Math.max(config.maximumStructuralCornerExtensionMeters, Number.EPSILON), 0, 1)
+  const lineQuality = edgeEvaluations.length > 0
+    ? Math.min(...edgeEvaluations.map((evaluation) => evaluation.lineDistanceMeters === null
+      ? 0
+      : clamp(1 - evaluation.lineDistanceMeters / Math.max(config.structuralCornerNumericalEpsilonMeters, Number.EPSILON), 0, 1)))
+    : 0
+  const gapQuality = clamp(1 - segmentGapMeters / Math.max(config.maximumSegmentGapMeters, Number.EPSILON), 0, 1)
+  const statusFactor = status === 'supported' ? 1 : status === 'partial' ? 0.68 : 0.2
+  return clamp(
+    statusFactor * (
+      edgeConfidence * 0.25 +
+      surfaceConfidence * 0.2 +
+      supportQuality * 0.2 +
+      extensionQuality * 0.15 +
+      lineQuality * 0.1 +
+      gapQuality * 0.05 +
+      triad.triplePointSupportScore * 0.05
+    ),
+    0,
+    1,
+  )
+}
+
+function createTriadCornerCandidate(
+  triad: StructuralMultiSurfaceCoherenceDiagnostic,
+  intersections: StructuralIntersectionResult,
+  selectedSurfaceMap: ReadonlyMap<string, StructuralSurfaceCandidate>,
+  planesById: ReadonlyMap<string, NormalizedPlane>,
+  clusters: readonly EndpointCluster[],
+  endpoints: readonly EndpointObservation[],
+  config: RoomBoundaryReconstructionConfig,
+): TriadCornerCandidate {
+  const surfaceIds = uniqueSorted([triad.candidatePlaneId, triad.existingWallPlaneId, triad.horizontalPlaneId])
+  const horizontalSurface = selectedSurfaceMap.get(triad.horizontalPlaneId)
+  const horizontalType: StructuralIntersectionCandidate['type'] = horizontalSurface?.role === 'floor'
+    ? 'wall-floor'
+    : 'wall-ceiling'
+  const sourceIntersectionCandidates = [
+    findIntersectionForPair(intersections, triad.candidatePlaneId, triad.existingWallPlaneId, 'wall-wall'),
+    findIntersectionForPair(intersections, triad.candidatePlaneId, triad.horizontalPlaneId, horizontalType),
+    findIntersectionForPair(intersections, triad.existingWallPlaneId, triad.horizontalPlaneId, horizontalType),
+  ]
+  const sourceEdges = sourceIntersectionCandidates.filter((edge): edge is StructuralIntersectionCandidate => edge !== null)
+  const sourceEdgeIds = sourceEdges.map((edge) => `boundary-${edge.id}`)
+  const sourceIntersectionIds = sourceEdges.map((edge) => edge.id)
+  const triadKey = getTriadKey(triad.candidatePlaneId, triad.existingWallPlaneId, triad.horizontalPlaneId)
+  const candidateId = `corner-candidate-${triadKey.replaceAll('/', '-')}`
+  const endpointClusterCandidate = hasCompleteEndpointCluster(sourceEdgeIds, clusters, endpoints)
+  const firstPlane = planesById.get(triad.candidatePlaneId)
+  const secondPlane = planesById.get(triad.existingWallPlaneId)
+  const thirdPlane = planesById.get(triad.horizontalPlaneId)
+  let point: SpatialPoint | null = null
+  let threePlaneSolverStatus: StructuralCornerCandidateDiagnostic['threePlaneSolverStatus'] = 'not-attempted'
+  let determinant: number | null = null
+  if (firstPlane && secondPlane && thirdPlane) {
+    const solveResult = computeThreePlaneIntersectionPoint(firstPlane, secondPlane, thirdPlane, config.minimumThreePlaneDeterminant)
+    determinant = solveResult.determinant
+    point = solveResult.point
+    threePlaneSolverStatus = point ? 'solved' : 'unstable'
+  }
+  const edgeEvaluations = point
+    ? sourceEdges.map((edge) => evaluateStructuralCornerEdge(edge, point, config))
+    : []
+  const supportNearCorner = createCornerSupport(
+    [triad.candidatePlaneId, triad.existingWallPlaneId, triad.horizontalPlaneId],
+    [
+      triad.triplePointSupportCounts.candidate,
+      triad.triplePointSupportCounts.existing,
+      triad.triplePointSupportCounts.horizontal,
+    ],
+  )
+  const planeResiduals = point
+    ? calculatePlaneResiduals(point, surfaceIds, planesById)
+    : []
+  const maximumPlaneResidual = Math.max(...planeResiduals.map((residual) => residual.residualMeters), 0)
+  const allEdgesPresent = sourceEdges.length === 3
+  const allEdgesHaveFiniteGeometry = sourceEdges.every((edge) => edge.line !== null && edge.segment !== null)
+  const allEdgesSupportedOrPartial = sourceEdges.length === 3 && sourceEdges.every((edge) => edge.status === 'supported' || edge.status === 'partial')
+  const lineConsistencyPass = edgeEvaluations.length === 3 && edgeEvaluations.every((evaluation) =>
+    evaluation.lineDistanceMeters !== null && evaluation.lineDistanceMeters <= config.structuralCornerNumericalEpsilonMeters)
+  const supportPass = supportNearCorner.every((support) => support.supportCount >= config.minimumStructuralCornerSupportCountPerSurface)
+  const partialSupportPass = supportNearCorner.every((support) => support.supportCount >= config.minimumPartialStructuralCornerSupportCountPerSurface)
+  const extensionPass = edgeEvaluations.length === 3 && edgeEvaluations.every((evaluation) => evaluation.withinStructuralExtensionLimit)
+  const planeConsistencyPass = planeResiduals.length === 3 && maximumPlaneResidual <= config.structuralCornerNumericalEpsilonMeters
+  let failedGate: string | null = null
+  let reason = 'triad-backed corner validated from exact three-plane point and bounded finite-segment extensions'
+  if (!allEdgesPresent) {
+    failedGate = sourceIntersectionCandidates[0] === null ? 'missing wall-wall boundary' : 'missing wall-horizontal boundary'
+    reason = failedGate
+  } else if (threePlaneSolverStatus !== 'solved') {
+    failedGate = 'three-plane solve is unstable'
+    reason = failedGate
+  } else if (!allEdgesHaveFiniteGeometry) {
+    failedGate = 'required boundary does not have a finite theoretical line and segment'
+    reason = failedGate
+  } else if (!lineConsistencyPass) {
+    failedGate = 'pairwise lines do not converge mathematically'
+    reason = failedGate
+  } else if (!planeConsistencyPass) {
+    failedGate = 'three-plane point has a non-numerical plane residual'
+    reason = failedGate
+  } else if (!allEdgesSupportedOrPartial) {
+    failedGate = 'required intersection is rejected'
+    reason = failedGate
+  } else if (!partialSupportPass) {
+    failedGate = 'insufficient support near triple point'
+    reason = failedGate
+  } else if (!extensionPass) {
+    const failedExtension = edgeEvaluations.find((evaluation) => !evaluation.withinStructuralExtensionLimit)
+    failedGate = failedExtension ? `${failedExtension.edgeId} extension exceeds structural-corner limit` : 'structural-corner extension exceeds limit'
+    reason = failedGate
+  }
+  const status: StructuralBoundaryStatus = failedGate
+    ? 'rejected'
+    : sourceEdges.every((edge) => edge.status === 'supported') && supportPass ? 'supported' : 'partial'
+  if (!failedGate && status === 'partial') {
+    reason = 'triad-backed corner validated with a partial source boundary'
+  }
+  const sourceSurfaces = surfaceIds.flatMap((surfaceId) => {
+    const surface = selectedSurfaceMap.get(surfaceId)
+    return surface ? [surface] : []
+  })
+  const segmentGapMeters = calculateTriadSegmentGap(sourceEdges)
+  const confidence = calculateTriadCornerConfidence(
+    triad,
+    sourceSurfaces,
+    sourceEdges,
+    edgeEvaluations,
+    supportNearCorner,
+    segmentGapMeters,
+    config,
+    status,
+  )
+  const maximumExtensionMeters = Math.max(...edgeEvaluations.map((evaluation) => evaluation.extensionDistanceMeters), 0)
+  const meanExtensionMeters = edgeEvaluations.length > 0
+    ? edgeEvaluations.reduce((total, evaluation) => total + evaluation.extensionDistanceMeters, 0) / edgeEvaluations.length
+    : 0
+  const diagnostic: StructuralCornerCandidateDiagnostic = {
+    id: candidateId,
+    source: 'triad-backed',
+    triadKey,
+    endpointClusterCandidate,
+    surfaceIds,
+    sourceEdgeIds,
+    sourceIntersectionIds,
+    position: point,
+    threePlaneSolverStatus,
+    threePlaneDeterminant: determinant,
+    supportNearCorner,
+    edgeEvaluations,
+    planeResiduals,
+    maximumExtensionMeters,
+    meanExtensionMeters,
+    segmentGapMeters,
+    confidence,
+    status,
+    failedGate,
+    reason,
+  }
+  const edgeEndpointNodeIds = new Map<string, string>()
+  if (point && status !== 'rejected') {
+    for (const edge of sourceEdges) {
+      if (!edge.segment) {
+        continue
+      }
+      const startDistance = distance(point, edge.segment.start)
+      const endDistance = distance(point, edge.segment.end)
+      edgeEndpointNodeIds.set(
+        `${`boundary-${edge.id}`}:${startDistance <= endDistance ? 'start' : 'end'}`,
+        candidateId,
+      )
+    }
+  }
+  return { diagnostic, edgeEndpointNodeIds }
+}
+
+function createEndpointClusterDiagnostic(
+  cluster: EndpointCluster,
+  endpoints: readonly EndpointObservation[],
+  edgeById: ReadonlyMap<string, StructuralBoundaryEdge>,
+  solution: CornerSolution | null,
+): StructuralCornerCandidateDiagnostic | null {
+  const sourceEdgeIds = uniqueSorted(cluster.endpointIndices.map((index) => endpoints[index].edgeId))
+  if (sourceEdgeIds.length < 2 || cluster.surfaceIds.length < 3) {
+    return null
+  }
+  const sourceIntersectionIds = uniqueSorted(sourceEdgeIds.flatMap((edgeId) => {
+    const edge = edgeById.get(edgeId)
+    return edge ? [edge.sourceIntersectionId] : []
+  }))
+  const position = solution?.position ?? cluster.position
+  const extensionDistances = solution?.extensionDistances ?? sourceEdgeIds.map((edgeId) => ({
+    edgeId,
+    distanceMeters: edgeById.get(edgeId)
+      ? pointToSegmentInfo(position, edgeById.get(edgeId)!.start, edgeById.get(edgeId)!.end).extensionMeters
+      : 0,
+  }))
+  const maximumExtensionMeters = Math.max(...extensionDistances.map((extension) => extension.distanceMeters), 0)
+  return {
+    id: `corner-candidate-endpoint-${sourceEdgeIds.join('-')}`,
+    source: 'endpoint-cluster',
+    triadKey: null,
+    endpointClusterCandidate: true,
+    surfaceIds: uniqueSorted(cluster.surfaceIds),
+    sourceEdgeIds,
+    sourceIntersectionIds,
+    position,
+    threePlaneSolverStatus: solution ? 'solved' : 'not-attempted',
+    threePlaneDeterminant: null,
+    supportNearCorner: [],
+    edgeEvaluations: [],
+    planeResiduals: solution?.planeResiduals ?? [],
+    maximumExtensionMeters,
+    meanExtensionMeters: extensionDistances.length > 0
+      ? extensionDistances.reduce((total, extension) => total + extension.distanceMeters, 0) / extensionDistances.length
+      : 0,
+    segmentGapMeters: calculateClusterSegmentGap(cluster, endpoints, new Map(edgeById)),
+    confidence: solution?.confidence ?? 0,
+    status: solution?.status ?? 'rejected',
+    failedGate: solution ? null : 'endpoint-cluster-validation',
+    reason: solution ? 'endpoint-cluster corner validated' : 'endpoint cluster did not produce a validated three-plane corner',
+  }
+}
+
 function createBoundaryNode(
   id: string,
   cluster: EndpointCluster,
@@ -557,6 +964,74 @@ function createBoundaryNode(
     extensionDistances,
     planeResiduals: corner?.planeResiduals ?? [],
     cornerId: corner ? `corner-${id}` : null,
+    candidateDiagnosticId: null,
+    threePlaneSolverStatus: corner ? 'solved' : 'not-attempted',
+    supportNearCorner: [],
+    edgeEvaluations: [],
+    maximumExtensionMeters: Math.max(...extensionDistances.map((extension) => extension.distanceMeters), 0),
+    meanExtensionMeters: extensionDistances.length > 0
+      ? extensionDistances.reduce((total, extension) => total + extension.distanceMeters, 0) / extensionDistances.length
+      : 0,
+    reason: corner ? 'endpoint-cluster corner validated' : 'endpoint cluster did not produce a validated corner',
+  }
+}
+
+function createTriadBoundaryNode(
+  candidate: StructuralCornerCandidateDiagnostic,
+  index: number,
+): StructuralBoundaryNode | null {
+  if (!candidate.position || candidate.status === 'rejected') {
+    return null
+  }
+  const id = `boundary-triad-node-${index + 1}`
+  return {
+    id,
+    position: candidate.position,
+    surfaceIds: candidate.surfaceIds,
+    sourceEdgeIds: candidate.sourceEdgeIds,
+    sourceIntersectionIds: candidate.sourceIntersectionIds,
+    status: candidate.status,
+    confidence: candidate.confidence,
+    segmentGapMeters: candidate.segmentGapMeters,
+    extensionDistances: candidate.edgeEvaluations.map((evaluation) => ({
+      edgeId: evaluation.edgeId,
+      distanceMeters: evaluation.extensionDistanceMeters,
+    })),
+    planeResiduals: candidate.planeResiduals,
+    cornerId: `corner-${id}`,
+    candidateDiagnosticId: candidate.id,
+    threePlaneSolverStatus: candidate.threePlaneSolverStatus,
+    supportNearCorner: candidate.supportNearCorner,
+    edgeEvaluations: candidate.edgeEvaluations,
+    maximumExtensionMeters: candidate.maximumExtensionMeters,
+    meanExtensionMeters: candidate.meanExtensionMeters,
+    reason: candidate.reason,
+  }
+}
+
+function createCornerFromNode(node: StructuralBoundaryNode): StructuralCorner | null {
+  if (!node.cornerId) {
+    return null
+  }
+  return {
+    id: node.cornerId,
+    nodeId: node.id,
+    position: node.position,
+    surfaceIds: node.surfaceIds,
+    sourceEdgeIds: node.sourceEdgeIds,
+    sourceIntersectionIds: node.sourceIntersectionIds,
+    status: node.status,
+    confidence: node.confidence,
+    segmentGapMeters: node.segmentGapMeters,
+    extensionDistances: node.extensionDistances,
+    planeResiduals: node.planeResiduals,
+    candidateDiagnosticId: node.candidateDiagnosticId,
+    threePlaneSolverStatus: node.threePlaneSolverStatus,
+    supportNearCorner: node.supportNearCorner,
+    edgeEvaluations: node.edgeEvaluations,
+    maximumExtensionMeters: node.maximumExtensionMeters,
+    meanExtensionMeters: node.meanExtensionMeters,
+    reason: node.reason,
   }
 }
 
@@ -565,6 +1040,7 @@ function createBoundaryEdges(
   endpoints: readonly EndpointObservation[],
   clusters: readonly EndpointCluster[],
   nodes: readonly StructuralBoundaryNode[],
+  triadEndpointNodeIds: ReadonlyMap<string, string>,
 ): StructuralBoundaryEdge[] {
   const nodeIdByEndpointIndex = new Map<number, string>()
   clusters.forEach((cluster, clusterIndex) => {
@@ -575,8 +1051,8 @@ function createBoundaryEdges(
   return drafts.map((draft, edgeIndex) => {
     const startEndpointIndex = endpoints.findIndex((endpoint) => endpoint.edgeIndex === edgeIndex && endpoint.endpoint === 'start')
     const endEndpointIndex = endpoints.findIndex((endpoint) => endpoint.edgeIndex === edgeIndex && endpoint.endpoint === 'end')
-    const startNodeId = nodeIdByEndpointIndex.get(startEndpointIndex) ?? null
-    const endNodeId = nodeIdByEndpointIndex.get(endEndpointIndex) ?? null
+    const startNodeId = triadEndpointNodeIds.get(`${draft.edge.id}:start`) ?? nodeIdByEndpointIndex.get(startEndpointIndex) ?? null
+    const endNodeId = triadEndpointNodeIds.get(`${draft.edge.id}:end`) ?? nodeIdByEndpointIndex.get(endEndpointIndex) ?? null
     const extensionDistances = [startNodeId, endNodeId]
       .filter((nodeId, index, ids): nodeId is string => nodeId !== null && ids.indexOf(nodeId) === index)
       .flatMap((nodeId) => {
@@ -715,34 +1191,67 @@ export class RoomBoundaryReconstructionService {
 
     const cornerStartedAt = timestamp()
     const cornersByCluster = clusters.map((cluster) => solveCorner(cluster, endpoints, edgeById, planesById, this.config))
-    const nodes = clusters.map((cluster, clusterIndex) => createBoundaryNode(
+    const endpointNodes = clusters.map((cluster, clusterIndex) => createBoundaryNode(
       `boundary-node-${clusterIndex + 1}`,
       cluster,
       endpoints,
       edgeById,
       cornersByCluster[clusterIndex],
     ))
-    const corners: StructuralCorner[] = nodes.flatMap((node) => {
-      if (!node.cornerId) {
-        return []
-      }
-      return [{
-        id: node.cornerId,
-        nodeId: node.id,
-        position: node.position,
-        surfaceIds: node.surfaceIds,
-        sourceEdgeIds: node.sourceEdgeIds,
-        sourceIntersectionIds: node.sourceIntersectionIds,
-        status: node.status,
-        confidence: node.confidence,
-        segmentGapMeters: node.segmentGapMeters,
-        extensionDistances: node.extensionDistances,
-        planeResiduals: node.planeResiduals,
-      }]
+    const endpointClusterCandidates = clusters.flatMap((cluster, clusterIndex) => {
+      const candidate = createEndpointClusterDiagnostic(cluster, endpoints, edgeById, cornersByCluster[clusterIndex])
+      return candidate ? [candidate] : []
     })
+    const triadCornerCandidates = [...new Map(
+      interpretation.multiSurfaceCoherenceDiagnostics
+        .filter((triad) => triad.selected && triad.finalDecision === 'selected')
+        .sort((first, second) => getTriadKey(first.candidatePlaneId, first.existingWallPlaneId, first.horizontalPlaneId)
+          .localeCompare(getTriadKey(second.candidatePlaneId, second.existingWallPlaneId, second.horizontalPlaneId)))
+        .map((triad) => {
+          const candidate = createTriadCornerCandidate(
+            triad,
+            intersections,
+            selectedSurfaceMap,
+            planesById,
+            clusters,
+            endpoints,
+            this.config,
+          )
+          return [candidate.diagnostic.triadKey ?? candidate.diagnostic.id, candidate] as const
+        }),
+    ).values()]
+    const genericCorners = endpointNodes.flatMap((node) => {
+      const corner = createCornerFromNode(node)
+      return corner ? [corner] : []
+    })
+    const genericCornerEdgeKeys = new Set(genericCorners.map((corner) => [...corner.sourceEdgeIds].sort((first, second) => first.localeCompare(second)).join('|')))
+    const acceptedTriadCornerCandidates = triadCornerCandidates.filter((candidate) =>
+      candidate.diagnostic.status !== 'rejected' && candidate.diagnostic.position !== null &&
+      !genericCornerEdgeKeys.has([...candidate.diagnostic.sourceEdgeIds].sort((first, second) => first.localeCompare(second)).join('|')))
+    const triadNodes: StructuralBoundaryNode[] = []
+    const triadEndpointNodeIds = new Map<string, string>()
+    acceptedTriadCornerCandidates.forEach((candidate, candidateIndex) => {
+      const node = createTriadBoundaryNode(candidate.diagnostic, candidateIndex)
+      if (!node) {
+        return
+      }
+      triadNodes.push(node)
+      for (const [endpointKey, candidateId] of candidate.edgeEndpointNodeIds) {
+        if (candidateId === candidate.diagnostic.id && !triadEndpointNodeIds.has(endpointKey)) {
+          triadEndpointNodeIds.set(endpointKey, node.id)
+        }
+      }
+    })
+    const nodes = [...endpointNodes, ...triadNodes]
+    const corners = [...genericCorners, ...triadNodes.flatMap((node) => {
+      const corner = createCornerFromNode(node)
+      return corner ? [corner] : []
+    })]
+    const cornerCandidates = [...endpointClusterCandidates, ...triadCornerCandidates.map((candidate) => candidate.diagnostic)]
+      .sort((first, second) => STATUS_ORDER[first.status] - STATUS_ORDER[second.status] || first.id.localeCompare(second.id))
     const cornerSolvingMs = timestamp() - cornerStartedAt
 
-    const edges = createBoundaryEdges(drafts, endpoints, clusters, nodes).sort(compareEdges)
+    const edges = createBoundaryEdges(drafts, endpoints, clusters, nodes, triadEndpointNodeIds).sort(compareEdges)
     const components = createComponents(selectedSurfaceIds, edges, nodes)
     const wallBoundaries = createWallBoundaries(interpretation, edges)
     const finalCorners = [...corners].sort((first, second) => STATUS_ORDER[first.status] - STATUS_ORDER[second.status] || second.confidence - first.confidence || first.id.localeCompare(second.id))
@@ -753,6 +1262,7 @@ export class RoomBoundaryReconstructionService {
       edges,
       nodes,
       corners: finalCorners,
+      cornerCandidates,
       wallBoundaries,
       components,
       stats: {
@@ -762,8 +1272,10 @@ export class RoomBoundaryReconstructionService {
         wallCeilingEdgeCount: edges.filter((edge) => edge.type === 'wall-ceiling').length,
         wallFloorEdgeCount: edges.filter((edge) => edge.type === 'wall-floor').length,
         cornerNodeCount: finalCorners.length,
+        cornerCandidateCount: cornerCandidates.length,
         supportedCornerCount: finalCorners.filter((corner) => corner.status === 'supported').length,
         partialCornerCount: finalCorners.filter((corner) => corner.status === 'partial').length,
+        rejectedCornerCandidateCount: cornerCandidates.filter((candidate) => candidate.status === 'rejected').length,
         connectedComponentCount: components.length,
         rejectedIntersectionCount,
       },

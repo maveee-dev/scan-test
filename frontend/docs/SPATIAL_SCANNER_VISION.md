@@ -583,6 +583,18 @@ partial status, endpoint extension, segment gap, and plane residuals. An
 incomplete scan remains an open boundary; M7.3 does not close a room, invent
 missing corners, or construct wall, floor, ceiling, or mesh polygons.
 
+For a selected wall-wall-horizontal triad, M7.3.1 also creates a separate
+triad-backed corner candidate from the exact three-plane point. It evaluates
+that point on each M7.2 theoretical line, compares its parameter with the
+robust finite observed interval, and records any bounded extension required to
+reach the corner. The M7.2 interval is never changed: raw support validates
+the measured interval, while the M7.3 corner candidate preserves the exact
+structural point. Triple-point support, source intersection status, numerical
+line/plane consistency, and the bounded extension are all required before a
+corner is supported. Rejected candidates remain in diagnostics, so a missing
+endpoint cluster, weak support, unstable solve, or excessive extension is
+visible rather than silently treated as an absent corner.
+
 The longer-term post-scan direction is:
 
 ```text
