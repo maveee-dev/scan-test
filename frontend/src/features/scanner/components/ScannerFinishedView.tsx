@@ -269,6 +269,14 @@ function StructuralSurfaceSummary({
           <span>Triad competition groups / suppressed</span>
           <strong>{interpretation.stats.triadCompetitionGroupCount} / {interpretation.stats.suppressedTriadCount}</strong>
         </div>
+        <div>
+          <span>Shared-anchor / whole-corner groups</span>
+          <strong>{interpretation.stats.sharedAnchorCompetitionGroupCount} / {interpretation.stats.wholeCornerCompetitionGroupCount}</strong>
+        </div>
+        <div>
+          <span>Whole-corner competing pairs</span>
+          <strong>{interpretation.stats.wholeCornerCompetitionPairCount}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
@@ -308,7 +316,16 @@ function StructuralSurfaceSummary({
       {interpretation.triadCompetitionDiagnostics.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>
-            Triad competition: {interpretation.triadCompetitionDiagnostics.slice(0, 6).map((competition) => `${competition.triadAKey} vs ${competition.triadBKey} | anchor ${competition.sharedAnchorWallPlaneId} + ${competition.sharedHorizontalPlaneId} | normal ${competition.normalSeparationDegrees.toFixed(1)} deg | support overlap ${(competition.projectedSupportOverlap * 100).toFixed(0)}% | extent ${(competition.projectedExtentOverlap * 100).toFixed(0)}% | bidirectional support ${competition.bidirectionalSupportDistanceMeters === null ? 'n/a' : `${competition.bidirectionalSupportDistanceMeters.toFixed(2)} m`} | triple gap ${competition.triplePointSeparationMeters === null ? 'n/a' : `${competition.triplePointSeparationMeters.toFixed(2)} m`} | representative ${competition.representativeScoreA.toFixed(2)}/${competition.representativeScoreB.toFixed(2)} | ${competition.decision}${competition.winnerTriadKey ? ` winner ${competition.winnerTriadKey}` : ''}: ${competition.reason}`).join(' | ')}
+            Triad competition: {interpretation.triadCompetitionDiagnostics.slice(0, 6).map((competition) => {
+              const correspondence = competition.wallCorrespondence.length > 0
+                ? ` | correspondence ${competition.wallCorrespondence.map((pair) => `${pair.wallAId}/${pair.wallBId} normal ${pair.normalSeparationDegrees.toFixed(1)} deg support ${pair.bidirectionalSupportDistanceMeters === null ? 'n/a' : `${pair.bidirectionalSupportDistanceMeters.toFixed(2)} m`} overlap ${(pair.projectedSupportOverlap * 100).toFixed(0)}%`).join(', ')}`
+                : ''
+              const wallSelection = competition.wallSelectionAfterSuppression.length > 0
+                ? ` | losing walls ${competition.wallSelectionAfterSuppression.map((wall) => `${wall.planeId} ${wall.remainsSelected ? 'retained' : 'suppressed'}${wall.independentlyRequired ? ' (independent)' : ''}`).join(', ')}`
+                : ''
+              const anchor = competition.sharedAnchorWallPlaneId ?? 'none'
+              return `${competition.competitionType} ${competition.triadAKey} vs ${competition.triadBKey} | anchor ${anchor} + ${competition.sharedHorizontalPlaneId} | normal ${competition.normalSeparationDegrees.toFixed(1)} deg | support overlap ${(competition.projectedSupportOverlap * 100).toFixed(0)}% | extent ${(competition.projectedExtentOverlap * 100).toFixed(0)}% | bidirectional support ${competition.bidirectionalSupportDistanceMeters === null ? 'n/a' : `${competition.bidirectionalSupportDistanceMeters.toFixed(2)} m`} | triple gap ${competition.triplePointSeparationMeters === null ? 'n/a' : `${competition.triplePointSeparationMeters.toFixed(2)} m`} | duplicate corner ${competition.duplicateCornerConfidence === null ? 'n/a' : competition.duplicateCornerConfidence.toFixed(2)} | representative ${competition.representativeScoreA.toFixed(2)}/${competition.representativeScoreB.toFixed(2)} | ${competition.decision}${competition.winnerTriadKey ? ` winner ${competition.winnerTriadKey}` : ''}${correspondence}${wallSelection}: ${competition.reason}`
+            }).join(' | ')}
           </span>
         </div>
       ) : null}

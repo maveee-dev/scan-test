@@ -304,7 +304,8 @@ export interface StructuralTriadCompetitionDiagnostic {
   readonly triadAKey: string
   readonly triadBKey: string
   readonly competitionGroupId: string | null
-  readonly sharedAnchorWallPlaneId: string
+  readonly competitionType: 'shared-anchor' | 'whole-corner'
+  readonly sharedAnchorWallPlaneId: string | null
   readonly sharedHorizontalPlaneId: string
   readonly introducedWallPlaneAId: string
   readonly introducedWallPlaneBId: string
@@ -317,14 +318,36 @@ export interface StructuralTriadCompetitionDiagnostic {
   readonly triplePointSeparationMeters: number | null
   readonly representativeScoreA: number
   readonly representativeScoreB: number
+  readonly wallCorrespondence: readonly StructuralTriadWallCorrespondence[]
+  readonly duplicateCornerConfidence: number | null
+  readonly wallSelectionAfterSuppression: readonly StructuralTriadWallSelectionDiagnostic[]
   readonly decision: 'competing' | 'distinct'
   readonly winnerTriadKey: string | null
   readonly reason: string
 }
 
+export interface StructuralTriadWallCorrespondence {
+  readonly wallAId: string
+  readonly wallBId: string
+  readonly normalSeparationDegrees: number
+  readonly planeOffsetDifferenceMeters: number
+  readonly bidirectionalSupportDistanceMeters: number | null
+  readonly supportCentroidDistanceMeters: number | null
+  readonly projectedSupportOverlap: number
+  readonly projectedExtentOverlap: number
+  readonly compatibilityScore: number
+}
+
+export interface StructuralTriadWallSelectionDiagnostic {
+  readonly planeId: string
+  readonly remainsSelected: boolean
+  readonly independentlyRequired: boolean
+}
+
 export interface StructuralTriadCompetitionGroup {
   readonly id: string
-  readonly sharedAnchorWallPlaneId: string
+  readonly competitionType: 'shared-anchor' | 'whole-corner'
+  readonly sharedAnchorWallPlaneId: string | null
   readonly sharedHorizontalPlaneId: string
   readonly triadKeys: readonly string[]
   readonly introducedWallPlaneIds: readonly string[]
@@ -385,7 +408,10 @@ export interface RoomStructureInterpretationResult {
     readonly locallyAcceptedTriadCount: number
     readonly finalSelectedTriadCount: number
     readonly triadCompetitionGroupCount: number
+    readonly sharedAnchorCompetitionGroupCount: number
+    readonly wholeCornerCompetitionGroupCount: number
     readonly triadCompetitionPairCount: number
+    readonly wholeCornerCompetitionPairCount: number
     readonly suppressedTriadCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null

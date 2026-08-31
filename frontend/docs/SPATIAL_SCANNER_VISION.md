@@ -547,6 +547,17 @@ representative; losing triads remain visible as locally accepted but suppressed
 diagnostics. Distinct spatial corners are preserved, so this is not a fixed wall
 count or a rule that reduces every room to two walls.
 
+Whole-corner competition extends this comparison to accepted wall-wall-horizontal
+triads that share a ceiling or floor but do not share a wall ID. Both possible
+wall-pair correspondences are compared using support distance, projected support
+and extent compatibility, plane offsets, and the exact three-plane corner-point
+separation. When those spatial and topological signals indicate duplicate
+representations of one physical corner, one triad is retained as the structural
+representative and the losing wall pair is suppressed only when it has no
+independent room-envelope evidence. Locally valid triads remain visible in
+diagnostics, and spatially distinct corners or independently supported walls are
+preserved; this is not a fixed wall-count rule.
+
 Selected structural surfaces then feed the M7.2 intersection stage:
 
 ```text
