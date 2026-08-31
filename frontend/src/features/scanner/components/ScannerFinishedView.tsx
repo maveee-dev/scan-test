@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { BUILD_INFO } from '../../../config/buildInfo'
 import type { FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
+import { StructuralIntersectionService } from '../../room-analysis/services/structuralIntersectionService'
 import { StructuralSurfaceInterpretationService } from '../../room-analysis/services/structuralSurfaceInterpretationService'
 import type {
   RoomAnalysisResult,
   RoomStructureInterpretationResult,
+  StructuralIntersectionCandidate,
+  StructuralIntersectionResult,
   StructuralSurfaceRole,
 } from '../../room-analysis/types'
 import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
@@ -359,6 +362,119 @@ function StructuralSurfaceRow({
   )
 }
 
+function formatPoint(point: { x: number; y: number; z: number }): string {
+  return `(${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)})`
+}
+
+function formatRange(range: { minimum: number; maximum: number } | null): string {
+  return range ? `[${range.minimum.toFixed(2)}, ${range.maximum.toFixed(2)}]` : 'none'
+}
+
+function StructuralIntersectionSummary({
+  result,
+}: {
+  result: StructuralIntersectionResult
+}) {
+  const supported = result.intersections.filter((intersection) => intersection.status === 'supported')
+  const partial = result.intersections.filter((intersection) => intersection.status === 'partial')
+  const rejected = result.intersections.filter((intersection) => intersection.status === 'rejected')
+
+  return (
+    <section className="scanner-analysis-result" aria-labelledby="structural-intersections-title">
+      <div className="scanner-analysis-result-header">
+        <div>
+          <span className="scanner-analysis-label" id="structural-intersections-title">
+            Structural intersections
+          </span>
+          <span className="scanner-analysis-copy">
+            Finite, support-validated lines between selected structural surfaces; no room mesh is inferred.
+          </span>
+        </div>
+        <strong>{result.stats.candidateCount}</strong>
+      </div>
+      <div className="scanner-analysis-stats">
+        <div>
+          <span>Supported</span>
+          <strong>{supported.length}</strong>
+        </div>
+        <div>
+          <span>Partial</span>
+          <strong>{partial.length}</strong>
+        </div>
+        <div>
+          <span>Rejected</span>
+          <strong>{rejected.length}</strong>
+        </div>
+        <div>
+          <span>Wall-wall</span>
+          <strong>{result.stats.wallWallCount}</strong>
+        </div>
+        <div>
+          <span>Wall-ceiling</span>
+          <strong>{result.stats.wallCeilingCount}</strong>
+        </div>
+        <div>
+          <span>Wall-floor</span>
+          <strong>{result.stats.wallFloorCount}</strong>
+        </div>
+        <div>
+          <span>Selected surfaces</span>
+          <strong>{result.stats.selectedSurfaceCount}</strong>
+        </div>
+        <div>
+          <span>Fused support points evaluated</span>
+          <strong>{result.stats.supportPointsEvaluated}</strong>
+        </div>
+      </div>
+      <div className="scanner-analysis-timings">
+        <span>
+          Timing: pair preparation {result.timings.pairPreparationMs.toFixed(1)} ms | line calculation {result.timings.lineCalculationMs.toFixed(1)} ms | support validation {result.timings.supportValidationMs.toFixed(1)} ms | total {result.timings.totalMs.toFixed(1)} ms
+        </span>
+      </div>
+      {result.intersections.length > 0 ? (
+        <div className="scanner-plane-list">
+          {result.intersections.map((intersection) => (
+            <StructuralIntersectionRow key={intersection.id} intersection={intersection} />
+          ))}
+        </div>
+      ) : (
+        <div className="scanner-analysis-timings">
+          <span>No selected-surface intersection candidates were generated.</span>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function StructuralIntersectionRow({
+  intersection,
+}: {
+  intersection: StructuralIntersectionCandidate
+}) {
+  const segmentText = intersection.segment
+    ? `${formatPoint(intersection.segment.start)} → ${formatPoint(intersection.segment.end)}`
+    : 'none'
+  const directionText = intersection.line
+    ? formatPoint(intersection.line.direction)
+    : 'none'
+  const supportDistanceText = intersection.closestSupportDistanceMeters === null
+    ? 'n/a'
+    : `${intersection.closestSupportDistanceMeters.toFixed(2)} m`
+  return (
+    <div className={`scanner-plane-row ${intersection.status === 'supported' ? 'scanner-plane-row-selected' : 'scanner-plane-row-secondary'}`}>
+      <span>
+        <strong>{intersection.id}</strong>
+        <small>
+          {intersection.status} | {intersection.type} | {intersection.surfaceAId} / {intersection.surfaceBId} | angle {intersection.surfaceAngleDegrees.toFixed(1)} deg | direction {directionText} | verticality {(intersection.verticalityScore * 100).toFixed(0)}%
+        </small>
+      </span>
+      <span>
+        segment {segmentText} | length {intersection.lengthMeters.toFixed(2)} m | support {intersection.supportCountA}/{intersection.supportCountB} ({intersection.intervalSupportCountA}/{intersection.intervalSupportCountB} in interval) | intervals {formatRange(intersection.supportIntervalA)} / {formatRange(intersection.supportIntervalB)} | closest support {supportDistanceText} | near line {intersection.supportNearIntersection ? 'yes' : 'no'} | continuity {(intersection.segmentContinuity * 100).toFixed(0)}% | confidence {intersection.confidence.toFixed(2)}{intersection.rejectionReason ? ` | ${intersection.rejectionReason}` : ''}
+      </span>
+    </div>
+  )
+}
+
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
@@ -366,8 +482,10 @@ function ScannerFinishedView({
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
   const [interpretationService] = useState(() => new StructuralSurfaceInterpretationService())
+  const [intersectionService] = useState(() => new StructuralIntersectionService())
   const [analysisResult, setAnalysisResult] = useState<RoomAnalysisResult | null>(null)
   const [interpretationResult, setInterpretationResult] = useState<RoomStructureInterpretationResult | null>(null)
+  const [intersectionResult, setIntersectionResult] = useState<StructuralIntersectionResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -391,6 +509,7 @@ function ScannerFinishedView({
     setAnalysisError(null)
     setAnalysisResult(null)
     setInterpretationResult(null)
+    setIntersectionResult(null)
     analysisTimerRef.current = window.setTimeout(() => {
       if (!mountedRef.current) {
         return
@@ -398,8 +517,11 @@ function ScannerFinishedView({
 
       try {
         const nextAnalysisResult = analysisService.analyze(scan)
+        const nextInterpretationResult = interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType)
+        const nextIntersectionResult = intersectionService.analyze(nextInterpretationResult, scan)
         setAnalysisResult(nextAnalysisResult)
-        setInterpretationResult(interpretationService.interpret(nextAnalysisResult, scan.referenceSpaceType))
+        setInterpretationResult(nextInterpretationResult)
+        setIntersectionResult(nextIntersectionResult)
       } catch (error: unknown) {
         setAnalysisError(
           error instanceof Error
@@ -449,6 +571,7 @@ function ScannerFinishedView({
         <FinalizedSpatialScanPreview
           analysisResult={analysisResult}
           scan={scan}
+          structuralIntersections={intersectionResult}
           structuralInterpretation={interpretationResult}
         />
       ) : (
@@ -464,6 +587,7 @@ function ScannerFinishedView({
         <>
           <AnalysisResultSummary analysisResult={analysisResult} />
           {interpretationResult ? <StructuralSurfaceSummary interpretation={interpretationResult} /> : null}
+          {intersectionResult ? <StructuralIntersectionSummary result={intersectionResult} /> : null}
           {analysisResult.stats.provisionalPlaneCount > 0 ? (
         <section className="scanner-analysis-result" aria-labelledby="legacy-scanner-analysis-title">
           <div className="scanner-analysis-result-header">

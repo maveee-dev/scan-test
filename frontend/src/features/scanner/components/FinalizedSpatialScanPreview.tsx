@@ -6,12 +6,14 @@ import type {
   PlaneCandidate,
   RoomAnalysisResult,
   RoomStructureInterpretationResult,
+  StructuralIntersectionResult,
 } from '../../room-analysis/types'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
   analysisResult?: RoomAnalysisResult | null
   structuralInterpretation?: RoomStructureInterpretationResult | null
+  structuralIntersections?: StructuralIntersectionResult | null
 }
 
 const POINT_COLORS: Record<CoverageCellState, number> = {
@@ -32,8 +34,13 @@ const STRUCTURAL_SURFACE_COLORS = {
   other: 0xf0b36a,
   unknown: 0x9da9b3,
 } as const
+const STRUCTURAL_INTERSECTION_COLORS = {
+  'wall-wall': 0xffd166,
+  'wall-ceiling': 0xd2b8ff,
+  'wall-floor': 0x9de5b3,
+} as const
 
-type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural'
+type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -145,6 +152,68 @@ function addStructuralSurfaces(
   return { geometries, materials }
 }
 
+function addStructuralIntersections(
+  scene: THREE.Scene,
+  analysisResult: RoomAnalysisResult,
+  interpretation: RoomStructureInterpretationResult,
+  intersections: StructuralIntersectionResult,
+): { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } {
+  const group = new THREE.Group()
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.Material[] = []
+
+  for (const surface of interpretation.surfaces) {
+    if (surface.selection !== 'selected') {
+      continue
+    }
+    const plane = analysisResult.planes.find((candidate) => candidate.id === surface.planeId)
+    if (!plane) {
+      continue
+    }
+    const geometry = createPlaneGeometry(plane)
+    const material = new THREE.MeshBasicMaterial({
+      color: STRUCTURAL_SURFACE_COLORS[surface.role],
+      depthWrite: false,
+      opacity: 0.08,
+      side: THREE.DoubleSide,
+      transparent: true,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    group.add(mesh)
+    geometries.push(geometry)
+    materials.push(material)
+  }
+
+  for (const intersection of intersections.intersections) {
+    if (!intersection.segment || intersection.status === 'rejected') {
+      continue
+    }
+    const start = new THREE.Vector3(
+      intersection.segment.start.x,
+      intersection.segment.start.y,
+      intersection.segment.start.z,
+    )
+    const end = new THREE.Vector3(
+      intersection.segment.end.x,
+      intersection.segment.end.y,
+      intersection.segment.end.z,
+    )
+    const geometry = new THREE.BufferGeometry().setFromPoints([start, end])
+    const material = new THREE.LineBasicMaterial({
+      color: STRUCTURAL_INTERSECTION_COLORS[intersection.type],
+      opacity: intersection.status === 'supported' ? 1 : 0.62,
+      transparent: true,
+    })
+    const line = new THREE.Line(geometry, material)
+    group.add(line)
+    geometries.push(geometry)
+    materials.push(material)
+  }
+
+  scene.add(group)
+  return { geometries, materials }
+}
+
 function createFusedSurfaceGeometry(
   surfels: readonly FinalizedSpatialScan['fusedSurface'][number][],
 ): THREE.BufferGeometry {
@@ -191,6 +260,7 @@ function createFusedSurfaceGeometry(
 function FinalizedSpatialScanPreview({
   analysisResult,
   scan,
+  structuralIntersections,
   structuralInterpretation,
 }: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -250,8 +320,23 @@ function FinalizedSpatialScanPreview({
       ? scan.fusedSurface.map((surfel) => surfel.position)
       : mode === 'planes' || mode === 'structural'
         ? analysisResult?.planes.flatMap((plane) => [plane.bounds.min, plane.bounds.max]) ?? []
+        : mode === 'intersections'
+          ? structuralIntersections?.intersections.flatMap((intersection) => intersection.segment
+            ? [intersection.segment.start, intersection.segment.end]
+            : []) ?? []
         : scan.coverage.map((cell) => cell.position)
     if (pointsForBounds.length === 0) {
+      if (mode === 'intersections' && structuralInterpretation && analysisResult) {
+        for (const surface of structuralInterpretation.surfaces) {
+          if (surface.selection !== 'selected') {
+            continue
+          }
+          const plane = analysisResult.planes.find((candidate) => candidate.id === surface.planeId)
+          if (plane) {
+            pointsForBounds.push(plane.bounds.min, plane.bounds.max)
+          }
+        }
+      }
       for (const surfel of scan.fusedSurface) {
         pointsForBounds.push(surfel.position)
       }
@@ -272,6 +357,7 @@ function FinalizedSpatialScanPreview({
     let fusedSurface: THREE.Mesh | null = null
     let planeResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+    let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
 
     if (mode === 'coverage') {
       coverageGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -300,6 +386,8 @@ function FinalizedSpatialScanPreview({
       planeResources = addPlaneCandidates(scene, analysisResult)
     } else if (mode === 'structural' && analysisResult && structuralInterpretation) {
       structuralResources = addStructuralSurfaces(scene, analysisResult, structuralInterpretation)
+    } else if (mode === 'intersections' && analysisResult && structuralInterpretation && structuralIntersections) {
+      intersectionResources = addStructuralIntersections(scene, analysisResult, structuralInterpretation, structuralIntersections)
     }
 
     const center = new THREE.Vector3(
@@ -362,6 +450,8 @@ function FinalizedSpatialScanPreview({
       planeResources?.materials.forEach((planeMaterial) => planeMaterial.dispose())
       structuralResources?.geometries.forEach((surfaceGeometry) => surfaceGeometry.dispose())
       structuralResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
+      intersectionResources?.geometries.forEach((intersectionGeometry) => intersectionGeometry.dispose())
+      intersectionResources?.materials.forEach((intersectionMaterial) => intersectionMaterial.dispose())
       renderer.dispose()
       if (pointCloud) {
         scene.remove(pointCloud)
@@ -370,7 +460,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(fusedSurface)
       }
     }
-  }, [analysisResult, mode, scan, structuralInterpretation])
+  }, [analysisResult, mode, scan, structuralInterpretation, structuralIntersections])
 
   return (
     <div className="scanner-scan-preview">
@@ -419,6 +509,16 @@ function FinalizedSpatialScanPreview({
               Structural Surfaces
             </button>
           ) : null}
+          {structuralIntersections ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'intersections'}
+              onClick={() => setMode('intersections')}
+            >
+              Structural Intersections
+            </button>
+          ) : null}
         </div>
         <button
           type="button"
@@ -431,6 +531,11 @@ function FinalizedSpatialScanPreview({
       {mode === 'planes' && analysisResult?.planes.length === 0 ? (
         <p className="scanner-scan-preview-note">
           No major geometric plane candidates were detected in this scan.
+        </p>
+      ) : null}
+      {mode === 'intersections' && structuralIntersections && structuralIntersections.stats.supportedCount === 0 ? (
+        <p className="scanner-scan-preview-note">
+          No supported finite structural intersection segments were detected. Partial candidates remain in the diagnostics below.
         </p>
       ) : null}
     </div>

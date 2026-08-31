@@ -291,6 +291,75 @@ export interface RoomStructureInterpretationResult {
   }
 }
 
+export type StructuralIntersectionType = 'wall-wall' | 'wall-ceiling' | 'wall-floor'
+
+export type StructuralIntersectionStatus = 'supported' | 'partial' | 'rejected'
+
+export type StructuralIntersectionRelationship = 'candidate' | 'supported' | 'rejected'
+
+export interface StructuralIntersectionLine {
+  readonly origin: SpatialPoint
+  readonly direction: SpatialPoint
+}
+
+export interface StructuralIntersectionSegment {
+  readonly start: SpatialPoint
+  readonly end: SpatialPoint
+}
+
+export interface StructuralIntersectionRange {
+  readonly minimum: number
+  readonly maximum: number
+}
+
+export interface StructuralIntersectionCandidate {
+  readonly id: string
+  readonly surfaceAId: string
+  readonly surfaceBId: string
+  readonly type: StructuralIntersectionType
+  readonly relationship: StructuralIntersectionRelationship
+  readonly status: StructuralIntersectionStatus
+  readonly line: StructuralIntersectionLine | null
+  readonly segment: StructuralIntersectionSegment | null
+  readonly lengthMeters: number
+  readonly surfaceAngleDegrees: number
+  readonly verticalityScore: number
+  readonly supportNearIntersection: boolean
+  readonly closestSupportDistanceMeters: number | null
+  readonly supportCountA: number
+  readonly supportCountB: number
+  readonly intervalSupportCountA: number
+  readonly intervalSupportCountB: number
+  readonly supportIntervalA: StructuralIntersectionRange | null
+  readonly supportIntervalB: StructuralIntersectionRange | null
+  readonly segmentContinuity: number
+  readonly supportCoverage: number
+  readonly confidence: number
+  readonly rejectionReason: string | null
+}
+
+export interface StructuralIntersectionResult {
+  readonly sourceScanId: string
+  readonly intersections: readonly StructuralIntersectionCandidate[]
+  readonly stats: {
+    readonly candidateCount: number
+    readonly supportedCount: number
+    readonly partialCount: number
+    readonly rejectedCount: number
+    readonly wallWallCount: number
+    readonly wallCeilingCount: number
+    readonly wallFloorCount: number
+    readonly supportPointsEvaluated: number
+    readonly selectedSurfaceCount: number
+  }
+  readonly timings: {
+    readonly pairPreparationMs: number
+    readonly lineCalculationMs: number
+    readonly supportValidationMs: number
+    readonly totalMs: number
+  }
+}
+
 export interface SurfaceConsensusDiagnostic {
   readonly consensusId: string
   readonly finalPlaneId: string

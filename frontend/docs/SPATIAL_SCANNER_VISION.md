@@ -506,6 +506,26 @@ evidence prevent a tiny high-angle fragment from displacing a dominant measured
 surface. The selected core continues to reference the original geometric planes
 for later intersection processing.
 
+Selected structural surfaces then feed the M7.2 intersection stage:
+
+```text
+selected structural surfaces
+        |
+exact infinite plane intersection
+        |
+observed finalized-support validation
+        |
+finite supported structural segment
+        |
+future corner and room-boundary reconstruction
+```
+
+Intersection candidates use only selected surfaces and the real finalized
+fused-surface support. Infinite mathematical lines are not treated as room
+edges until both surfaces provide nearby measured support. Supported and
+partial finite segments are retained with their uncertainty and continuity;
+missing support is not completed or extended into a room mesh in M7.2.
+
 The longer-term post-scan direction is:
 
 ```text
@@ -519,6 +539,8 @@ final physical-surface consensus
         â†“
 structural room-surface interpretation
         â†“
+supported structural intersections
+        |
 plane relationships and room envelope
         â†“
 continuous editable 3D room
