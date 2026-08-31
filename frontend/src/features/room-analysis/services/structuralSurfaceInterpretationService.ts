@@ -6,6 +6,7 @@ import type {
   StructuralGraphEdge,
   StructuralGraphComponent,
   StructuralGraphNode,
+  StructuralCorePairCandidate,
   StructuralParallelLane,
   StructuralRelationshipType,
   StructuralSurfaceCandidate,
@@ -1119,24 +1120,94 @@ function getWallGrowthReason(
     : 'strong corner edge; candidate considered for graph growth'
 }
 
-function getWallCoreSeedEdge(
+function getStructuralNodeQuality(evaluation: RoleEvaluation): number {
+  const fitQuality = 1 - clamp(evaluation.context.plane.rmsError / MAXIMUM_RMS_FOR_QUALITY_METERS, 0, 1)
+  const orientationQuality = evaluation.role === 'wall'
+    ? evaluation.context.orientationScore
+    : evaluation.context.horizontalOrientationScore
+  return clamp(
+    evaluation.finalSelectionScore * 0.25 +
+      evaluation.envelopeSelectionScore * 0.15 +
+      evaluation.confidence * 0.2 +
+      orientationQuality * 0.15 +
+      evaluation.context.areaScore * 0.1 +
+      evaluation.context.supportScore * 0.1 +
+      fitQuality * 0.05,
+    0,
+    1,
+  )
+}
+
+function getWallCorePairCandidates(
+  evaluations: readonly RoleEvaluation[],
   edges: readonly StructuralGraphEdge[],
-): StructuralGraphEdge | null {
+  config: StructuralSurfaceInterpretationConfig,
+): StructuralCorePairCandidate[] {
+  const evaluationsById = new Map(evaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
   return edges
     .filter((edge) =>
       edge.edgeStrength === 'strong' &&
       (edge.edgeType === 'corner' || edge.edgeType === 'parallel-boundary'))
-    .sort((left, right) => right.edgeScore - left.edgeScore ||
+    .map((edge) => {
+      const first = evaluationsById.get(edge.firstPlaneId)
+      const second = evaluationsById.get(edge.secondPlaneId)
+      if (!first || !second || first.role !== 'wall' || second.role !== 'wall' ||
+        !isEnvelopeEligible(first, config) || !isEnvelopeEligible(second, config)) {
+        return null
+      }
+      const firstNodeQuality = getStructuralNodeQuality(first)
+      const secondNodeQuality = getStructuralNodeQuality(second)
+      return {
+        firstPlaneId: edge.firstPlaneId,
+        secondPlaneId: edge.secondPlaneId,
+        edgeStrength: edge.edgeStrength,
+        edgeScore: edge.edgeScore,
+        firstNodeQuality,
+        secondNodeQuality,
+        jointCoreScore: clamp(edge.edgeScore * Math.sqrt(firstNodeQuality * secondNodeQuality), 0, 1),
+        selected: false,
+      }
+    })
+    .filter((candidate): candidate is StructuralCorePairCandidate => Boolean(candidate))
+    .sort((left, right) => right.jointCoreScore - left.jointCoreScore ||
+      right.edgeScore - left.edgeScore ||
       left.firstPlaneId.localeCompare(right.firstPlaneId) ||
-      left.secondPlaneId.localeCompare(right.secondPlaneId))[0] ?? null
+      left.secondPlaneId.localeCompare(right.secondPlaneId))
 }
 
-function getStrongWallHorizontalEdge(
+function getWallHorizontalCoreCandidate(
+  evaluations: readonly RoleEvaluation[],
   edges: readonly StructuralGraphEdge[],
-): StructuralGraphEdge | null {
+  config: StructuralSurfaceInterpretationConfig,
+): StructuralCorePairCandidate | null {
+  const evaluationsById = new Map(evaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
   return edges
     .filter((edge) => edge.edgeType === 'wall-horizontal' && edge.edgeStrength === 'strong')
-    .sort((left, right) => right.edgeScore - left.edgeScore ||
+    .map((edge) => {
+      const first = evaluationsById.get(edge.firstPlaneId)
+      const second = evaluationsById.get(edge.secondPlaneId)
+      if (!first || !second ||
+        !((first.role === 'wall' && (second.role === 'floor' || second.role === 'ceiling')) ||
+          (second.role === 'wall' && (first.role === 'floor' || first.role === 'ceiling'))) ||
+        !isEnvelopeEligible(first, config) || !isEnvelopeEligible(second, config)) {
+        return null
+      }
+      const firstNodeQuality = getStructuralNodeQuality(first)
+      const secondNodeQuality = getStructuralNodeQuality(second)
+      return {
+        firstPlaneId: edge.firstPlaneId,
+        secondPlaneId: edge.secondPlaneId,
+        edgeStrength: edge.edgeStrength,
+        edgeScore: edge.edgeScore,
+        firstNodeQuality,
+        secondNodeQuality,
+        jointCoreScore: clamp(edge.edgeScore * Math.sqrt(firstNodeQuality * secondNodeQuality), 0, 1),
+        selected: false,
+      }
+    })
+    .filter((candidate): candidate is StructuralCorePairCandidate => Boolean(candidate))
+    .sort((left, right) => right.jointCoreScore - left.jointCoreScore ||
+      right.edgeScore - left.edgeScore ||
       left.firstPlaneId.localeCompare(right.firstPlaneId) ||
       left.secondPlaneId.localeCompare(right.secondPlaneId))[0] ?? null
 }
@@ -1200,6 +1271,7 @@ export class StructuralSurfaceInterpretationService {
     )
     const evaluations = applyGraphEvidence(initialEvaluations, graph.graphSupportByPlaneId)
     const evaluationByPlaneId = new Map(evaluations.map((evaluation) => [evaluation.context.plane.id, evaluation]))
+    const structuralCorePairCandidates = getWallCorePairCandidates(evaluations, graph.edges, this.config)
     const getUpdatedGroupMembers = (group: StructuralOrientationGroup): RoleEvaluation[] =>
       group.members
         .map((member) => evaluationByPlaneId.get(member.context.plane.id))
@@ -1227,7 +1299,10 @@ export class StructuralSurfaceInterpretationService {
 
     const eligibleWalls = evaluations
       .filter((evaluation) => evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config))
-    const seedEdge = getWallCoreSeedEdge(graph.edges)
+    const seedPair = structuralCorePairCandidates[0]
+    const seedEdge = seedPair
+      ? graph.edges.find((edge) => edge.firstPlaneId === seedPair.firstPlaneId && edge.secondPlaneId === seedPair.secondPlaneId)
+      : undefined
     const seedEvaluations = seedEdge
       ? [evaluationByPlaneId.get(seedEdge.firstPlaneId), evaluationByPlaneId.get(seedEdge.secondPlaneId)]
         .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall' && isEnvelopeEligible(evaluation, this.config)))
@@ -1238,12 +1313,16 @@ export class StructuralSurfaceInterpretationService {
         addSelectedWall(
           evaluation,
           seedEdge.edgeType === 'parallel-boundary'
-            ? 'distinct parallel boundary supported by strong graph core'
-            : 'strong corner edge; introduces a coherent wall direction',
+            ? 'highest joint structural core score; distinct parallel boundary supported by strong graph core'
+            : 'highest joint structural core score; strong corner edge introduces a coherent wall direction',
         )
       }
     } else {
-      const wallHorizontalSeed = getStrongWallHorizontalEdge(graph.edges)
+      const wallHorizontalSeedCandidate = getWallHorizontalCoreCandidate(evaluations, graph.edges, this.config)
+      const wallHorizontalSeed = wallHorizontalSeedCandidate
+        ? graph.edges.find((edge) => edge.firstPlaneId === wallHorizontalSeedCandidate.firstPlaneId &&
+          edge.secondPlaneId === wallHorizontalSeedCandidate.secondPlaneId)
+        : undefined
       const wallHorizontalEvaluation = wallHorizontalSeed
         ? [wallHorizontalSeed.firstPlaneId, wallHorizontalSeed.secondPlaneId]
           .map((planeId) => evaluationByPlaneId.get(planeId))
@@ -1405,6 +1484,10 @@ export class StructuralSurfaceInterpretationService {
     ]
     const interpretationFinishedAt = getTimestamp()
     const roleCandidateCount = surfaces.filter((surface) => surface.role === 'wall' || surface.role === 'floor' || surface.role === 'ceiling').length
+    const corePairDiagnostics = structuralCorePairCandidates.map((candidate) => ({
+      ...candidate,
+      selected: selectedWallIds.has(candidate.firstPlaneId) && selectedWallIds.has(candidate.secondPlaneId),
+    }))
 
     return Object.freeze({
       sourceScanId: analysisResult.sourceScanId,
@@ -1424,6 +1507,7 @@ export class StructuralSurfaceInterpretationService {
       structuralGraphEdges: graph.edges,
       structuralGraphComponents: graph.componentRecords,
       selectedWallCorePlaneIds: Object.freeze([...selectedWallIds]),
+      structuralCorePairCandidates: Object.freeze(corePairDiagnostics),
       likelyWalls: freezeSurfaceArray(selectedWalls),
       floorCandidate: selectedFloor,
       ceilingCandidate: selectedCeiling,
@@ -1450,6 +1534,7 @@ export class StructuralSurfaceInterpretationService {
         structuralGraphEdgeCount: graph.edges.length,
         structuralGraphComponentCount: graph.componentRecords.length,
         selectedWallCoreCount: selectedWallIds.size,
+        eligibleStrongWallEdgeCount: structuralCorePairCandidates.length,
       },
       timings: {
         relationshipAnalysisMs: Math.max(0, relationshipFinishedAt - relationshipStartedAt),

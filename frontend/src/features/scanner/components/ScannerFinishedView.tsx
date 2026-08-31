@@ -188,6 +188,7 @@ function StructuralSurfaceSummary({
   const unselectedSurfaces = interpretation.surfaces.filter((surface) => surface.selection === 'unselected')
   const strongGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'strong')
   const supportingGraphEdges = interpretation.structuralGraphEdges.filter((edge) => edge.edgeStrength === 'supporting')
+  const topCoreCandidates = interpretation.structuralCorePairCandidates.slice(0, 6)
 
   return (
     <section className="scanner-analysis-result" aria-labelledby="structural-surfaces-title">
@@ -247,6 +248,10 @@ function StructuralSurfaceSummary({
           <span>Strong / supporting edges</span>
           <strong>{strongGraphEdges.length} / {supportingGraphEdges.length}</strong>
         </div>
+        <div>
+          <span>Eligible strong wall edges</span>
+          <strong>{interpretation.stats.eligibleStrongWallEdgeCount}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
@@ -265,6 +270,17 @@ function StructuralSurfaceSummary({
           Selected structural core: {interpretation.selectedWallCorePlaneIds.join(', ') || 'none'} | raw graph components: {interpretation.structuralGraphComponents.map((component) => `${component.id} [${component.planeIds.join(', ')}]`).join(' | ') || 'none'}
         </span>
       </div>
+      {topCoreCandidates.length > 0 ? (
+        <div className="scanner-analysis-timings">
+          <span>
+            Top joint wall cores: {topCoreCandidates.map((candidate) => {
+              const first = planeById.get(candidate.firstPlaneId)
+              const second = planeById.get(candidate.secondPlaneId)
+              return `${candidate.firstPlaneId}/${candidate.secondPlaneId} edge ${candidate.edgeScore.toFixed(2)}, nodes ${candidate.firstNodeQuality.toFixed(2)}/${candidate.secondNodeQuality.toFixed(2)}, area ${first?.occupiedArea.toFixed(2) ?? 'n/a'}/${second?.occupiedArea.toFixed(2) ?? 'n/a'} m2, support ${first?.finalOwnedSupport ?? 'n/a'}/${second?.finalOwnedSupport ?? 'n/a'}, joint ${candidate.jointCoreScore.toFixed(2)}${candidate.selected ? ' [selected]' : ''}`
+            }).join(' | ')}
+          </span>
+        </div>
+      ) : null}
       {selectedSurfaces.length > 0 ? (
         <>
           <div className="scanner-analysis-timings"><span>Selected room surfaces</span></div>

@@ -499,6 +499,13 @@ parallel surface only with independent boundary evidence, and retains weaker
 transitive or disconnected candidates as alternates. A credible standalone
 surface remains valid when no strong relationship graph is available.
 
+When several strong corner edges compete, the structural core is chosen by joint
+node-and-edge quality. Corner strength remains mandatory, while normalized
+surface support, occupied extent, orientation, fit quality, and room-envelope
+evidence prevent a tiny high-angle fragment from displacing a dominant measured
+surface. The selected core continues to reference the original geometric planes
+for later intersection processing.
+
 The longer-term post-scan direction is:
 
 ```text

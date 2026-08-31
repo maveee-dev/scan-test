@@ -223,6 +223,17 @@ export interface StructuralGraphComponent {
   readonly edgeCount: number
 }
 
+export interface StructuralCorePairCandidate {
+  readonly firstPlaneId: string
+  readonly secondPlaneId: string
+  readonly edgeStrength: 'strong' | 'supporting'
+  readonly edgeScore: number
+  readonly firstNodeQuality: number
+  readonly secondNodeQuality: number
+  readonly jointCoreScore: number
+  readonly selected: boolean
+}
+
 export interface RoomStructureInterpretationResult {
   readonly sourceScanId: string
   readonly referenceSpaceType: 'local-floor' | 'local'
@@ -243,6 +254,7 @@ export interface RoomStructureInterpretationResult {
   readonly structuralGraphEdges: readonly StructuralGraphEdge[]
   readonly structuralGraphComponents: readonly StructuralGraphComponent[]
   readonly selectedWallCorePlaneIds: readonly string[]
+  readonly structuralCorePairCandidates: readonly StructuralCorePairCandidate[]
   /** Compatibility aliases; these now contain only selected room surfaces. */
   readonly likelyWalls: readonly StructuralSurfaceCandidate[]
   readonly floorCandidate: StructuralSurfaceCandidate | null
@@ -266,6 +278,7 @@ export interface RoomStructureInterpretationResult {
     readonly structuralGraphEdgeCount: number
     readonly structuralGraphComponentCount: number
     readonly selectedWallCoreCount: number
+    readonly eligibleStrongWallEdgeCount: number
     readonly floorCandidate: string | null
     readonly ceilingCandidate: string | null
     readonly otherCount: number
