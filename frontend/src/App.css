@@ -1860,6 +1860,7 @@
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+  min-width: 0;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
 }
@@ -1870,6 +1871,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .xr-scanner-debug-header .xr-dom-overlay-state {
@@ -1879,6 +1881,7 @@
 .xr-scanner-debug-geometry {
   flex: 0 0 auto;
   min-height: 30px;
+  min-width: 0;
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -1890,6 +1893,13 @@
   text-transform: uppercase;
   cursor: pointer;
   touch-action: manipulation;
+}
+
+.xr-scanner-debug,
+.xr-scanner-debug-geometry,
+.xr-scanner-debug-close,
+.xr-scanner-debug-content {
+  box-sizing: border-box;
 }
 
 .xr-scanner-debug-geometry[aria-pressed="true"] {
@@ -2583,6 +2593,30 @@
   .scanner-plane-row > span:last-child {
     align-items: flex-start;
     text-align: left;
+  }
+
+  .xr-scanner-debug {
+    min-width: 0;
+  }
+
+  .xr-scanner-debug-header {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+  }
+
+  .xr-scanner-debug-header > div {
+    grid-column: 1 / -1;
+  }
+
+  .xr-scanner-debug-geometry,
+  .xr-scanner-debug-close {
+    width: 100%;
+    min-width: 0;
+    padding: 6px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .scanner-scan-preview-toolbar {
