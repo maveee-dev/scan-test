@@ -605,6 +605,26 @@ export interface RealityRgbColor {
   readonly b: number
 }
 
+export type RealityColorSpace = 'srgb' | 'linear'
+
+export interface RealityColorStatistics {
+  readonly colorSpace: RealityColorSpace
+  readonly sampleCount: number
+  readonly min: RealityRgbColor
+  readonly max: RealityRgbColor
+  readonly mean: RealityRgbColor
+  readonly nonWhiteSampleCount: number
+  readonly uniqueApproximateColorCount: number
+}
+
+export interface DenseRealityColorSample {
+  readonly position: SpatialPoint
+  readonly colorRgb: RealityRgbColor
+  readonly colorWeight: number
+  readonly colorConfidence: number
+  readonly colorObservationCount: number
+}
+
 export type RealityReconstructionStatus = 'available' | 'unavailable' | 'empty'
 
 export type RealityCaptureStatus = 'starting' | 'active' | 'unavailable' | 'error'
@@ -746,6 +766,8 @@ export interface FinalizedDenseRealityReconstruction {
   readonly bounds: SpatialBounds | null
   readonly captureSummary: RealityCaptureSummary
   readonly fusionDiagnostics: DenseRealityFusionDebug
+  readonly colorStatistics: RealityColorStatistics
+  readonly colorSamples: readonly DenseRealityColorSample[]
 }
 
 export interface FinalizedScannerCapture {

@@ -1,5 +1,9 @@
 import * as THREE from 'three'
-import type { FinalizedRealityReconstruction, FinalizedRealitySurfel } from '../types'
+import type {
+  FinalizedRealityReconstruction,
+  FinalizedRealitySurfel,
+  RealityColorStatistics,
+} from '../types'
 
 export type RealitySurfaceRenderMode = 'points' | 'splats' | 'dense'
 
@@ -25,6 +29,7 @@ export interface RealitySurfaceRenderStats {
   readonly estimatedSmallGapRegions: number
   readonly estimatedLargeUnsupportedGaps: number
   readonly memoryBytes: number
+  readonly renderColorStatistics: RealityColorStatistics
 }
 
 export interface RealitySurfaceRenderResources {
@@ -175,6 +180,86 @@ function writeColor(
   colors[offset] = srgbToLinear(color.r)
   colors[offset + 1] = srgbToLinear(color.g)
   colors[offset + 2] = srgbToLinear(color.b)
+}
+
+function createEmptyColorStatistics(colorSpace: 'srgb' | 'linear'): RealityColorStatistics {
+  return {
+    colorSpace,
+    sampleCount: 0,
+    min: { r: 0, g: 0, b: 0 },
+    max: { r: 0, g: 0, b: 0 },
+    mean: { r: 0, g: 0, b: 0 },
+    nonWhiteSampleCount: 0,
+    uniqueApproximateColorCount: 0,
+  }
+}
+
+function calculateRenderColorStatistics(
+  geometries: readonly THREE.BufferGeometry[],
+): RealityColorStatistics {
+  let sampleCount = 0
+  let nonWhiteSampleCount = 0
+  let redTotal = 0
+  let greenTotal = 0
+  let blueTotal = 0
+  let minRed = Infinity
+  let minGreen = Infinity
+  let minBlue = Infinity
+  let maxRed = -Infinity
+  let maxGreen = -Infinity
+  let maxBlue = -Infinity
+  const uniqueColors = new Set<string>()
+  const visited = new Set<THREE.BufferGeometry>()
+
+  for (const geometry of geometries) {
+    if (visited.has(geometry)) {
+      continue
+    }
+    visited.add(geometry)
+    const attribute = geometry.getAttribute('color')
+    if (!attribute) {
+      continue
+    }
+    for (let index = 0; index < attribute.count; index += 1) {
+      const red = attribute.getX(index)
+      const green = attribute.getY(index)
+      const blue = attribute.getZ(index)
+      sampleCount += 1
+      redTotal += red
+      greenTotal += green
+      blueTotal += blue
+      minRed = Math.min(minRed, red)
+      minGreen = Math.min(minGreen, green)
+      minBlue = Math.min(minBlue, blue)
+      maxRed = Math.max(maxRed, red)
+      maxGreen = Math.max(maxGreen, green)
+      maxBlue = Math.max(maxBlue, blue)
+      if (Math.min(red, green, blue) < 0.98 || Math.max(red, green, blue) - Math.min(red, green, blue) > 0.01) {
+        nonWhiteSampleCount += 1
+      }
+      if (uniqueColors.size < 1024) {
+        uniqueColors.add(`${Math.round(red * 31)}:${Math.round(green * 31)}:${Math.round(blue * 31)}`)
+      }
+    }
+  }
+
+  if (sampleCount === 0) {
+    return createEmptyColorStatistics('linear')
+  }
+
+  return {
+    colorSpace: 'linear',
+    sampleCount,
+    min: { r: minRed, g: minGreen, b: minBlue },
+    max: { r: maxRed, g: maxGreen, b: maxBlue },
+    mean: {
+      r: redTotal / sampleCount,
+      g: greenTotal / sampleCount,
+      b: blueTotal / sampleCount,
+    },
+    nonWhiteSampleCount,
+    uniqueApproximateColorCount: uniqueColors.size,
+  }
 }
 
 function createPointGeometry(surfels: readonly FinalizedRealitySurfel[]): THREE.BufferGeometry {
@@ -712,6 +797,7 @@ export function createRealitySurfaceRenderResources(
     (total, geometry) => total + getGeometryMemoryBytes(geometry),
     0,
   )
+  const renderColorStatistics = calculateRenderColorStatistics(geometries)
   return {
     group,
     geometries,
@@ -740,6 +826,7 @@ export function createRealitySurfaceRenderResources(
       estimatedSmallGapRegions: neighborIndex?.estimatedSmallGapRegions ?? 0,
       estimatedLargeUnsupportedGaps: neighborIndex?.estimatedLargeUnsupportedGaps ?? 0,
       memoryBytes,
+      renderColorStatistics,
     },
   }
 }

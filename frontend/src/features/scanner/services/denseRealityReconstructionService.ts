@@ -4,6 +4,7 @@ import type {
   FinalizedDenseRealityReconstruction,
   FinalizedRealitySurfel,
   RealityCaptureSummary,
+  RealityColorStatistics,
   RealityRgbColor,
   ScannerReferenceSpaceType,
   SpatialBounds,
@@ -50,9 +51,9 @@ function srgbToLinear(value: number): number {
 
 function linearToSrgb(value: number): number {
   const normalized = clamp(value, 0, 1)
-  return (normalized <= 0.0031308
+  return normalized <= 0.0031308
     ? normalized * 12.92
-    : 1.055 * Math.pow(normalized, 1 / 2.4) - 0.055) * 255
+    : 1.055 * Math.pow(normalized, 1 / 2.4) - 0.055
 }
 
 function copyPoint(point: SpatialPoint): Readonly<SpatialPoint> {
@@ -111,6 +112,72 @@ function calculateBounds(surfels: readonly FinalizedRealitySurfel[]): SpatialBou
     min: copyPoint(minimum),
     max: copyPoint(maximum),
   })
+}
+
+function calculateColorStatistics(
+  surfels: readonly FinalizedRealitySurfel[],
+): RealityColorStatistics {
+  let sampleCount = 0
+  let nonWhiteSampleCount = 0
+  let redTotal = 0
+  let greenTotal = 0
+  let blueTotal = 0
+  let minRed = Infinity
+  let minGreen = Infinity
+  let minBlue = Infinity
+  let maxRed = -Infinity
+  let maxGreen = -Infinity
+  let maxBlue = -Infinity
+  const uniqueColors = new Set<string>()
+
+  for (const surfel of surfels) {
+    const color = surfel.colorRgb
+    if (!color) {
+      continue
+    }
+    sampleCount += 1
+    redTotal += color.r
+    greenTotal += color.g
+    blueTotal += color.b
+    minRed = Math.min(minRed, color.r)
+    minGreen = Math.min(minGreen, color.g)
+    minBlue = Math.min(minBlue, color.b)
+    maxRed = Math.max(maxRed, color.r)
+    maxGreen = Math.max(maxGreen, color.g)
+    maxBlue = Math.max(maxBlue, color.b)
+    if (Math.min(color.r, color.g, color.b) < 0.98 || Math.max(color.r, color.g, color.b) - Math.min(color.r, color.g, color.b) > 0.01) {
+      nonWhiteSampleCount += 1
+    }
+    if (uniqueColors.size < 1024) {
+      uniqueColors.add(`${Math.round(color.r * 31)}:${Math.round(color.g * 31)}:${Math.round(color.b * 31)}`)
+    }
+  }
+
+  if (sampleCount === 0) {
+    return {
+      colorSpace: 'srgb',
+      sampleCount: 0,
+      min: { r: 0, g: 0, b: 0 },
+      max: { r: 0, g: 0, b: 0 },
+      mean: { r: 0, g: 0, b: 0 },
+      nonWhiteSampleCount: 0,
+      uniqueApproximateColorCount: 0,
+    }
+  }
+
+  return {
+    colorSpace: 'srgb',
+    sampleCount,
+    min: { r: minRed, g: minGreen, b: minBlue },
+    max: { r: maxRed, g: maxGreen, b: maxBlue },
+    mean: {
+      r: redTotal / sampleCount,
+      g: greenTotal / sampleCount,
+      b: blueTotal / sampleCount,
+    },
+    nonWhiteSampleCount,
+    uniqueApproximateColorCount: uniqueColors.size,
+  }
 }
 
 function percentile(values: readonly number[], fraction: number): number | null {
@@ -435,6 +502,13 @@ export class DenseRealityReconstructionService {
     }
 
     const finalizedSurfels: FinalizedRealitySurfel[] = []
+    const colorSamples = [] as {
+      position: Readonly<SpatialPoint>
+      colorRgb: RealityRgbColor
+      colorWeight: number
+      colorConfidence: number
+      colorObservationCount: number
+    }[]
     let colorObservationTotal = 0
     let colorConfidenceTotal = 0
     for (let index = 0; index < this.activeSampleCount; index += 1) {
@@ -460,7 +534,7 @@ export class DenseRealityReconstructionService {
         : 0
       colorObservationTotal += this.colorObservationCounts[index]
       colorConfidenceTotal += colorConfidence
-      finalizedSurfels.push(Object.freeze({
+      const finalizedSurfel = Object.freeze({
         id: index,
         position: Object.freeze({
           x: this.positions[positionOffset],
@@ -478,7 +552,17 @@ export class DenseRealityReconstructionService {
         geometryConfidence: clamp(this.geometryObservationCounts[index] / 4, 0, 1),
         colorConfidence,
         colorObservationCount: this.colorObservationCounts[index],
-      }))
+      })
+      finalizedSurfels.push(finalizedSurfel)
+      if (colorRgb && colorSamples.length < 8) {
+        colorSamples.push(Object.freeze({
+          position: finalizedSurfel.position,
+          colorRgb,
+          colorWeight: this.colorWeights[index],
+          colorConfidence,
+          colorObservationCount: this.colorObservationCounts[index],
+        }))
+      }
     }
 
     const frozenSurfels = Object.freeze(finalizedSurfels)
@@ -509,6 +593,8 @@ export class DenseRealityReconstructionService {
       bounds: calculateBounds(frozenSurfels),
       captureSummary,
       fusionDiagnostics: Object.freeze({ ...this.diagnostics }),
+      colorStatistics: calculateColorStatistics(frozenSurfels),
+      colorSamples: Object.freeze(colorSamples),
     })
   }
 

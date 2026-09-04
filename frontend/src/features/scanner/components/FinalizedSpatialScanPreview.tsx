@@ -6,6 +6,7 @@ import type {
   FinalizedDenseRealityReconstruction,
   FinalizedRealityReconstruction,
   FinalizedSpatialScan,
+  RealityRgbColor,
 } from '../types'
 import type {
   PlaneCandidate,
@@ -68,12 +69,17 @@ const ROOM_BOUNDARY_COLORS = {
   'wall-floor': 0x8ee2a8,
 } as const
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
+type RealityRenderSource = 'dense' | 'structural'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
 
 function getPreviewTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
+
+function formatRgb(color: RealityRgbColor): string {
+  return `${color.r.toFixed(2)}, ${color.g.toFixed(2)}, ${color.b.toFixed(2)}`
 }
 
 type RoomSurfaceMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
@@ -463,13 +469,26 @@ function FinalizedSpatialScanPreview({
   const [customizationPanelOpen, setCustomizationPanelOpen] = useState(false)
   const [surfaceCustomizations, setSurfaceCustomizations] = useState<SurfaceCustomizationMap>({})
   const [realityRenderMode, setRealityRenderMode] = useState<RealitySurfaceRenderMode>('dense')
+  const [realityRenderSource, setRealityRenderSource] = useState<RealityRenderSource>('dense')
   const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
   const [realityRuntimeStats, setRealityRuntimeStats] = useState<RealityRuntimeStats | null>(null)
 
-  const preferredRealityReconstruction = denseRealityReconstruction?.status === 'available' &&
-      denseRealityReconstruction.surfels.length > 0
+  const denseRealityColorIsRenderable = denseRealityReconstruction?.status === 'available' &&
+    denseRealityReconstruction.colorStatistics.sampleCount > 0 &&
+    denseRealityReconstruction.colorStatistics.min.r >= 0 &&
+    denseRealityReconstruction.colorStatistics.min.g >= 0 &&
+    denseRealityReconstruction.colorStatistics.min.b >= 0 &&
+    denseRealityReconstruction.colorStatistics.max.r <= 1.01 &&
+    denseRealityReconstruction.colorStatistics.max.g <= 1.01 &&
+    denseRealityReconstruction.colorStatistics.max.b <= 1.01
+  const preferredRealityReconstruction = realityRenderSource === 'dense' && denseRealityColorIsRenderable
     ? denseRealityReconstruction
     : realityReconstruction
+  const denseRealityFallbackActive = realityRenderSource === 'dense' &&
+    denseRealityReconstruction?.status === 'available' &&
+    !denseRealityColorIsRenderable &&
+    realityReconstruction !== null &&
+    realityReconstruction !== undefined
 
   const selectSurface = useCallback((surfaceId: string | null): void => {
     setSelectedSurfaceId(surfaceId)
@@ -1033,6 +1052,9 @@ function FinalizedSpatialScanPreview({
               Dense created {denseRealityReconstruction.fusionDiagnostics.createdSampleCount} · fused {denseRealityReconstruction.fusionDiagnostics.fusedSampleCount} · rejected {denseRealityReconstruction.fusionDiagnostics.rejectedSampleCount} · capacity {denseRealityReconstruction.fusionDiagnostics.capacityUtilizationPercentage.toFixed(1)}%
             </span>
           ) : null}
+          {denseRealityFallbackActive ? (
+            <span role="status">Dense Reality rendering unavailable — using Structural Reality.</span>
+          ) : null}
           <span>
             Colored surfels {preferredRealityReconstruction.captureSummary.coloredSurfels} / {preferredRealityReconstruction.captureSummary.totalSurfels}
             {' · '}
@@ -1066,6 +1088,33 @@ function FinalizedSpatialScanPreview({
           </span>
           {import.meta.env.DEV ? (
             <>
+              <div className="scanner-reality-render-modes" role="group" aria-label="Reality render source">
+                <span>Reality source</span>
+                <button
+                  type="button"
+                  className="scanner-reality-render-mode"
+                  aria-pressed={realityRenderSource === 'dense'}
+                  disabled={!denseRealityColorIsRenderable}
+                  onClick={() => {
+                    setRealityRenderStats(null)
+                    setRealityRenderSource('dense')
+                  }}
+                >
+                  Dense Reality
+                </button>
+                <button
+                  type="button"
+                  className="scanner-reality-render-mode"
+                  aria-pressed={realityRenderSource === 'structural'}
+                  disabled={!realityReconstruction}
+                  onClick={() => {
+                    setRealityRenderStats(null)
+                    setRealityRenderSource('structural')
+                  }}
+                >
+                  Structural Reality
+                </button>
+              </div>
               <div className="scanner-reality-render-modes" role="group" aria-label="Reality render comparison modes">
                 <span>Debug render</span>
                 {(['points', 'splats', 'dense'] as const).map((renderMode) => (
@@ -1104,6 +1153,25 @@ function FinalizedSpatialScanPreview({
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
                   Triangle vertices colored {realityRenderStats.coloredTriangleVertexCount} / uncolored {realityRenderStats.uncoloredTriangleVertexCount} / colored splats {realityRenderStats.renderedSplatCount} / fallback splats {realityRenderStats.fallbackSplatCount} / uncolored fallback {realityRenderStats.uncoloredFallbackSplatCount} / splats suppressed by triangles {realityRenderStats.splatsSuppressedByTriangles}
+                </span>
+              ) : null}
+          {denseRealityReconstruction?.status === 'available' ? (
+            <span>
+              Dense RGB ({denseRealityReconstruction.colorStatistics.colorSpace}) min {formatRgb(denseRealityReconstruction.colorStatistics.min)} / max {formatRgb(denseRealityReconstruction.colorStatistics.max)} / mean {formatRgb(denseRealityReconstruction.colorStatistics.mean)} / non-white {denseRealityReconstruction.colorStatistics.nonWhiteSampleCount} / {denseRealityReconstruction.colorStatistics.sampleCount} / unique approx {denseRealityReconstruction.colorStatistics.uniqueApproximateColorCount}
+            </span>
+          ) : null}
+          {denseRealityReconstruction?.status === 'available' ? (
+            <div className="scanner-reality-color-samples" aria-label="Dense Reality color validation samples">
+              {denseRealityReconstruction.colorSamples.map((sample, index) => (
+                <span key={`${sample.position.x}-${sample.position.y}-${sample.position.z}-${index}`}>
+                  Sample {index + 1}: P {sample.position.x.toFixed(2)}, {sample.position.y.toFixed(2)}, {sample.position.z.toFixed(2)} / RGB {formatRgb(sample.colorRgb)} / obs {sample.colorObservationCount} / weight {sample.colorWeight.toFixed(2)} / confidence {sample.colorConfidence.toFixed(2)}
+                </span>
+              ))}
+            </div>
+          ) : null}
+              {realityRenderStats?.mode === realityRenderMode ? (
+                <span>
+                  Render RGB ({realityRenderStats.renderColorStatistics.colorSpace}) min {formatRgb(realityRenderStats.renderColorStatistics.min)} / max {formatRgb(realityRenderStats.renderColorStatistics.max)} / mean {formatRgb(realityRenderStats.renderColorStatistics.mean)} / non-white {realityRenderStats.renderColorStatistics.nonWhiteSampleCount} / {realityRenderStats.renderColorStatistics.sampleCount}
                 </span>
               ) : null}
               {realityRuntimeStats ? (

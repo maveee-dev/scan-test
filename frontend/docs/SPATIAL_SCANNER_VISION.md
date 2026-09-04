@@ -1113,3 +1113,21 @@ bound is a visual-only capacity (about 3.9 MiB for the primary live numeric
 arrays before the compact hash and finalized objects); it does not increase
 the structural 20,000-surfel limit. Unscanned regions remain absent, and
 this is still not a watertight mesh or photogrammetry-quality result.
+
+## M8.4.3.1 dense Reality color propagation
+
+M8.4.3.1 keeps the dense Reality geometry and fusion path unchanged while
+validating its color handoff into the renderer. Dense finalized colors use the
+same normalized sRGB `0..1` representation as M8.3. The renderer converts
+those channels once to the linear `0..1` vertex-color buffer expected by
+Three.js materials and the Reality splat shader; values are never treated as
+`0..255` at that boundary.
+
+Finished-review diagnostics expose bounded dense sRGB min/max/mean values,
+non-white and approximate-unique color counts, sample records, and the
+linear values immediately present in the uploaded render attributes. A
+development-only source switch compares the unchanged structural Reality
+snapshot with the dense snapshot. If dense numeric color validation fails,
+the review safely uses Structural Reality rather than displaying a white
+fallback scene. This milestone changes no camera capture, RGB-D registration,
+color weighting, geometry matching, capacity, or structural output.
