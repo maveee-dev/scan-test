@@ -3,6 +3,7 @@ import type {
   FinalizedRealityGeometrySurfel,
   FinalizedRealityReconstruction,
   FinalizedRealitySurfel,
+  RealityCaptureStatus,
   RealityColorFusionDebug,
   RealityRgbColor,
   ScannerReferenceSpaceType,
@@ -50,8 +51,12 @@ function copyPoint(point: SpatialPoint): Readonly<SpatialPoint> {
 function createInitialDiagnostics(): RealityColorFusionDebug {
   return {
     status: 'idle',
+    captureStatus: 'unavailable',
+    captureEnabled: false,
+    eligibleRgbdTickCount: 0,
     colorSamplesAttempted: 0,
     colorSamplesFused: 0,
+    colorSamplesFusedTotal: 0,
     unmatchedSurfelSamples: 0,
     colorRejects: 0,
     coloredSurfelCount: 0,
@@ -62,6 +67,7 @@ function createInitialDiagnostics(): RealityColorFusionDebug {
     colorFusionMs: 0,
     cameraCapturesUsed: 0,
     lastCameraSequence: null,
+    lastRealityCaptureTimestamp: null,
     lastColorTimestamp: null,
   }
 }
@@ -212,13 +218,30 @@ export class RealitySurfelColorFusionService {
 
   private diagnostics = createInitialDiagnostics()
 
+  public setCaptureState(status: RealityCaptureStatus, enabled: boolean): void {
+    this.cameraAvailable = enabled
+    this.diagnostics = {
+      ...this.diagnostics,
+      captureStatus: status,
+      captureEnabled: enabled,
+      status: enabled ? this.diagnostics.status : 'unavailable',
+    }
+  }
+
   public setCameraAvailability(available: boolean): void {
-    this.cameraAvailable = available
-    if (!available && this.diagnostics.status !== 'idle') {
-      this.diagnostics = {
-        ...this.diagnostics,
-        status: 'unavailable',
-      }
+    this.setCaptureState(available ? 'active' : 'unavailable', available)
+  }
+
+  public recordEligibleRgbdTick(): void {
+    if (!this.cameraAvailable) {
+      return
+    }
+
+    this.diagnostics = {
+      ...this.diagnostics,
+      captureStatus: 'active',
+      captureEnabled: true,
+      eligibleRgbdTickCount: this.diagnostics.eligibleRgbdTickCount + 1,
     }
   }
 
@@ -255,6 +278,12 @@ export class RealitySurfelColorFusionService {
     ) {
       this.lastCameraSequence = registration.cameraCopySequence
       this.cameraCapturesUsed += 1
+    }
+    this.diagnostics = {
+      ...this.diagnostics,
+      captureStatus: 'active',
+      captureEnabled: true,
+      lastRealityCaptureTimestamp: timestamp,
     }
 
     let fusedCount = 0
@@ -367,6 +396,7 @@ export class RealitySurfelColorFusionService {
       status: 'active',
       colorSamplesAttempted: registration.coloredSampleCount,
       colorSamplesFused: fusedCount,
+      colorSamplesFusedTotal: this.totalColorObservations,
       unmatchedSurfelSamples: unmatchedCount,
       colorRejects: rejectCount,
       coloredSurfelCount: this.coloredSurfelCount,

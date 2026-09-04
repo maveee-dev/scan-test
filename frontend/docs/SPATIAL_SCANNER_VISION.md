@@ -970,3 +970,32 @@ This remains a dense surface visualization, not a textured mesh or
 photogrammetry-quality reconstruction. Future work may retain selected RGB
 keyframes and build a post-scan mesh/texture projection pipeline, while the
 structural/design reconstruction remains a separate semantic model.
+
+## M8.4.1 Reality Capture lifecycle
+
+Reality Reconstruction capture is a normal scan pipeline feature when the
+active session has depth and optional raw-camera access. The product capture
+state is independent from the development-only visualizations:
+
+```text
+session + depth + camera-access
+        -> realityCaptureEnabled
+        -> bounded camera copy cadence
+        -> RGB-D registration
+        -> persistent color fusion
+```
+
+`RAW CAMERA COPY DEBUG` only controls the diagnostic preview, and `REAL
+RGB-D POINTS` only controls the diagnostic point mesh. Closing Debug or
+turning either visualization off does not stop camera copies, registration,
+color fusion, or the capture counters. The normal scanner HUD reports whether
+Reality capture is starting, active, or unavailable; the Debug panel reports
+capture status separately from both visualization states.
+
+Reality capture continues on the existing bounded dense-processing cadence,
+with no additional XR loop, resolution increase, or readback path. Eligible
+RGB-D ticks, camera captures, fused observations, colored-surfel coverage, and
+the last capture timestamp remain in application-owned diagnostics and are
+finalized across the entire scan. If raw-camera access fails, only the Reality
+branch becomes unavailable/partial; depth scanning, structural analysis,
+Finish, and the M7 design workflow continue normally.

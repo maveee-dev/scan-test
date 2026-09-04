@@ -11,6 +11,7 @@ import type {
   SpatialPoint,
   SpatialPreviewStatus,
   SpatialBounds,
+  RealityCaptureStatus,
   XRDepthException,
   XRPresentationStatus,
 } from '../types'
@@ -73,6 +74,19 @@ function formatDepthStatus(status: DepthSensingStatus): string {
       return 'Error'
     default:
       return 'Idle'
+  }
+}
+
+function formatRealityCaptureStatus(status: RealityCaptureStatus): string {
+  switch (status) {
+    case 'starting':
+      return 'Starting'
+    case 'active':
+      return 'Active'
+    case 'error':
+      return 'Error'
+    default:
+      return 'Unavailable'
   }
 }
 
@@ -373,6 +387,10 @@ function ScannerDomOverlay({
             <span>Captured / unique</span>
             <strong>{coverage.capturedCells} / {coverage.totalUniqueCells}</strong>
           </div>
+          <div className="xr-scanner-hud-status-item">
+            <span>Reality</span>
+            <strong>{formatRealityCaptureStatus(realityColor.captureStatus)}</strong>
+          </div>
         </div>
 
         <p className="xr-scanner-hud-guidance">{formatCoverageGuidance(coverage.guidance)}</p>
@@ -481,6 +499,18 @@ function ScannerDomOverlay({
             <div>
               <span>Reference space</span>
               <strong>{formatReferenceSpaceStatus(sessionState.debug.referenceSpaceStatus)}</strong>
+            </div>
+            <div>
+              <span>Reality capture</span>
+              <strong>{formatRealityCaptureStatus(realityColor.captureStatus)}</strong>
+            </div>
+            <div>
+              <span>Raw Camera Debug Preview</span>
+              <strong>{isDebugOpen ? 'Visible' : 'Hidden'}</strong>
+            </div>
+            <div>
+              <span>RGB-D Debug Visualization</span>
+              <strong>{isRgbDepthDebugVisible ? 'Visible' : 'Hidden'}</strong>
             </div>
           </div>
 
@@ -730,7 +760,11 @@ function ScannerDomOverlay({
             <div className="xr-dom-overlay-diagnostics">
               <div>
                 <span>Observations fused</span>
-                <strong>{realityColor.colorSamplesFused} / {realityColor.colorSamplesAttempted}</strong>
+                <strong>{realityColor.colorSamplesFusedTotal} total / {realityColor.colorSamplesFused} current</strong>
+              </div>
+              <div>
+                <span>Eligible RGB-D ticks</span>
+                <strong>{realityColor.eligibleRgbdTickCount}</strong>
               </div>
               <div>
                 <span>Colored surfels</span>
@@ -747,6 +781,10 @@ function ScannerDomOverlay({
               <div>
                 <span>Fusion / captures</span>
                 <strong>{formatPerformanceMilliseconds(realityColor.colorFusionMs)} / {realityColor.cameraCapturesUsed}</strong>
+              </div>
+              <div>
+                <span>Last Reality capture</span>
+                <strong>{realityColor.lastRealityCaptureTimestamp === null ? 'N/A' : `${realityColor.lastRealityCaptureTimestamp.toFixed(0)} ms`}</strong>
               </div>
               <div>
                 <span>Color confidence</span>

@@ -607,10 +607,16 @@ export interface RealityRgbColor {
 
 export type RealityReconstructionStatus = 'available' | 'unavailable' | 'empty'
 
+export type RealityCaptureStatus = 'starting' | 'active' | 'unavailable' | 'error'
+
 export interface RealityColorFusionDebug {
   status: 'idle' | 'active' | 'unavailable' | 'empty'
+  captureStatus: RealityCaptureStatus
+  captureEnabled: boolean
+  eligibleRgbdTickCount: number
   colorSamplesAttempted: number
   colorSamplesFused: number
+  colorSamplesFusedTotal: number
   unmatchedSurfelSamples: number
   colorRejects: number
   coloredSurfelCount: number
@@ -621,6 +627,7 @@ export interface RealityColorFusionDebug {
   colorFusionMs: number
   cameraCapturesUsed: number
   lastCameraSequence: number | null
+  lastRealityCaptureTimestamp: number | null
   lastColorTimestamp: number | null
 }
 
