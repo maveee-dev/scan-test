@@ -8,6 +8,7 @@ import { createInitialDepthDebug } from '../services/xrDepthService'
 import { createInitialSpatialPointDebug } from '../services/spatialPointService'
 import { createInitialSpatialCoverageDebug } from '../services/spatialCoverageService'
 import { createInitialLivePerformanceDebug } from '../services/livePerformanceService'
+import { createInitialRawCameraDebug } from '../services/xrRawCameraService'
 import type {
   FinalizedSpatialScan,
   DenseMaskStabilizationOptions,
@@ -32,6 +33,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   spatial: createInitialSpatialPointDebug(),
   coverage: createInitialSpatialCoverageDebug(),
   performance: createInitialLivePerformanceDebug(),
+  rawCamera: createInitialRawCameraDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -61,6 +63,7 @@ export interface ScannerSessionController {
   finishScan: () => void
   setDebugGeometryVisible: (visible: boolean) => void
   setPersistentSurfelDebugVisible: (visible: boolean) => void
+  setRawCameraDebugVisible: (visible: boolean) => void
   setDenseMaskStabilizationOptions: (options: DenseMaskStabilizationOptions) => void
   startNewScan: () => void
   discardScan: () => void
@@ -316,6 +319,10 @@ export function useScannerSession(
     service.setPersistentSurfelDebugVisible(visible)
   }, [service])
 
+  const setRawCameraDebugVisible = useCallback((visible: boolean) => {
+    service.setRawCameraDebugVisible(visible)
+  }, [service])
+
   const setDenseMaskStabilizationOptions = useCallback((options: DenseMaskStabilizationOptions) => {
     service.setDenseMaskStabilizationOptions(options)
   }, [service])
@@ -345,6 +352,7 @@ export function useScannerSession(
     finishScan,
     setDebugGeometryVisible,
     setPersistentSurfelDebugVisible,
+    setRawCameraDebugVisible,
     setDenseMaskStabilizationOptions,
     startNewScan,
     discardScan,

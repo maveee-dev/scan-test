@@ -811,3 +811,38 @@ The scanner should not claim this understanding before it exists. In particular,
 Once a simplified room is available, later product experiences may apply paint, floor or wall tiles, cabinets, shelves, fixtures, and selected furniture. Material quantities and cost estimates will depend on measured room geometry and the hardware-store product catalog.
 
 Those capabilities are intentionally outside the current spatial scanning foundation.
+
+## M8.1 experimental Reality Reconstruction capture probe
+
+The scanner now contains an optional, client-only Reality Reconstruction
+capture branch. It is deliberately separate from the validated structural
+pipeline:
+
+```text
+WebXR immersive-ar
+        |
+        +--> depth + pose -> persistent structural scan -> M7.0–M7.5
+        |
+        +--> optional camera-access -> XRView.camera
+                                -> XRWebGLBinding.getCameraImage()
+                                -> small application-owned RGBA copy
+```
+
+M8.1 is only a capability and copy proof. On an active XR frame, the raw
+camera service samples the browser-owned camera texture into a reusable
+160 × 90 application-owned framebuffer, then optionally performs a bounded
+CPU readback for the development-only `RAW CAMERA COPY DEBUG` preview. The
+browser-owned texture is never retained, uploaded, persisted, or used after
+the frame/session lifecycle. The copy uses a centralized orientation setting
+and a centered aspect-preserving crop; the source camera dimensions and copy
+diagnostics are exposed so physical Android testing can verify orientation,
+frame changes, and real camera content.
+
+Camera access is requested as an optional session feature and is sampled on
+the existing bounded dense-depth cadence, not from a second XR loop. If the
+feature, view camera, binding, texture, or copy path is unavailable, the
+structural scanner continues unchanged and reports the raw-camera reason in
+Debug. No RGB is fused into surfels yet and no Reality View is created by
+this milestone. Future Reality Reconstruction may retain selected local
+camera evidence beside the same world-space structural model, while the
+structural surfaces remain the semantic editing layer.

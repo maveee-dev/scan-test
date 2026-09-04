@@ -476,6 +476,66 @@ export interface LivePerformanceDebug {
   performanceWindows: readonly LivePerformanceWindowDebug[]
 }
 
+export type RawCameraCapabilityState =
+  | 'not-requested'
+  | 'requested'
+  | 'not-granted'
+  | 'available'
+  | 'active'
+  | 'error'
+
+export type RawCameraCapabilityReason =
+  | 'api-missing'
+  | 'feature-not-enabled'
+  | 'binding-unavailable'
+  | 'view-camera-null'
+  | 'camera-texture-null'
+  | 'copy-failed'
+  | 'unknown'
+
+export type RawCameraCopyStatus = 'idle' | 'available' | 'failed' | 'skipped'
+
+export type RawCameraOrientation =
+  | 'upright'
+  | 'vertical-flipped'
+  | 'horizontal-mirrored'
+  | 'rotated-180'
+  | 'unknown'
+
+export interface RawCameraPreview {
+  readonly width: number
+  readonly height: number
+  readonly pixels: Uint8ClampedArray
+}
+
+export interface RawCameraDebug {
+  status: RawCameraCapabilityState
+  reason: RawCameraCapabilityReason | null
+  requested: boolean
+  enabledFeature: boolean | null
+  bindingAvailable: boolean
+  viewCameraAvailable: boolean
+  sourceWidth: number | null
+  sourceHeight: number | null
+  textureAvailable: boolean
+  copyStatus: RawCameraCopyStatus
+  copyWidth: number
+  copyHeight: number
+  successfulCopyCount: number
+  failedCopyCount: number
+  skippedCopyCount: number
+  lastCopyTimestamp: number | null
+  acquisitionMs: number
+  shaderCopyMs: number
+  readPixelsMs: number
+  totalProbeMs: number
+  readbackP95Ms: number
+  frameSignature: number | null
+  changedSincePreviousCopy: boolean | null
+  orientation: RawCameraOrientation
+  preview: RawCameraPreview | null
+}
+
 export interface DenseCoverageMesh {
   revision: number
   vertexData: Float32Array
@@ -533,6 +593,7 @@ export interface ViewerPoseDebug {
   spatial: SpatialPointDebug
   coverage: SpatialCoverageDebug
   performance: LivePerformanceDebug
+  rawCamera: RawCameraDebug
 }
 
 export interface ScannerSessionState {

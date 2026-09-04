@@ -1,4 +1,4 @@
-import { useState, type RefObject } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import type {
   CoverageRenderStatus,
   CoverageGuidance,
@@ -20,6 +20,7 @@ interface ScannerDomOverlayProps {
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onDebugGeometryToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
+  onRawCameraDebugToggle: (visible: boolean) => void
   onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
@@ -162,6 +163,10 @@ function formatPerformancePercentage(value: number): string {
   return Number.isFinite(value) ? `${value.toFixed(1)}%` : 'N/A'
 }
 
+function formatRawCameraState(value: string): string {
+  return value.replaceAll('-', ' ')
+}
+
 function formatMeterRange(value: number | null): string {
   return value !== null && Number.isFinite(value) ? `${value.toFixed(2)} m` : 'N/A'
 }
@@ -211,6 +216,7 @@ function ScannerDomOverlay({
   onDenseMaskStabilizationOptionsChange,
   onDebugGeometryToggle,
   onPersistentSurfelDebugToggle,
+  onRawCameraDebugToggle,
   onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
@@ -218,6 +224,7 @@ function ScannerDomOverlay({
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
   const [isPersistentSurfelDebugVisible, setIsPersistentSurfelDebugVisible] = useState(false)
+  const rawCameraPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const [stabilizationOptions, setStabilizationOptions] = useState<DenseMaskStabilizationOptions>(
     () => ({ ...sessionState.debug.coverage.dense.stabilizationOptions }),
   )
@@ -228,11 +235,32 @@ function ScannerDomOverlay({
   const trackingIsActive = sessionState.debug.trackingStatus === 'active'
   const depthStatus = formatDepthStatus(sessionState.debug.depth.status)
   const coverage = sessionState.debug.coverage
+  const rawCamera = sessionState.debug.rawCamera
+
+  useEffect(() => {
+    const canvas = rawCameraPreviewCanvasRef.current
+    if (!canvas || !rawCamera.preview) {
+      return
+    }
+
+    canvas.width = rawCamera.preview.width
+    canvas.height = rawCamera.preview.height
+    const context = canvas.getContext('2d')
+    if (!context) {
+      return
+    }
+
+    context.imageSmoothingEnabled = false
+    const imageData = context.createImageData(rawCamera.preview.width, rawCamera.preview.height)
+    imageData.data.set(rawCamera.preview.pixels)
+    context.putImageData(imageData, 0, 0)
+  }, [rawCamera.preview])
 
   function handleCancelScan(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    onRawCameraDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
     onCancelScan()
@@ -242,6 +270,7 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    onRawCameraDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
     onFinishScan()
@@ -250,9 +279,11 @@ function ScannerDomOverlay({
   function handleDebugToggle(): void {
     const nextOpen = !isDebugOpen
     setIsDebugOpen(nextOpen)
+    onRawCameraDebugToggle(nextOpen)
     if (!nextOpen) {
       setIsDenseGeometryVisible(false)
       setIsPersistentSurfelDebugVisible(false)
+      onRawCameraDebugToggle(false)
       onDebugGeometryToggle(false)
       onPersistentSurfelDebugToggle(false)
     }
@@ -262,6 +293,7 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    onRawCameraDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
   }
@@ -543,6 +575,72 @@ function ScannerDomOverlay({
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="xr-dom-overlay-depth xr-raw-camera-debug" aria-label="Raw camera copy debug">
+            <div className="xr-dom-overlay-depth-header">
+              <span>RAW CAMERA COPY DEBUG</span>
+              <strong>{formatRawCameraState(rawCamera.status)}</strong>
+            </div>
+            <canvas
+              ref={rawCameraPreviewCanvasRef}
+              className="xr-dom-overlay-raw-camera-preview"
+              aria-label="Application-owned raw camera copy preview"
+            />
+            {!rawCamera.preview ? (
+              <p className="xr-dom-overlay-raw-camera-empty">
+                Waiting for an application-owned camera copy. This preview is diagnostic only.
+              </p>
+            ) : null}
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Requested / enabled</span>
+                <strong>{rawCamera.requested ? 'Yes' : 'No'} / {rawCamera.enabledFeature === null ? 'Unknown' : rawCamera.enabledFeature ? 'Yes' : 'No'}</strong>
+              </div>
+              <div>
+                <span>Binding / view camera</span>
+                <strong>{rawCamera.bindingAvailable ? 'Available' : 'Unavailable'} / {rawCamera.viewCameraAvailable ? 'Available' : 'Unavailable'}</strong>
+              </div>
+              <div>
+                <span>Camera size</span>
+                <strong>{formatDepthResolution(rawCamera.sourceWidth, rawCamera.sourceHeight)}</strong>
+              </div>
+              <div>
+                <span>Copy size / status</span>
+                <strong>{rawCamera.copyWidth} × {rawCamera.copyHeight} / {formatRawCameraState(rawCamera.copyStatus)}</strong>
+              </div>
+              <div>
+                <span>Texture / orientation</span>
+                <strong>{rawCamera.textureAvailable ? 'Available' : 'Unavailable'} / {formatRawCameraState(rawCamera.orientation)}</strong>
+              </div>
+              <div>
+                <span>Copies success / failed</span>
+                <strong>{rawCamera.successfulCopyCount} / {rawCamera.failedCopyCount}</strong>
+              </div>
+              <div>
+                <span>Skipped copies</span>
+                <strong>{rawCamera.skippedCopyCount}</strong>
+              </div>
+              <div>
+                <span>Copy / shader / readback</span>
+                <strong>{formatPerformanceMilliseconds(rawCamera.totalProbeMs)} / {formatPerformanceMilliseconds(rawCamera.shaderCopyMs)} / {formatPerformanceMilliseconds(rawCamera.readPixelsMs)}</strong>
+              </div>
+              <div>
+                <span>Readback p95</span>
+                <strong>{formatPerformanceMilliseconds(rawCamera.readbackP95Ms)}</strong>
+              </div>
+              <div>
+                <span>Frame signature</span>
+                <strong>{rawCamera.frameSignature === null ? 'N/A' : rawCamera.frameSignature} / {rawCamera.changedSincePreviousCopy === null ? 'N/A' : rawCamera.changedSincePreviousCopy ? 'Changed' : 'Same'}</strong>
+              </div>
+              <div>
+                <span>Last copy</span>
+                <strong>{rawCamera.lastCopyTimestamp === null ? 'N/A' : `${rawCamera.lastCopyTimestamp.toFixed(0)} ms`}</strong>
+              </div>
+            </div>
+            {rawCamera.reason ? (
+              <p className="xr-dom-overlay-depth-error">Reason: {formatRawCameraState(rawCamera.reason)}</p>
+            ) : null}
           </div>
 
           <div className="xr-dom-overlay-position" aria-label="Approximate viewer position">

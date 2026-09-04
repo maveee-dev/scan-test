@@ -31,6 +31,7 @@ import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 import {
   LivePerformanceTracker,
 } from './livePerformanceService'
+import { XRRawCameraService } from './xrRawCameraService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -146,6 +147,8 @@ export class XRSessionService {
 
   private readonly performanceTracker = new LivePerformanceTracker()
 
+  private readonly rawCameraService = new XRRawCameraService()
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -170,6 +173,8 @@ export class XRSessionService {
 
   private lastDenseMaskUpdatedAt = Number.NEGATIVE_INFINITY
 
+  private rawCameraCopyPhase = 0
+
   private mappingPhase = 0
 
   private trackingActive = false
@@ -183,6 +188,8 @@ export class XRSessionService {
   private rawCurrentDepthVisible = false
 
   private persistentSurfelDebugVisible = false
+
+  private rawCameraDebugVisible = false
 
   private glContextStatus: XRPresentationStatus = 'unknown'
 
@@ -230,6 +237,10 @@ export class XRSessionService {
     )
   }
 
+  public setRawCameraDebugVisible(visible: boolean): void {
+    this.rawCameraDebugVisible = visible
+  }
+
   public setDenseMaskStabilizationOptions(options: DenseMaskStabilizationOptions): void {
     this.denseSurfaceMaskService.setStabilizationOptions(options)
   }
@@ -253,6 +264,9 @@ export class XRSessionService {
       this.requestedEndReason = null
       return
     }
+
+    this.rawCameraService.dispose()
+    this.rawCameraCopyPhase = 0
 
     try {
       await this.endActiveSession(session)
@@ -287,6 +301,8 @@ export class XRSessionService {
     this.requestedEndReason = 'finished'
     this.isEnding = true
     this.stopFrameProcessing(session)
+    this.rawCameraService.dispose()
+    this.rawCameraCopyPhase = 0
 
     try {
       const finishedAt = Date.now()
@@ -321,6 +337,7 @@ export class XRSessionService {
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
     this.persistentLiveSurfaceService.dispose()
+    this.rawCameraService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -334,7 +351,7 @@ export class XRSessionService {
     try {
       // This call is reached directly from the Start Scan click handler.
       session = await xrSystem.requestSession('immersive-ar', {
-        optionalFeatures: ['local-floor', 'dom-overlay', 'depth-sensing'],
+        optionalFeatures: ['local-floor', 'dom-overlay', 'depth-sensing', 'camera-access'],
         domOverlay: { root: options.overlayRoot },
         depthSensing: {
           usagePreference: ['cpu-optimized'],
@@ -370,6 +387,7 @@ export class XRSessionService {
     try {
       const presentationDiagnostics = await this.presentationService.initialize(session)
       this.applyPresentationDiagnostics(presentationDiagnostics)
+      this.rawCameraService.initialize(session, this.presentationService.getRenderTarget())
       this.spatialCoverageRenderService.initialize(this.presentationService.getRenderTarget())
       this.emitDiagnostics()
 
@@ -548,6 +566,19 @@ export class XRSessionService {
             getPerformanceTimestamp() - denseDepthStartedAt,
           )
 
+          this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
+          if (this.rawCameraCopyPhase === 0) {
+            if (densePointFrame.validPointCount > 0) {
+              this.rawCameraService.copyFrame(
+                frame,
+                primaryView,
+                this.rawCameraDebugVisible,
+              )
+            } else {
+              this.rawCameraService.recordSkipped()
+            }
+          }
+
           const coverageStartedAt = getPerformanceTimestamp()
           this.spatialCoverageService.processDenseFrame(
             densePointFrame,
@@ -709,6 +740,7 @@ export class XRSessionService {
         candidatePatchCount: liveSurfaceDiagnostics.candidateVisualSurfelCount,
         coverageCellCount: coverageDiagnostics.totalUniqueCells,
       }),
+      rawCamera: this.rawCameraService.getDiagnostics(this.rawCameraDebugVisible),
     }
   }
 
@@ -746,6 +778,9 @@ export class XRSessionService {
     this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
+    this.rawCameraDebugVisible = false
+    this.rawCameraCopyPhase = 0
+    this.rawCameraService.dispose()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -822,6 +857,8 @@ export class XRSessionService {
     this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
+    this.rawCameraDebugVisible = false
+    this.rawCameraCopyPhase = 0
     this.scanStartedAt = null
     this.requestedEndReason = null
     this.depthService.dispose()
@@ -831,6 +868,7 @@ export class XRSessionService {
     this.spatialCoverageRenderService.dispose()
     this.denseSurfaceMaskService.dispose()
     this.persistentLiveSurfaceService.dispose()
+    this.rawCameraService.dispose()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

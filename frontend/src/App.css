@@ -1454,6 +1454,31 @@
   background: rgba(255, 255, 255, 0.025);
 }
 
+.xr-raw-camera-debug {
+  border-color: rgba(212, 239, 105, 0.28);
+}
+
+.xr-dom-overlay-raw-camera-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 90px;
+  margin-top: 9px;
+  aspect-ratio: 16 / 9;
+  border: 1px solid rgba(212, 239, 105, 0.35);
+  border-radius: 6px;
+  background: #050806;
+  object-fit: contain;
+}
+
+.xr-dom-overlay-raw-camera-empty {
+  margin: 9px 0 0;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
 .xr-dom-overlay-spatial-meta,
 .xr-dom-overlay-spatial-ranges {
   display: grid;
