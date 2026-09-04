@@ -10,6 +10,11 @@ export interface RealitySurfaceRenderStats {
   readonly renderedSurfelCount: number
   readonly renderedSplatCount: number
   readonly renderedTriangleCount: number
+  readonly coloredTriangleVertexCount: number
+  readonly uncoloredTriangleVertexCount: number
+  readonly fallbackSplatCount: number
+  readonly uncoloredFallbackSplatCount: number
+  readonly splatsSuppressedByTriangles: number
   readonly visualRadiusScale: number
   readonly renderPreparationMs: number
   readonly neighborIndexBuildMs: number
@@ -125,12 +130,15 @@ interface RealityNeighborIndex {
 interface SplatGeometryResult {
   readonly geometry: THREE.BufferGeometry
   readonly renderedSplatCount: number
+  readonly suppressedSplatCount: number
   readonly averageVisualRadiusScale: number
 }
 
 interface TriangleGeometryResult {
   readonly geometry: THREE.BufferGeometry
   readonly triangleCount: number
+  readonly coveredSurfelIndices: Uint8Array
+  readonly coveredSurfelCount: number
 }
 
 function getTimestamp(): number {
@@ -407,6 +415,7 @@ function getAdaptiveVisualRadius(
 function createSplatGeometry(
   index: RealityNeighborIndex,
   radiusScale: number,
+  splatSuppressionMask?: Uint8Array,
 ): SplatGeometryResult {
   const surfels = index.surfels
   const verticesPerSurfel = 6
@@ -427,8 +436,13 @@ function createSplatGeometry(
   let vertexOffset = 0
   let radiusScaleTotal = 0
   let renderedSplatCount = 0
+  let suppressedSplatCount = 0
 
   for (let surfelIndex = 0; surfelIndex < surfels.length; surfelIndex += 1) {
+    if (splatSuppressionMask?.[surfelIndex] === 1) {
+      suppressedSplatCount += 1
+      continue
+    }
     const surfel = surfels[surfelIndex]
     normal.set(surfel.normal.x, surfel.normal.y, surfel.normal.z)
     if (normal.lengthSq() <= POSITION_EPSILON) {
@@ -469,6 +483,7 @@ function createSplatGeometry(
   return {
     geometry,
     renderedSplatCount,
+    suppressedSplatCount,
     averageVisualRadiusScale: renderedSplatCount > 0 ? radiusScaleTotal / renderedSplatCount : 1,
   }
 }
@@ -500,7 +515,9 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
   const edgeA = new THREE.Vector3()
   const edgeB = new THREE.Vector3()
   const cross = new THREE.Vector3()
+  const coveredSurfelIndices = new Uint8Array(surfels.length)
   let triangleCount = 0
+  let coveredSurfelCount = 0
 
   for (let centerIndex = 0; centerIndex < surfels.length; centerIndex += 1) {
     const center = surfels[centerIndex]
@@ -547,6 +564,18 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
         if (cross.lengthSq() <= MIN_TRIANGLE_AREA_SQUARED) {
           continue
         }
+        if (coveredSurfelIndices[centerIndex] === 0) {
+          coveredSurfelIndices[centerIndex] = 1
+          coveredSurfelCount += 1
+        }
+        if (coveredSurfelIndices[firstNeighbor.index] === 0) {
+          coveredSurfelIndices[firstNeighbor.index] = 1
+          coveredSurfelCount += 1
+        }
+        if (coveredSurfelIndices[secondNeighbor.index] === 0) {
+          coveredSurfelIndices[secondNeighbor.index] = 1
+          coveredSurfelCount += 1
+        }
         const ordered = cross.dot(centerNormal) >= 0
           ? [center, first, second]
           : [center, second, first]
@@ -563,7 +592,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
   geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
-  return { geometry, triangleCount }
+  return { geometry, triangleCount, coveredSurfelIndices, coveredSurfelCount }
 }
 
 function createPointMaterial(): THREE.PointsMaterial {
@@ -628,9 +657,14 @@ export function createRealitySurfaceRenderResources(
     : null
   let renderedSplatCount = 0
   let renderedTriangleCount = 0
+  let coloredTriangleVertexCount = 0
+  let triangleCoveredSurfelCount = 0
+  let fallbackSplatCount = 0
+  let splatsSuppressedByTriangles = 0
   let visualRadiusScale = 1
   let splatGeometryMs = 0
   let triangleGenerationMs = 0
+  let splatSuppressionMask: Uint8Array | undefined
 
   if (mode === 'points') {
     const geometry = createPointGeometry(coloredSurfels)
@@ -648,12 +682,16 @@ export function createRealitySurfaceRenderResources(
       geometries.push(triangleResult.geometry)
       materials.push(triangleMaterial)
       renderedTriangleCount = triangleResult.triangleCount
+      coloredTriangleVertexCount = triangleResult.triangleCount * 3
+      triangleCoveredSurfelCount = triangleResult.coveredSurfelCount
+      splatSuppressionMask = triangleResult.coveredSurfelIndices
     }
 
     const splatStartedAt = getTimestamp()
     const splatResult = createSplatGeometry(
       neighborIndex,
       mode === 'dense' ? DENSE_SPLAT_RADIUS_SCALE : BASE_SPLAT_RADIUS_SCALE,
+      splatSuppressionMask,
     )
     splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
     const splatCoreMaterial = createSplatMaterial(1, true)
@@ -665,6 +703,8 @@ export function createRealitySurfaceRenderResources(
     geometries.push(splatResult.geometry)
     materials.push(splatCoreMaterial, splatFeatherMaterial)
     renderedSplatCount = splatResult.renderedSplatCount
+    fallbackSplatCount = mode === 'dense' ? splatResult.renderedSplatCount : 0
+    splatsSuppressedByTriangles = splatResult.suppressedSplatCount
     visualRadiusScale = splatResult.averageVisualRadiusScale
   }
 
@@ -680,9 +720,16 @@ export function createRealitySurfaceRenderResources(
       mode,
       sourceSurfelCount: reconstruction.surfels.length,
       coloredSurfelCount: coloredSurfels.length,
-      renderedSurfelCount: coloredSurfels.length,
+      renderedSurfelCount: mode === 'dense'
+        ? triangleCoveredSurfelCount + renderedSplatCount
+        : coloredSurfels.length,
       renderedSplatCount,
       renderedTriangleCount,
+      coloredTriangleVertexCount,
+      uncoloredTriangleVertexCount: 0,
+      fallbackSplatCount,
+      uncoloredFallbackSplatCount: 0,
+      splatsSuppressedByTriangles,
       visualRadiusScale,
       renderPreparationMs: Math.max(0, getTimestamp() - startedAt),
       neighborIndexBuildMs: neighborIndex?.buildMs ?? 0,

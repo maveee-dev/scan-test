@@ -1072,6 +1072,11 @@ function FinalizedSpatialScanPreview({
                       : `${realityRenderStats.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
                 </span>
               ) : null}
+              {realityRenderStats?.mode === realityRenderMode ? (
+                <span>
+                  Triangle vertices colored {realityRenderStats.coloredTriangleVertexCount} / uncolored {realityRenderStats.uncoloredTriangleVertexCount} / colored splats {realityRenderStats.renderedSplatCount} / fallback splats {realityRenderStats.fallbackSplatCount} / uncolored fallback {realityRenderStats.uncoloredFallbackSplatCount} / splats suppressed by triangles {realityRenderStats.splatsSuppressedByTriangles}
+                </span>
+              ) : null}
               {realityRuntimeStats ? (
                 <span>
                   Runtime {realityRuntimeStats.fps.toFixed(0)} FPS · {realityRuntimeStats.frameTimeMs.toFixed(1)} ms · {realityRuntimeStats.drawCalls} draw calls · {realityRuntimeStats.geometryCount} geometries

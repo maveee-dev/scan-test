@@ -1050,3 +1050,23 @@ and feather layers. Raw Reality Points, Reality Splats, and Dense Reality
 Surface remain available for comparison, while true unscanned regions remain
 empty. No camera capture, RGB-D registration, color fusion, surfel capacity,
 or structural model behavior changes in this correction.
+
+## M8.4.2.2 Dense Reality layer composition
+
+M8.4.2.2 makes Dense Reality Surface triangle-primary. Accepted local
+triangles use the actual fused RGB at each vertex and represent every
+surfel participating in a valid triangle. The corresponding full splat is
+suppressed, leaving core/feather splats only for supported surfels that are
+not covered by the local triangle graph. This prevents the normal view from
+advertising every measured surfel as an overlapping circular stamp while
+preserving Raw Reality Points and Reality Splats as diagnostic comparisons.
+
+The rendering audit also found that Reality has no dark-gray fallback
+population: normal geometry is built only from colored finalized surfels,
+and triangles use unlit vertex colors. The remaining pattern came from the
+triangle-plus-full-splat composition and the splat footprint showing the
+dark review background through its discarded regions. M8.4.2.2 keeps the
+opaque measured-color core, narrow depth-non-writing feather, alpha
+threshold, and bounded compatible-neighbor overlap. It changes no camera,
+RGB-D, fusion, capacity, or structural data and does not fill unsupported
+space.
