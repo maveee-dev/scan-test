@@ -650,6 +650,20 @@ polygon boundary. Construction diagnostics retain support counts, sided areas,
 clip sequence, retained-support fraction, ignored internal lines, and a precise
 skip reason for each selected surface.
 
+M7.5 presents the constructed patches in a dedicated first-person review
+viewer. The viewer consumes only the immutable M7.4 patch vertices and triangle
+indices; it does not regenerate, complete, or mutate room geometry. A
+deterministic camera placement is derived from the observed patch bounds and
+uses an explicit 1.6 metre eye height when floor or local-floor reference
+information supports that choice. Touch drag controls look direction, a small
+on-screen control moves forward/back and laterally, and W/A/S/D plus pointer
+drag support desktop review. Movement is delta-time based, pitch is bounded,
+and generated wall patches provide conservative collision checks only where
+actual wall geometry exists. Missing floor, walls, and other room surfaces
+remain missing; entering the viewer does not imply that the room is closed or
+automatically completed. The viewer uses simple deterministic role materials,
+basic lighting, reusable meshes, and explicit disposal when the mode ends.
+
 The post-scan geometry direction is now:
 
 ```text

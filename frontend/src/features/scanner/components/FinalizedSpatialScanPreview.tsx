@@ -10,6 +10,7 @@ import type {
   RoomStructureInterpretationResult,
   StructuralIntersectionResult,
 } from '../../room-analysis/types'
+import FirstPersonRoomViewer from './FirstPersonRoomViewer'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -54,7 +55,7 @@ const ROOM_SURFACE_COLORS = {
   floor: 0x7ed69b,
 } as const
 
-type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces'
+type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -396,7 +397,7 @@ function FinalizedSpatialScanPreview({
   useEffect(() => {
     const canvas = canvasRef.current
     const hasSpatialData = scan.coverage.length > 0 || scan.fusedSurface.length > 0
-    if (!canvas || !hasSpatialData) {
+    if (!canvas || !hasSpatialData || mode === 'first-person-room') {
       return undefined
     }
 
@@ -607,11 +608,19 @@ function FinalizedSpatialScanPreview({
 
   return (
     <div className="scanner-scan-preview">
-      <canvas
-        ref={canvasRef}
-        className="scanner-scan-preview-canvas"
-        aria-label="Interactive spatial scan preview"
-      />
+      {mode === 'first-person-room' && roomSurfaceConstruction ? (
+        <FirstPersonRoomViewer
+          construction={roomSurfaceConstruction}
+          referenceSpaceType={scan.referenceSpaceType}
+          onExit={() => setMode('room-surfaces')}
+        />
+      ) : (
+        <canvas
+          ref={canvasRef}
+          className="scanner-scan-preview-canvas"
+          aria-label="Interactive spatial scan preview"
+        />
+      )}
       <div className="scanner-scan-preview-toolbar">
         <div className="scanner-scan-preview-modes" role="group" aria-label="Spatial scan preview mode">
           <button
@@ -682,14 +691,26 @@ function FinalizedSpatialScanPreview({
               Room Surfaces
             </button>
           ) : null}
+          {roomSurfaceConstruction ? (
+            <button
+              type="button"
+              className="scanner-preview-mode"
+              aria-pressed={mode === 'first-person-room'}
+              onClick={() => setMode('first-person-room')}
+            >
+              First-Person Room
+            </button>
+          ) : null}
         </div>
-        <button
-          type="button"
-          className="scan-button scan-button-secondary scanner-preview-reset"
-          onClick={() => resetViewRef.current?.()}
-        >
-          Reset View
-        </button>
+        {mode !== 'first-person-room' ? (
+          <button
+            type="button"
+            className="scan-button scan-button-secondary scanner-preview-reset"
+            onClick={() => resetViewRef.current?.()}
+          >
+            Reset View
+          </button>
+        ) : null}
       </div>
       {mode === 'planes' && analysisResult?.planes.length === 0 ? (
         <p className="scanner-scan-preview-note">
