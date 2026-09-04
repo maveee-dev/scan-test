@@ -1015,12 +1015,25 @@ function FinalizedSpatialScanPreview({
             Average spacing {realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters === null
               ? 'N/A'
               : `${realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters.toFixed(3)} m`}
+            {' / '}
+            median {realityReconstruction.captureSummary.medianNearestNeighborSpacingMeters === null
+              ? 'N/A'
+              : `${realityReconstruction.captureSummary.medianNearestNeighborSpacingMeters.toFixed(3)} m`}
+            {' / '}
+            p90 {realityReconstruction.captureSummary.p90NearestNeighborSpacingMeters === null
+              ? 'N/A'
+              : `${realityReconstruction.captureSummary.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
             {' · '}
             estimated gaps {realityReconstruction.captureSummary.approximateUncoveredGapMeters === null
               ? 'N/A'
               : `${realityReconstruction.captureSummary.approximateUncoveredGapMeters.toFixed(3)} m`}
-            {' · '}
-            capacity {realityReconstruction.captureSummary.capacityReached ? 'reached' : 'available'}
+            {' / '}
+            small-gap regions {realityReconstruction.captureSummary.estimatedSmallGapRegionCount}
+            {' / '}
+            large unsupported gaps {realityReconstruction.captureSummary.estimatedLargeUnsupportedGapCount}
+            {' / '}
+            capacity {realityReconstruction.captureSummary.capacityUtilizationPercentage.toFixed(1)}%
+            {realityReconstruction.captureSummary.capacityReached ? ' (reached)' : ''}
           </span>
           {import.meta.env.DEV ? (
             <>
@@ -1032,7 +1045,10 @@ function FinalizedSpatialScanPreview({
                     type="button"
                     className="scanner-reality-render-mode"
                     aria-pressed={realityRenderMode === renderMode}
-                    onClick={() => setRealityRenderMode(renderMode)}
+                    onClick={() => {
+                      setRealityRenderStats(null)
+                      setRealityRenderMode(renderMode)
+                    }}
                   >
                     {renderMode === 'points'
                       ? 'Raw Reality Points'
@@ -1045,6 +1061,15 @@ function FinalizedSpatialScanPreview({
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
                   Rendered {realityRenderStats.renderedSurfelCount} surfels · {realityRenderStats.renderedSplatCount} splats · {realityRenderStats.renderedTriangleCount} triangles · preparation {realityRenderStats.renderPreparationMs.toFixed(1)} ms
+                </span>
+              ) : null}
+              {realityRenderStats?.mode === realityRenderMode ? (
+                <span>
+                  Refinement index {realityRenderStats.neighborIndexBuildMs.toFixed(1)} ms / splats {realityRenderStats.splatGeometryMs.toFixed(1)} ms / triangles {realityRenderStats.triangleGenerationMs.toFixed(1)} ms / memory {(realityRenderStats.memoryBytes / 1024).toFixed(1)} KB / median spacing {realityRenderStats.medianNearestNeighborSpacingMeters === null
+                    ? 'N/A'
+                    : `${realityRenderStats.medianNearestNeighborSpacingMeters.toFixed(3)} m`} / p90 {realityRenderStats.p90NearestNeighborSpacingMeters === null
+                      ? 'N/A'
+                      : `${realityRenderStats.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
                 </span>
               ) : null}
               {realityRuntimeStats ? (

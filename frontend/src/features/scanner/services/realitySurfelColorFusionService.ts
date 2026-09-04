@@ -3,6 +3,7 @@ import type {
   FinalizedRealityGeometrySurfel,
   FinalizedRealityReconstruction,
   FinalizedRealitySurfel,
+  RealityCaptureSummary,
   RealityCaptureStatus,
   RealityColorFusionDebug,
   RealityRgbColor,
@@ -20,6 +21,8 @@ const MIN_OUTLIER_OBSERVATIONS = 3
 const COLOR_OUTLIER_DISTANCE = 0.45
 const MAX_COLOR_FUSION_DISTANCE_METERS = 0.12
 const DENSITY_CELL_SIZE_METERS = 0.16
+const SMALL_GAP_LIMIT_METERS = 0.055
+const LARGE_GAP_LIMIT_METERS = 0.16
 const MAX_SURFELS = LIVE_SURFACE_CONFIG.maxSurfels
 
 function getTimestamp(): number {
@@ -107,14 +110,30 @@ function calculateDensitySummary(
   surfelCapacity: number,
   capacityReached: boolean,
 ): Pick<
-  import('../types').RealityCaptureSummary,
-  'averageNearestNeighborSpacingMeters' | 'approximateUncoveredGapMeters' | 'surfelCapacity' | 'capacityReached'
+  RealityCaptureSummary,
+  | 'averageNearestNeighborSpacingMeters'
+  | 'medianNearestNeighborSpacingMeters'
+  | 'p90NearestNeighborSpacingMeters'
+  | 'approximateUncoveredGapMeters'
+  | 'estimatedSmallGapRegionCount'
+  | 'estimatedLargeUnsupportedGapCount'
+  | 'surfelCapacity'
+  | 'capacityUtilizationPercentage'
+  | 'capacityReached'
 > {
+  const capacityUtilizationPercentage = surfelCapacity > 0
+    ? Math.min(100, (surfels.length / surfelCapacity) * 100)
+    : 0
   if (surfels.length < 2) {
     return {
       averageNearestNeighborSpacingMeters: null,
+      medianNearestNeighborSpacingMeters: null,
+      p90NearestNeighborSpacingMeters: null,
       approximateUncoveredGapMeters: null,
+      estimatedSmallGapRegionCount: 0,
+      estimatedLargeUnsupportedGapCount: 0,
       surfelCapacity,
+      capacityUtilizationPercentage,
       capacityReached,
     }
   }
@@ -132,7 +151,10 @@ function calculateDensitySummary(
 
   let spacingTotal = 0
   let spacingCount = 0
+  const nearestDistances: number[] = []
   let radiusTotal = 0
+  let estimatedSmallGapRegionCount = 0
+  let estimatedLargeUnsupportedGapCount = 0
   for (let index = 0; index < surfels.length; index += 1) {
     const surfel = surfels[index]
     radiusTotal += surfel.radius
@@ -164,21 +186,43 @@ function calculateDensitySummary(
       }
     }
     if (Number.isFinite(nearestDistanceSquared)) {
-      spacingTotal += Math.sqrt(nearestDistanceSquared)
+      const nearestDistance = Math.sqrt(nearestDistanceSquared)
+      spacingTotal += nearestDistance
       spacingCount += 1
+      nearestDistances.push(nearestDistance)
+      const gap = nearestDistance - surfel.radius * 2
+      if (gap > 0 && gap <= SMALL_GAP_LIMIT_METERS) {
+        estimatedSmallGapRegionCount += 1
+      } else if (gap > LARGE_GAP_LIMIT_METERS) {
+        estimatedLargeUnsupportedGapCount += 1
+      }
+    } else {
+      estimatedLargeUnsupportedGapCount += 1
     }
   }
 
   const averageNearestNeighborSpacingMeters = spacingCount > 0
     ? spacingTotal / spacingCount
     : null
+  nearestDistances.sort((left, right) => left - right)
+  const medianNearestNeighborSpacingMeters = nearestDistances.length > 0
+    ? nearestDistances[Math.floor((nearestDistances.length - 1) / 2)] ?? null
+    : null
+  const p90NearestNeighborSpacingMeters = nearestDistances.length > 0
+    ? nearestDistances[Math.min(nearestDistances.length - 1, Math.ceil(nearestDistances.length * 0.9) - 1)] ?? null
+    : null
   const averageRadius = radiusTotal / surfels.length
   return {
     averageNearestNeighborSpacingMeters,
+    medianNearestNeighborSpacingMeters,
+    p90NearestNeighborSpacingMeters,
     approximateUncoveredGapMeters: averageNearestNeighborSpacingMeters === null
       ? null
       : Math.max(0, averageNearestNeighborSpacingMeters - averageRadius * 2),
+    estimatedSmallGapRegionCount,
+    estimatedLargeUnsupportedGapCount,
     surfelCapacity,
+    capacityUtilizationPercentage,
     capacityReached,
   }
 }

@@ -701,8 +701,13 @@ export interface RealityCaptureSummary {
   readonly cameraCapturesUsed: number
   readonly averageColorConfidence: number
   readonly averageNearestNeighborSpacingMeters: number | null
+  readonly medianNearestNeighborSpacingMeters: number | null
+  readonly p90NearestNeighborSpacingMeters: number | null
   readonly approximateUncoveredGapMeters: number | null
+  readonly estimatedSmallGapRegionCount: number
+  readonly estimatedLargeUnsupportedGapCount: number
   readonly surfelCapacity: number
+  readonly capacityUtilizationPercentage: number
   readonly capacityReached: boolean
 }
 

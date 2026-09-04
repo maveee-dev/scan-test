@@ -999,3 +999,34 @@ the last capture timestamp remain in application-owned diagnostics and are
 finalized across the entire scan. If raw-camera access fails, only the Reality
 branch becomes unavailable/partial; depth scanning, structural analysis,
 Finish, and the M7 design workflow continue normally.
+
+## M8.4.2 adaptive Reality surface refinement
+
+M8.4.2 refines the post-scan Reality renderer without changing capture,
+RGB-D registration, color fusion, or structural geometry. The original
+colored Reality points remain available as `Raw Reality Points`; `Reality
+Splats` now use oriented, unlit elliptical footprints with a soft bounded
+edge instead of visibly hard square cards. The footprint is based on the
+fused surfel radius and a bounded compatible-neighbor spacing estimate:
+dense neighborhoods stay compact, while sparse but locally coherent samples
+receive only a modest expansion.
+
+The `Dense Reality Surface` mode adds only local, post-scan triangles. A
+uniform spatial neighbor index bounds the work and supplies spacing
+diagnostics. A candidate link must be spatially close, have compatible
+normals, satisfy both local point-to-plane residual checks, and stay within
+an adaptive edge limit. Tiny-area, long-edge, wall/object, foreground/
+background, and other depth-discontinuous links are rejected. Triangles use
+the actual fused vertex colors and normal depth testing, so this pass reduces
+small sampling gaps without inventing a watertight room or bridging large
+unobserved regions.
+
+Refinement runs after Finish while the live scanner remains unchanged. The
+Reality summary reports colored count, median and p90 compatible-neighbor
+spacing, estimated small-gap and large-unsupported-gap regions, and capacity
+utilization. No additional camera frames, image keyframes, or Reality-only
+capacity are retained in this milestone. These measurements distinguish
+renderer coverage limitations from a future need for higher-density Reality
+geometry. Future work may add denser capture, retained RGB keyframes, or
+post-scan mesh and texture projection; M8.4.2 is not photogrammetry-quality
+reconstruction.
