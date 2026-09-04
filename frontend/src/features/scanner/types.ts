@@ -266,6 +266,9 @@ export interface SpatialCoverageRenderDebug {
   denseRenderUpdateCount: number
   rawCurrentDepthVisible: boolean
   persistentSurfelDebugVisible: boolean
+  rgbDepthDebugVisible: boolean
+  rgbDepthVertexCount: number
+  rgbDepthRenderUpdateCount: number
   gpuBufferUploadDurationMs: number
 }
 
@@ -508,6 +511,32 @@ export interface RawCameraPreview {
   readonly pixels: Uint8ClampedArray
 }
 
+/** Normalized source crop in the WebGL camera-texture coordinate space. */
+export interface RawCameraSourceUvRect {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+export interface RawCameraCopyMapping {
+  readonly sourceCameraWidth: number
+  readonly sourceCameraHeight: number
+  readonly copyWidth: number
+  readonly copyHeight: number
+  readonly sourceUvRect: RawCameraSourceUvRect
+  readonly orientation: RawCameraOrientation
+}
+
+/** The latest application-owned copy, valid only during the active session. */
+export interface RawCameraCopyFrame {
+  readonly sequence: number
+  readonly timestamp: number
+  readonly mapping: RawCameraCopyMapping
+  /** RGBA readback rows are in WebGL bottom-left origin order. */
+  readonly pixels: Uint8Array
+}
+
 export interface RawCameraDebug {
   status: RawCameraCapabilityState
   reason: RawCameraCapabilityReason | null
@@ -533,7 +562,41 @@ export interface RawCameraDebug {
   frameSignature: number | null
   changedSincePreviousCopy: boolean | null
   orientation: RawCameraOrientation
+  mapping: RawCameraCopyMapping | null
   preview: RawCameraPreview | null
+}
+
+export interface RgbDepthValidationSample {
+  readonly world: SpatialPoint
+  readonly cameraU: number
+  readonly cameraV: number
+  readonly copyX: number
+  readonly copyY: number
+  readonly red: number
+  readonly green: number
+  readonly blue: number
+}
+
+export type RgbDepthPairingStatus = 'same-frame' | 'stale' | 'rejected' | 'unavailable'
+
+export interface RgbDepthRegistrationDebug {
+  status: 'idle' | 'active' | 'unavailable'
+  pairingStatus: RgbDepthPairingStatus
+  samplesAttempted: number
+  samplesProjected: number
+  samplesOutsideCamera: number
+  invalidProjections: number
+  samplesSuccessfullyColored: number
+  staleCameraRejects: number
+  cameraBufferMisses: number
+  successPercentage: number
+  registrationMs: number
+  projectionMs: number
+  rgbLookupMs: number
+  cameraCopySequence: number | null
+  cameraCopyTimestamp: number | null
+  depthProcessingTimestamp: number | null
+  validationSamples: readonly RgbDepthValidationSample[]
 }
 
 export interface DenseCoverageMesh {
@@ -594,6 +657,7 @@ export interface ViewerPoseDebug {
   coverage: SpatialCoverageDebug
   performance: LivePerformanceDebug
   rawCamera: RawCameraDebug
+  rgbDepth: RgbDepthRegistrationDebug
 }
 
 export interface ScannerSessionState {

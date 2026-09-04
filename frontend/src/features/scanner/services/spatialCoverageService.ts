@@ -133,6 +133,9 @@ function createInitialRenderDebug(): SpatialCoverageRenderDebug {
     denseRenderUpdateCount: 0,
     rawCurrentDepthVisible: false,
     persistentSurfelDebugVisible: false,
+    rgbDepthDebugVisible: false,
+    rgbDepthVertexCount: 0,
+    rgbDepthRenderUpdateCount: 0,
     gpuBufferUploadDurationMs: 0,
   }
 }

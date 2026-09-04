@@ -110,6 +110,8 @@ export class SpatialCoverageRenderService {
 
   private candidateSurfaceBuffer: WebGLBuffer | null = null
 
+  private rgbDepthBuffer: WebGLBuffer | null = null
+
   private positionAttribute = -1
 
   private colorAttribute = -1
@@ -124,11 +126,15 @@ export class SpatialCoverageRenderService {
 
   private candidateSurfaceVertexCount = 0
 
+  private rgbDepthVertexCount = 0
+
   private denseBufferCapacityBytes = 0
 
   private persistentSurfaceBufferCapacityBytes = 0
 
   private candidateSurfaceBufferCapacityBytes = 0
+
+  private rgbDepthBufferCapacityBytes = 0
 
   private denseAppliedRevision = -1
 
@@ -136,11 +142,15 @@ export class SpatialCoverageRenderService {
 
   private candidateSurfaceAppliedRevision = -1
 
+  private rgbDepthAppliedRevision = -1
+
   private debugGeometryVisible = false
 
   private persistentSurfelDebugVisible = false
 
   private candidateSurfaceVisible = true
+
+  private rgbDepthDebugVisible = false
 
   private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
 
@@ -316,6 +326,55 @@ export class SpatialCoverageRenderService {
     this.diagnostics.candidateVertexCount = 0
   }
 
+  public updateRgbDepthMesh(mesh: DenseCoverageMesh): void {
+    if (
+      this.diagnostics.status !== 'ready' ||
+      !this.gl ||
+      this.rgbDepthAppliedRevision === mesh.revision
+    ) {
+      return
+    }
+
+    try {
+      if (!this.rgbDepthBuffer) {
+        this.rgbDepthBuffer = this.gl.createBuffer()
+      }
+      if (!this.rgbDepthBuffer) {
+        return
+      }
+
+      this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.rgbDepthBuffer)
+      const uploadStartedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
+      if (mesh.vertexData.byteLength > this.rgbDepthBufferCapacityBytes) {
+        const nextCapacityBytes = Math.max(
+          mesh.vertexData.byteLength,
+          Math.ceil(Math.max(1, this.rgbDepthBufferCapacityBytes) * 1.5),
+        )
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, nextCapacityBytes, this.gl.DYNAMIC_DRAW)
+        this.rgbDepthBufferCapacityBytes = nextCapacityBytes
+      }
+      if (mesh.vertexData.byteLength > 0) {
+        this.gl.bufferSubData(this.gl.ARRAY_BUFFER, 0, mesh.vertexData)
+      }
+      this.rgbDepthVertexCount = mesh.vertexCount
+      this.rgbDepthAppliedRevision = mesh.revision
+      this.diagnostics.rgbDepthVertexCount = mesh.vertexCount
+      this.diagnostics.rgbDepthRenderUpdateCount += 1
+      this.diagnostics.gpuBufferUploadDurationMs = Math.max(
+        0,
+        (typeof performance === 'undefined' ? Date.now() : performance.now()) - uploadStartedAt,
+      )
+    } catch {
+      this.diagnostics.status = 'failed'
+    }
+  }
+
+  public clearRgbDepthMesh(): void {
+    this.rgbDepthVertexCount = 0
+    this.rgbDepthAppliedRevision = -1
+    this.diagnostics.rgbDepthVertexCount = 0
+  }
+
   public setDebugGeometryVisible(visible: boolean): void {
     this.debugGeometryVisible = visible
     this.diagnostics.rawCurrentDepthVisible = visible
@@ -331,6 +390,11 @@ export class SpatialCoverageRenderService {
     this.diagnostics.candidateSurfaceVisible = visible
   }
 
+  public setRgbDepthDebugVisible(visible: boolean): void {
+    this.rgbDepthDebugVisible = visible
+    this.diagnostics.rgbDepthDebugVisible = visible
+  }
+
   public render(views: readonly XRView[]): void {
     if (
       this.diagnostics.status !== 'ready' ||
@@ -344,7 +408,8 @@ export class SpatialCoverageRenderService {
       !this.viewUniform ||
       (this.denseVertexCount === 0 &&
         this.persistentSurfaceVertexCount === 0 &&
-        this.candidateSurfaceVertexCount === 0)
+        this.candidateSurfaceVertexCount === 0 &&
+        this.rgbDepthVertexCount === 0)
     ) {
       return
     }
@@ -396,6 +461,15 @@ export class SpatialCoverageRenderService {
           gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
           gl.drawArrays(gl.POINTS, 0, this.denseVertexCount)
         }
+
+        if (this.rgbDepthDebugVisible && this.rgbDepthVertexCount > 0 && this.rgbDepthBuffer) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.rgbDepthBuffer)
+          this.configureVertexAttributes(gl)
+          gl.disable(gl.DEPTH_TEST)
+          gl.disable(gl.CULL_FACE)
+          gl.drawArrays(gl.POINTS, 0, this.rgbDepthVertexCount)
+          gl.enable(gl.DEPTH_TEST)
+        }
       }
     } catch {
       this.diagnostics.status = 'failed'
@@ -417,15 +491,19 @@ export class SpatialCoverageRenderService {
     this.denseVertexCount = 0
     this.persistentSurfaceVertexCount = 0
     this.candidateSurfaceVertexCount = 0
+    this.rgbDepthVertexCount = 0
     this.denseBufferCapacityBytes = 0
     this.persistentSurfaceBufferCapacityBytes = 0
     this.candidateSurfaceBufferCapacityBytes = 0
+    this.rgbDepthBufferCapacityBytes = 0
     this.denseAppliedRevision = -1
     this.persistentSurfaceAppliedRevision = -1
     this.candidateSurfaceAppliedRevision = -1
+    this.rgbDepthAppliedRevision = -1
     this.debugGeometryVisible = false
     this.persistentSurfelDebugVisible = false
     this.candidateSurfaceVisible = true
+    this.rgbDepthDebugVisible = false
     this.diagnostics = this.createInitialDiagnostics()
   }
 
@@ -447,6 +525,9 @@ export class SpatialCoverageRenderService {
       denseRenderUpdateCount: 0,
       rawCurrentDepthVisible: false,
       persistentSurfelDebugVisible: false,
+      rgbDepthDebugVisible: false,
+      rgbDepthVertexCount: 0,
+      rgbDepthRenderUpdateCount: 0,
       gpuBufferUploadDurationMs: 0,
     }
   }
@@ -462,6 +543,9 @@ export class SpatialCoverageRenderService {
       if (this.candidateSurfaceBuffer) {
         this.gl.deleteBuffer(this.candidateSurfaceBuffer)
       }
+      if (this.rgbDepthBuffer) {
+        this.gl.deleteBuffer(this.rgbDepthBuffer)
+      }
       if (this.program) {
         this.gl.deleteProgram(this.program)
       }
@@ -471,6 +555,7 @@ export class SpatialCoverageRenderService {
     this.denseBuffer = null
     this.persistentSurfaceBuffer = null
     this.candidateSurfaceBuffer = null
+    this.rgbDepthBuffer = null
     this.positionAttribute = -1
     this.colorAttribute = -1
     this.projectionUniform = null

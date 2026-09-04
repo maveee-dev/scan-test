@@ -846,3 +846,33 @@ Debug. No RGB is fused into surfels yet and no Reality View is created by
 this milestone. Future Reality Reconstruction may retain selected local
 camera evidence beside the same world-space structural model, while the
 structural surfaces remain the semantic editing layer.
+
+## M8.2 RGB-D registration proof
+
+M8.2 adds a transient `REAL RGB-D POINTS` debug branch to prove spatial color
+registration without changing the scanner's structural data:
+
+```text
+current dense depth/world points
+        + current XRView transform and projection
+        -> camera normalized UV
+        + M8.1 copy crop/orientation mapping
+        -> pixel in the application-owned 160 × 90 RGBA copy
+        -> current world point with sampled camera RGB
+```
+
+World-space depth points are projected through the active view's inverse
+transform and projection matrix. They are not matched by assuming equal RGB
+and depth resolutions. The registration service reuses the raw-camera
+service's authoritative centered crop and orientation mapping, and samples
+the same application-owned readback buffer. A colored point is accepted only
+when its camera copy belongs to the same eligible dense processing tick;
+stale or unavailable copies are rejected and never silently reused.
+
+The debug renderer draws bounded current world points with their sampled
+camera RGB values and reports projection, crop/buffer misses, stale pairing,
+sample success, validation coordinates, and registration timing. This is a
+physical alignment proof, not persistent color fusion: M8.2 does not modify
+`FinalizedSpatialScan`, persistent surfels, structural surfaces, or saved
+camera data. Persistent colored Reality Reconstruction is a future M8.3
+stage.

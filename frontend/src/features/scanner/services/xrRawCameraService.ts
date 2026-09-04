@@ -1,6 +1,8 @@
 import type {
   RawCameraCapabilityReason,
   RawCameraCapabilityState,
+  RawCameraCopyFrame,
+  RawCameraCopyMapping,
   RawCameraCopyStatus,
   RawCameraDebug,
   RawCameraOrientation,
@@ -83,6 +85,7 @@ interface RawCameraDiagnosticsState {
   frameSignature: number | null
   changedSincePreviousCopy: boolean | null
   orientation: RawCameraOrientation
+  mapping: RawCameraCopyMapping | null
   preview: RawCameraPreview | null
 }
 
@@ -168,6 +171,7 @@ function createInitialDiagnostics(): RawCameraDiagnosticsState {
     frameSignature: null,
     changedSincePreviousCopy: null,
     orientation: 'upright',
+    mapping: null,
     preview: null,
   }
 }
@@ -219,6 +223,87 @@ function calculateP95(values: readonly number[]): number {
   return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0
 }
 
+export interface RawCameraPixelSample {
+  x: number
+  y: number
+  red: number
+  green: number
+  blue: number
+}
+
+export interface RawCameraPixelCoordinate {
+  x: number
+  y: number
+}
+
+/**
+ * Maps XR projection UVs (u left-to-right, v top-to-bottom) into the
+ * application copy. The source crop/orientation is owned by this service so
+ * RGB-D registration cannot drift from the shader copy path.
+ */
+export function mapCameraUvToCopyPixelInto(
+  mapping: RawCameraCopyMapping,
+  cameraU: number,
+  cameraV: number,
+  target: RawCameraPixelCoordinate,
+): boolean {
+  if (
+    !Number.isFinite(cameraU) ||
+    !Number.isFinite(cameraV) ||
+    cameraU < 0 ||
+    cameraU > 1 ||
+    cameraV < 0 ||
+    cameraV > 1
+  ) {
+    return false
+  }
+
+  let textureU = cameraU
+  let textureV = 1 - cameraV
+  if (mapping.orientation === 'vertical-flipped') {
+    textureV = 1 - textureV
+  } else if (mapping.orientation === 'horizontal-mirrored') {
+    textureU = 1 - textureU
+  } else if (mapping.orientation === 'rotated-180') {
+    textureU = 1 - textureU
+    textureV = 1 - textureV
+  }
+
+  const crop = mapping.sourceUvRect
+  const cropEndU = crop.x + crop.width
+  const cropEndV = crop.y + crop.height
+  if (
+    textureU < crop.x ||
+    textureU > cropEndU ||
+    textureV < crop.y ||
+    textureV > cropEndV
+  ) {
+    return false
+  }
+
+  const outputU = (textureU - crop.x) / crop.width
+  const outputVFromBottom = (textureV - crop.y) / crop.height
+  const outputVFromTop = 1 - outputVFromBottom
+  target.x = Math.min(
+      mapping.copyWidth - 1,
+      Math.max(0, Math.floor(outputU * mapping.copyWidth)),
+    )
+  target.y = Math.min(
+      mapping.copyHeight - 1,
+      Math.max(0, Math.floor(outputVFromTop * mapping.copyHeight)),
+    )
+  return true
+}
+
+export function mapCameraUvToCopyPixel(
+  mapping: RawCameraCopyMapping,
+  cameraU: number,
+  cameraV: number,
+): { x: number; y: number } | null {
+  const target = { x: 0, y: 0 }
+  return mapCameraUvToCopyPixelInto(mapping, cameraU, cameraV, target) ? target : null
+}
+
 /**
  * Probes Raw Camera Access without retaining the browser-owned camera texture.
  * All camera texture access is performed by copyFrame inside the XR callback.
@@ -251,6 +336,8 @@ export class XRRawCameraService {
   private readonly readbackDurations: number[] = []
 
   private diagnostics: RawCameraDiagnosticsState = createInitialDiagnostics()
+
+  private copySequence = 0
 
   public initialize(session: XRSession, target: XRPresentationRenderTarget | null): void {
     this.dispose()
@@ -300,7 +387,12 @@ export class XRRawCameraService {
   }
 
   /** Must be called only from the active XR requestAnimationFrame callback. */
-  public copyFrame(frame: XRFrame, view: XRView, includePreview: boolean): boolean {
+  public copyFrame(
+    frame: XRFrame,
+    view: XRView,
+    timestamp: number,
+    includePreview: boolean,
+  ): boolean {
     if (
       this.session === null ||
       this.gl === null ||
@@ -411,8 +503,23 @@ export class XRRawCameraService {
       this.diagnostics.reason = null
       this.diagnostics.copyStatus = 'available'
       this.diagnostics.successfulCopyCount += 1
-      this.diagnostics.lastCopyTimestamp = getTimestamp()
+      this.diagnostics.lastCopyTimestamp = timestamp
       this.diagnostics.readbackP95Ms = calculateP95(this.readbackDurations)
+      this.copySequence += 1
+      const [cropX, cropY, cropWidth, cropHeight] = crop
+      this.diagnostics.mapping = {
+        sourceCameraWidth: sourceWidth,
+        sourceCameraHeight: sourceHeight,
+        copyWidth: COPY_WIDTH,
+        copyHeight: COPY_HEIGHT,
+        sourceUvRect: {
+          x: cropX,
+          y: cropY,
+          width: cropWidth,
+          height: cropHeight,
+        },
+        orientation: this.diagnostics.orientation,
+      }
       this.diagnostics.preview = includePreview ? this.createPreview() : null
       return true
     } catch {
@@ -437,6 +544,56 @@ export class XRRawCameraService {
     }
   }
 
+  public getLatestCopyFrame(): RawCameraCopyFrame | null {
+    if (!this.diagnostics.mapping || this.diagnostics.lastCopyTimestamp === null) {
+      return null
+    }
+
+    return {
+      sequence: this.copySequence,
+      timestamp: this.diagnostics.lastCopyTimestamp,
+      mapping: this.diagnostics.mapping,
+      pixels: this.readback,
+    }
+  }
+
+  public isAvailable(): boolean {
+    return this.diagnostics.status === 'available' || this.diagnostics.status === 'active'
+  }
+
+  public sampleCopiedRgb(
+    frame: RawCameraCopyFrame,
+    cameraU: number,
+    cameraV: number,
+  ): RawCameraPixelSample | null {
+    const pixel: RawCameraPixelSample = {
+      x: 0,
+      y: 0,
+      red: 0,
+      green: 0,
+      blue: 0,
+    }
+    return this.sampleCopiedRgbInto(frame, cameraU, cameraV, pixel) ? pixel : null
+  }
+
+  public sampleCopiedRgbInto(
+    frame: RawCameraCopyFrame,
+    cameraU: number,
+    cameraV: number,
+    target: RawCameraPixelSample,
+  ): boolean {
+    if (!mapCameraUvToCopyPixelInto(frame.mapping, cameraU, cameraV, target)) {
+      return false
+    }
+
+    const readbackRow = frame.mapping.copyHeight - 1 - target.y
+    const offset = (readbackRow * frame.mapping.copyWidth + target.x) * 4
+    target.red = frame.pixels[offset] ?? 0
+    target.green = frame.pixels[offset + 1] ?? 0
+    target.blue = frame.pixels[offset + 2] ?? 0
+    return true
+  }
+
   public getDiagnostics(includePreview = false): RawCameraDebug {
     const preview = includePreview ? this.diagnostics.preview : null
     return {
@@ -458,6 +615,7 @@ export class XRRawCameraService {
     this.binding = null
     this.readback.fill(0)
     this.readbackDurations.length = 0
+    this.copySequence = 0
     this.diagnostics = createInitialDiagnostics()
   }
 

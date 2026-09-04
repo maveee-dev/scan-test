@@ -22,6 +22,7 @@ interface ScannerPageProps {
   onDebugGeometryToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
   onRawCameraDebugToggle: (visible: boolean) => void
+  onRgbDepthDebugToggle: (visible: boolean) => void
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onCancelScan: () => void
   onFinishScan: () => void
@@ -119,6 +120,7 @@ function ScannerPage({
   onDebugGeometryToggle,
   onPersistentSurfelDebugToggle,
   onRawCameraDebugToggle,
+  onRgbDepthDebugToggle,
   onDenseMaskStabilizationOptionsChange,
   onDiscardScan,
   onFinishScan,
@@ -191,6 +193,7 @@ function ScannerPage({
           onDebugGeometryToggle={onDebugGeometryToggle}
           onPersistentSurfelDebugToggle={onPersistentSurfelDebugToggle}
           onRawCameraDebugToggle={onRawCameraDebugToggle}
+          onRgbDepthDebugToggle={onRgbDepthDebugToggle}
           onDenseMaskStabilizationOptionsChange={onDenseMaskStabilizationOptionsChange}
           onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}

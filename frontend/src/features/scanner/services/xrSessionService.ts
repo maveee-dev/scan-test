@@ -1,6 +1,7 @@
 import type {
   DomOverlayStatus,
   FinalizedSpatialScan,
+  RawCameraCopyFrame,
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
   SpatialPointDebug,
@@ -32,6 +33,10 @@ import {
   LivePerformanceTracker,
 } from './livePerformanceService'
 import { XRRawCameraService } from './xrRawCameraService'
+import {
+  RgbDepthRegistrationService,
+  createInitialRgbDepthRegistrationDebug,
+} from './rgbDepthRegistrationService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -149,6 +154,10 @@ export class XRSessionService {
 
   private readonly rawCameraService = new XRRawCameraService()
 
+  private readonly rgbDepthRegistrationService = new RgbDepthRegistrationService(
+    this.rawCameraService,
+  )
+
   private referenceSpace: XRReferenceSpace | null = null
 
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
@@ -190,6 +199,8 @@ export class XRSessionService {
   private persistentSurfelDebugVisible = false
 
   private rawCameraDebugVisible = false
+
+  private rgbDepthDebugVisible = false
 
   private glContextStatus: XRPresentationStatus = 'unknown'
 
@@ -241,6 +252,14 @@ export class XRSessionService {
     this.rawCameraDebugVisible = visible
   }
 
+  public setRgbDepthDebugVisible(visible: boolean): void {
+    this.rgbDepthDebugVisible = visible
+    this.spatialCoverageRenderService.setRgbDepthDebugVisible(visible)
+    if (!visible) {
+      this.spatialCoverageRenderService.clearRgbDepthMesh()
+    }
+  }
+
   public setDenseMaskStabilizationOptions(options: DenseMaskStabilizationOptions): void {
     this.denseSurfaceMaskService.setStabilizationOptions(options)
   }
@@ -266,6 +285,7 @@ export class XRSessionService {
     }
 
     this.rawCameraService.dispose()
+    this.rgbDepthRegistrationService.reset()
     this.rawCameraCopyPhase = 0
 
     try {
@@ -567,15 +587,48 @@ export class XRSessionService {
           )
 
           this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
-          if (this.rawCameraCopyPhase === 0) {
+          let currentRawCameraFrame: RawCameraCopyFrame | null = null
+          const cameraProbeVisible = this.rawCameraDebugVisible || this.rgbDepthDebugVisible
+          if (cameraProbeVisible && this.rawCameraCopyPhase === 0) {
             if (densePointFrame.validPointCount > 0) {
-              this.rawCameraService.copyFrame(
+              const copied = this.rawCameraService.copyFrame(
                 frame,
                 primaryView,
+                time,
                 this.rawCameraDebugVisible,
               )
+              if (copied) {
+                currentRawCameraFrame = this.rawCameraService.getLatestCopyFrame()
+              }
             } else {
               this.rawCameraService.recordSkipped()
+            }
+          }
+
+          if (this.rgbDepthDebugVisible) {
+            if (currentRawCameraFrame) {
+              const rgbDepthMesh = this.rgbDepthRegistrationService.process(
+                densePointFrame,
+                primaryView,
+                currentRawCameraFrame,
+                time,
+                true,
+              )
+              this.spatialCoverageRenderService.updateRgbDepthMesh(rgbDepthMesh)
+            } else if (this.rawCameraService.isAvailable()) {
+              this.rgbDepthRegistrationService.recordStaleFrame(
+                densePointFrame.validPointCount,
+                time,
+              )
+            } else {
+              const rgbDepthMesh = this.rgbDepthRegistrationService.process(
+                densePointFrame,
+                primaryView,
+                null,
+                time,
+                false,
+              )
+              this.spatialCoverageRenderService.updateRgbDepthMesh(rgbDepthMesh)
             }
           }
 
@@ -653,6 +706,9 @@ export class XRSessionService {
             getPerformanceTimestamp() - candidateVisualizationStartedAt,
           )
           this.latestSpatialObservations = []
+          if (this.rgbDepthDebugVisible) {
+            this.spatialCoverageRenderService.clearRgbDepthMesh()
+          }
           this.lastDenseMaskUpdatedAt = time
         }
       }
@@ -741,6 +797,9 @@ export class XRSessionService {
         coverageCellCount: coverageDiagnostics.totalUniqueCells,
       }),
       rawCamera: this.rawCameraService.getDiagnostics(this.rawCameraDebugVisible),
+      rgbDepth: this.rgbDepthDebugVisible
+        ? this.rgbDepthRegistrationService.getDiagnostics()
+        : createInitialRgbDepthRegistrationDebug(),
     }
   }
 
@@ -779,8 +838,10 @@ export class XRSessionService {
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
     this.rawCameraDebugVisible = false
+    this.rgbDepthDebugVisible = false
     this.rawCameraCopyPhase = 0
     this.rawCameraService.dispose()
+    this.rgbDepthRegistrationService.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -858,6 +919,7 @@ export class XRSessionService {
     this.rawCurrentDepthVisible = false
     this.persistentSurfelDebugVisible = false
     this.rawCameraDebugVisible = false
+    this.rgbDepthDebugVisible = false
     this.rawCameraCopyPhase = 0
     this.scanStartedAt = null
     this.requestedEndReason = null
@@ -869,6 +931,7 @@ export class XRSessionService {
     this.denseSurfaceMaskService.dispose()
     this.persistentLiveSurfaceService.dispose()
     this.rawCameraService.dispose()
+    this.rgbDepthRegistrationService.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

@@ -20,6 +20,7 @@ function ScannerPageContainer() {
       onDebugGeometryToggle={sessionController.setDebugGeometryVisible}
       onPersistentSurfelDebugToggle={sessionController.setPersistentSurfelDebugVisible}
       onRawCameraDebugToggle={sessionController.setRawCameraDebugVisible}
+      onRgbDepthDebugToggle={sessionController.setRgbDepthDebugVisible}
       onDenseMaskStabilizationOptionsChange={sessionController.setDenseMaskStabilizationOptions}
       onCancelScan={sessionController.cancelScan}
       onFinishScan={sessionController.finishScan}

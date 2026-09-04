@@ -21,6 +21,7 @@ interface ScannerDomOverlayProps {
   onDebugGeometryToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
   onRawCameraDebugToggle: (visible: boolean) => void
+  onRgbDepthDebugToggle: (visible: boolean) => void
   onFinishScan: () => void
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
@@ -217,6 +218,7 @@ function ScannerDomOverlay({
   onDebugGeometryToggle,
   onPersistentSurfelDebugToggle,
   onRawCameraDebugToggle,
+  onRgbDepthDebugToggle,
   onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
@@ -224,6 +226,7 @@ function ScannerDomOverlay({
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
   const [isPersistentSurfelDebugVisible, setIsPersistentSurfelDebugVisible] = useState(false)
+  const [isRgbDepthDebugVisible, setIsRgbDepthDebugVisible] = useState(false)
   const rawCameraPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const [stabilizationOptions, setStabilizationOptions] = useState<DenseMaskStabilizationOptions>(
     () => ({ ...sessionState.debug.coverage.dense.stabilizationOptions }),
@@ -236,6 +239,7 @@ function ScannerDomOverlay({
   const depthStatus = formatDepthStatus(sessionState.debug.depth.status)
   const coverage = sessionState.debug.coverage
   const rawCamera = sessionState.debug.rawCamera
+  const rgbDepth = sessionState.debug.rgbDepth
 
   useEffect(() => {
     const canvas = rawCameraPreviewCanvasRef.current
@@ -260,7 +264,9 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
+    onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
     onCancelScan()
@@ -270,7 +276,9 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
+    onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
     onFinishScan()
@@ -283,7 +291,9 @@ function ScannerDomOverlay({
     if (!nextOpen) {
       setIsDenseGeometryVisible(false)
       setIsPersistentSurfelDebugVisible(false)
+      setIsRgbDepthDebugVisible(false)
       onRawCameraDebugToggle(false)
+      onRgbDepthDebugToggle(false)
       onDebugGeometryToggle(false)
       onPersistentSurfelDebugToggle(false)
     }
@@ -293,7 +303,9 @@ function ScannerDomOverlay({
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
+    setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
+    onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
     onPersistentSurfelDebugToggle(false)
   }
@@ -420,6 +432,18 @@ function ScannerDomOverlay({
             }}
           >
             {isPersistentSurfelDebugVisible ? 'Hide Persistent Surfels' : 'Show Persistent Surfels'}
+          </button>
+          <button
+            type="button"
+            className="xr-scanner-debug-geometry"
+            aria-pressed={isRgbDepthDebugVisible}
+            onClick={() => {
+              const nextVisible = !isRgbDepthDebugVisible
+              setIsRgbDepthDebugVisible(nextVisible)
+              onRgbDepthDebugToggle(nextVisible)
+            }}
+          >
+            {isRgbDepthDebugVisible ? 'Hide REAL RGB-D POINTS' : 'Show REAL RGB-D POINTS'}
           </button>
           <button
             type="button"
@@ -641,6 +665,60 @@ function ScannerDomOverlay({
             {rawCamera.reason ? (
               <p className="xr-dom-overlay-depth-error">Reason: {formatRawCameraState(rawCamera.reason)}</p>
             ) : null}
+          </div>
+
+          <div className="xr-dom-overlay-depth xr-rgb-depth-debug" aria-label="RGB-D registration diagnostics">
+            <div className="xr-dom-overlay-depth-header">
+              <span>REAL RGB-D POINTS</span>
+              <strong>{formatRawCameraState(rgbDepth.status)} / {formatRawCameraState(rgbDepth.pairingStatus)}</strong>
+            </div>
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Attempted / projected</span>
+                <strong>{rgbDepth.samplesAttempted} / {rgbDepth.samplesProjected}</strong>
+              </div>
+              <div>
+                <span>Colored / success</span>
+                <strong>{rgbDepth.samplesSuccessfullyColored} / {rgbDepth.successPercentage.toFixed(1)}%</strong>
+              </div>
+              <div>
+                <span>Outside / invalid</span>
+                <strong>{rgbDepth.samplesOutsideCamera} / {rgbDepth.invalidProjections}</strong>
+              </div>
+              <div>
+                <span>Stale / buffer miss</span>
+                <strong>{rgbDepth.staleCameraRejects} / {rgbDepth.cameraBufferMisses}</strong>
+              </div>
+              <div>
+                <span>Registration</span>
+                <strong>{formatPerformanceMilliseconds(rgbDepth.registrationMs)}</strong>
+              </div>
+              <div>
+                <span>Projection / RGB lookup</span>
+                <strong>{formatPerformanceMilliseconds(rgbDepth.projectionMs)} / {formatPerformanceMilliseconds(rgbDepth.rgbLookupMs)}</strong>
+              </div>
+              <div>
+                <span>Camera copy sequence</span>
+                <strong>{rgbDepth.cameraCopySequence ?? 'N/A'}</strong>
+              </div>
+              <div>
+                <span>Depth timestamp</span>
+                <strong>{rgbDepth.depthProcessingTimestamp === null ? 'N/A' : `${rgbDepth.depthProcessingTimestamp.toFixed(0)} ms`}</strong>
+              </div>
+            </div>
+            <div className="xr-dom-overlay-rgbd-samples">
+              {rgbDepth.validationSamples.map((sample, index) => (
+                <div key={`${sample.copyX}-${sample.copyY}-${index}`}>
+                  <span>Sample {index + 1}</span>
+                  <strong>
+                    W {sample.world.x.toFixed(2)}, {sample.world.y.toFixed(2)}, {sample.world.z.toFixed(2)}
+                    {' / '}UV {sample.cameraU.toFixed(3)}, {sample.cameraV.toFixed(3)}
+                    {' / '}PX {sample.copyX}, {sample.copyY}
+                    {' / '}RGB {sample.red}, {sample.green}, {sample.blue}
+                  </strong>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="xr-dom-overlay-position" aria-label="Approximate viewer position">
