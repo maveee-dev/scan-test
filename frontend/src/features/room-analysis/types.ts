@@ -739,6 +739,69 @@ export interface RoomSurfacePatch {
   readonly triangulationValid: boolean
 }
 
+export type RoomSurfaceConstraintClassification =
+  | 'usable-boundary'
+  | 'internal/non-boundary'
+  | 'ambiguous'
+  | 'rejected'
+
+export interface RoomSurfaceConstraintDiagnostic {
+  readonly id: string
+  readonly sourceIntersectionId: string
+  readonly classification: RoomSurfaceConstraintClassification
+  readonly accepted: boolean
+  readonly status: StructuralBoundaryStatus | null
+  readonly confidence: number
+  readonly positiveSupportCount: number
+  readonly negativeSupportCount: number
+  readonly nearLineSupportCount: number
+  readonly positiveSupportAreaMetersSquared: number
+  readonly negativeSupportAreaMetersSquared: number
+  readonly supportCentroidSignedDistanceMeters: number
+  readonly dominantSide: -1 | 0 | 1
+  readonly retainedSupportFraction: number
+  readonly polygonVertexCountBefore: number
+  readonly polygonVertexCountAfter: number
+  readonly polygonAreaBeforeMetersSquared: number
+  readonly polygonAreaAfterMetersSquared: number
+  readonly reason: string
+}
+
+export interface RoomSurfaceClipDiagnostic {
+  readonly constraintId: string
+  readonly accepted: boolean
+  readonly polygonVertexCountBefore: number
+  readonly polygonVertexCountAfter: number
+  readonly polygonAreaBeforeMetersSquared: number
+  readonly polygonAreaAfterMetersSquared: number
+  readonly retainedSupportFraction: number
+  readonly reason: string
+}
+
+export interface RoomSurfaceSurfaceDiagnostic {
+  readonly sourceSurfaceId: string
+  readonly role: RoomSurfacePatchRole
+  readonly ownedSupportCount: number
+  readonly projectedSupportCount: number
+  readonly finiteProjectedSupportCount: number
+  readonly robustSupportPointCount: number
+  readonly initialSupportHullVertexCount: number
+  readonly initialSupportHullAreaMetersSquared: number
+  readonly structuralConstraintsFound: number
+  readonly structuralConstraints: readonly RoomSurfaceConstraintDiagnostic[]
+  readonly acceptedStructuralBoundaryIds: readonly string[]
+  readonly ignoredStructuralBoundaryIds: readonly string[]
+  readonly clipSequence: readonly RoomSurfaceClipDiagnostic[]
+  readonly finalPolygonVertexCount: number
+  readonly finalPolygonAreaMetersSquared: number
+  readonly finalRetainedSupportFraction: number
+  readonly triangulationAttempted: boolean
+  readonly triangulationValid: boolean
+  readonly completionStatus: RoomSurfacePatchCompletionStatus | null
+  readonly valid: boolean
+  readonly skipReason: string | null
+}
+
 export interface RoomSurfaceConstructionDiagnostics {
   readonly inputSelectedSurfaceCount: number
   readonly constructedPatchCount: number
@@ -748,6 +811,7 @@ export interface RoomSurfaceConstructionDiagnostics {
   readonly skippedSurfaceIds: readonly string[]
   readonly supportPointCounts: Readonly<Record<string, number>>
   readonly structuralBoundaryCounts: Readonly<Record<string, number>>
+  readonly surfaceDiagnostics: readonly RoomSurfaceSurfaceDiagnostic[]
   readonly warnings: readonly string[]
 }
 

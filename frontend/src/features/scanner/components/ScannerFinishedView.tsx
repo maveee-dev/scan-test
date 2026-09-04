@@ -733,6 +733,10 @@ function RoomSurfaceSummary({
           <span>Skipped patches</span>
           <strong>{result.diagnostics.skippedSurfaceIds.length}</strong>
         </div>
+        <div>
+          <span>Valid support baselines</span>
+          <strong>{result.diagnostics.surfaceDiagnostics.filter((diagnostic) => diagnostic.initialSupportHullVertexCount >= 3 && diagnostic.initialSupportHullAreaMetersSquared > 0).length} / {result.diagnostics.surfaceDiagnostics.length}</strong>
+        </div>
       </div>
       <div className="scanner-analysis-timings">
         <span>
@@ -756,6 +760,34 @@ function RoomSurfaceSummary({
       ) : (
         <p className="scanner-analysis-empty">No selected structural surfaces produced a bounded patch.</p>
       )}
+      {result.diagnostics.surfaceDiagnostics.length > 0 ? (
+        <div className="scanner-plane-list" aria-label="Room surface construction diagnostics">
+          {result.diagnostics.surfaceDiagnostics.map((diagnostic) => (
+            <div className="scanner-plane-row scanner-plane-row-secondary" key={`construction-${diagnostic.sourceSurfaceId}`}>
+              <span>
+                <strong>{diagnostic.sourceSurfaceId}</strong>
+                <small>{diagnostic.role} | {diagnostic.valid ? 'valid patch' : 'skipped'} | hull {diagnostic.initialSupportHullVertexCount} vertices / {diagnostic.initialSupportHullAreaMetersSquared.toFixed(2)} m2</small>
+              </span>
+              <span>
+                owned {diagnostic.ownedSupportCount} | projected {diagnostic.projectedSupportCount} ({diagnostic.finiteProjectedSupportCount} finite) | robust {diagnostic.robustSupportPointCount} | constraints {diagnostic.structuralConstraintsFound} | accepted {diagnostic.acceptedStructuralBoundaryIds.length} | ignored {diagnostic.ignoredStructuralBoundaryIds.length} | final {diagnostic.finalPolygonVertexCount} vertices / {diagnostic.finalPolygonAreaMetersSquared.toFixed(2)} m2 | retained {(diagnostic.finalRetainedSupportFraction * 100).toFixed(0)}% | triangles {diagnostic.triangulationAttempted ? (diagnostic.triangulationValid ? 'valid' : 'invalid') : 'not attempted'}
+              </span>
+              {diagnostic.structuralConstraints.length > 0 ? (
+                <small className="scanner-analysis-diagnostic-detail">
+                  {diagnostic.structuralConstraints.map((constraint) => `${constraint.id}: ${constraint.classification}${constraint.accepted ? ' accepted' : ' ignored'} | sides +${constraint.positiveSupportCount}/-${constraint.negativeSupportCount} near ${constraint.nearLineSupportCount} | areas ${constraint.positiveSupportAreaMetersSquared.toFixed(2)}/${constraint.negativeSupportAreaMetersSquared.toFixed(2)} m2 | retained ${(constraint.retainedSupportFraction * 100).toFixed(0)}% | ${constraint.reason}`).join(' | ')}
+                </small>
+              ) : null}
+              {diagnostic.clipSequence.length > 0 ? (
+                <small className="scanner-analysis-diagnostic-detail">
+                  Clip sequence: {diagnostic.clipSequence.map((clip) => `${clip.constraintId} ${clip.accepted ? 'accepted' : 'rejected'} ${clip.polygonVertexCountBefore}->${clip.polygonVertexCountAfter} vertices, ${clip.polygonAreaBeforeMetersSquared.toFixed(2)}->${clip.polygonAreaAfterMetersSquared.toFixed(2)} m2, retained ${(clip.retainedSupportFraction * 100).toFixed(0)}%`).join(' | ')}
+                </small>
+              ) : null}
+              <small className="scanner-analysis-diagnostic-detail">
+                {diagnostic.skipReason ?? `completion ${diagnostic.completionStatus ?? 'n/a'} | plane diagnostics valid ${diagnostic.valid ? 'yes' : 'no'}`}
+              </small>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {result.diagnostics.warnings.length > 0 ? (
         <div className="scanner-analysis-timings">
           <span>{result.diagnostics.warnings.join(' | ')}</span>

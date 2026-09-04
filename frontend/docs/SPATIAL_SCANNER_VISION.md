@@ -636,6 +636,20 @@ arbitrary triangle fan, and all generated vertices are reconstructed on the
 source plane. M7.4 is therefore a clean filled-surface review stage, not the
 final room mesh or room-completion stage.
 
+M7.4.1 makes the robust projected finalized-support hull the baseline for every
+selected surface. Structural intersection lines are classified against that
+support before they can clip it: predominantly one-sided support may define an
+exterior boundary, while support on both sides is retained as an
+internal/ambiguous diagnostic rather than destroying the patch. Accepted clips
+are checked for finite vertices, meaningful area, and retained support; when
+structural constraints disagree, a valid measured support hull is preserved as
+an observed or partial patch. Canonical corners and supported structural edges
+remain higher-quality provenance when they are consistent with the support.
+The M7.2 intersection itself is therefore not automatically an exterior M7.4
+polygon boundary. Construction diagnostics retain support counts, sided areas,
+clip sequence, retained-support fraction, ignored internal lines, and a precise
+skip reason for each selected surface.
+
 The post-scan geometry direction is now:
 
 ```text

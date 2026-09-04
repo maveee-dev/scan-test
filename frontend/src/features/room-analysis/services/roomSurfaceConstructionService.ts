@@ -9,8 +9,13 @@ import type {
   RoomSurfacePatchCompletionStatus,
   RoomSurfacePatchRole,
   RoomSurfacePlaneBasis,
+  RoomSurfaceConstraintClassification,
+  RoomSurfaceConstraintDiagnostic,
+  RoomSurfaceClipDiagnostic,
+  RoomSurfaceSurfaceDiagnostic,
   RoomBoundaryResult,
   StructuralBoundaryEdge,
+  StructuralBoundaryStatus,
   StructuralCorner,
   StructuralSurfaceCandidate,
 } from '../types'
@@ -34,6 +39,14 @@ export interface RoomSurfaceConstructionConfig {
   boundaryMatchToleranceMeters: number
   /** Smallest planar patch area retained as renderable geometry. */
   minimumPatchAreaMetersSquared: number
+  /** Fraction of meaningful support that must survive a structural clip. */
+  minimumRetainedSupportFraction: number
+  /** Dominant-side ratio required before a line is treated as an exterior boundary. */
+  minimumBoundarySideDominance: number
+  /** Minimum opposing-side ratio that marks a line as internal or ambiguous. */
+  maximumExteriorOpposingSideFraction: number
+  /** Numerical tolerance used while clipping a polygon against a local line. */
+  polygonClipEpsilonMeters: number
 }
 
 export const DEFAULT_ROOM_SURFACE_CONSTRUCTION_CONFIG: RoomSurfaceConstructionConfig = {
@@ -44,6 +57,10 @@ export const DEFAULT_ROOM_SURFACE_CONSTRUCTION_CONFIG: RoomSurfaceConstructionCo
   vertexMergeToleranceMeters: 0.01,
   boundaryMatchToleranceMeters: 0.04,
   minimumPatchAreaMetersSquared: 0.01,
+  minimumRetainedSupportFraction: 0.2,
+  minimumBoundarySideDominance: 0.72,
+  maximumExteriorOpposingSideFraction: 0.18,
+  polygonClipEpsilonMeters: 1e-7,
 }
 
 interface LocalPoint extends RoomSurfaceLocalPoint {}
@@ -55,6 +72,10 @@ interface BoundaryConstraint {
   readonly worldStart: SpatialPoint
   readonly worldEnd: SpatialPoint
   readonly sourceIds: readonly string[]
+  readonly sourceIntersectionId: string
+  readonly status: StructuralBoundaryStatus
+  readonly confidence: number
+  readonly canonicalCornerBacked: boolean
 }
 
 interface LocalAnchor {
@@ -72,13 +93,35 @@ interface SurfaceConstructionContext {
   readonly projectedSupport: readonly LocalPoint[]
   readonly constraints: readonly BoundaryConstraint[]
   readonly anchors: readonly LocalAnchor[]
-  readonly fallbackPoints: readonly SpatialPoint[]
 }
 
 interface BasisData {
   readonly basis: RoomSurfacePlaneBasis
   readonly normal: SpatialPoint
   readonly planeConstant: number
+}
+
+interface SupportSidedness {
+  readonly positiveSupportCount: number
+  readonly negativeSupportCount: number
+  readonly nearLineSupportCount: number
+  readonly positiveSupportAreaMetersSquared: number
+  readonly negativeSupportAreaMetersSquared: number
+  readonly supportCentroidSignedDistanceMeters: number
+  readonly dominantSide: -1 | 0 | 1
+}
+
+interface ClassifiedConstraint {
+  readonly constraint: BoundaryConstraint
+  readonly classification: RoomSurfaceConstraintClassification
+  readonly sidedness: SupportSidedness
+  readonly reason: string
+  readonly keepSide: -1 | 0 | 1
+}
+
+interface PatchBuildOutcome {
+  readonly patch: RoomSurfacePatch | null
+  readonly diagnostic: RoomSurfaceSurfaceDiagnostic
 }
 
 const ROLE_ORDER: Record<RoomSurfacePatchRole, number> = {
@@ -188,29 +231,6 @@ function robustSupportPoints(
   const maximumV = quantile(sortedV, 1 - boundedTrim)
   const trimmed = points.filter((point) => point.u >= minimumU && point.u <= maximumU && point.v >= minimumV && point.v <= maximumV)
   return trimmed.length >= 3 ? trimmed : [...points]
-}
-
-function constrainSupportToStructuralBoundaries(
-  points: readonly LocalPoint[],
-  constraints: readonly BoundaryConstraint[],
-  toleranceMeters: number,
-): LocalPoint[] {
-  if (points.length < 3 || constraints.length === 0) {
-    return [...points]
-  }
-  const constrained = points.filter((point) => constraints.every((constraint) => {
-    const lineLength = localDistance(constraint.start, constraint.end)
-    if (lineLength <= Number.EPSILON) {
-      return true
-    }
-    const pointSide = localCross(constraint.start, constraint.end, point)
-    const supportSide = points.reduce((total, supportPoint) => total + localCross(constraint.start, constraint.end, supportPoint), 0) / points.length
-    const side = Math.abs(supportSide) <= toleranceMeters * lineLength
-      ? 0
-      : Math.sign(supportSide)
-    return side === 0 || side * pointSide >= -toleranceMeters * lineLength
-  }))
-  return constrained.length >= 3 ? constrained : [...points]
 }
 
 function convexHull(points: readonly LocalPoint[]): LocalPoint[] {
@@ -401,16 +421,6 @@ function localToWorld(point: LocalPoint, basis: RoomSurfacePlaneBasis): SpatialP
   return add(basis.origin, add(scale(basis.axisU, point.u), scale(basis.axisV, point.v)))
 }
 
-function createFallbackSupportPoints(surface: StructuralSurfaceCandidate): SpatialPoint[] {
-  const { minU, maxU, minV, maxV } = surface.localBounds
-  return [
-    add(surface.centroid, add(scale(surface.tangentU, minU), scale(surface.tangentV, minV))),
-    add(surface.centroid, add(scale(surface.tangentU, maxU), scale(surface.tangentV, minV))),
-    add(surface.centroid, add(scale(surface.tangentU, maxU), scale(surface.tangentV, maxV))),
-    add(surface.centroid, add(scale(surface.tangentU, minU), scale(surface.tangentV, maxV))),
-  ].filter(isFinitePoint)
-}
-
 function edgeInvolvesSurface(edge: StructuralBoundaryEdge, surfaceId: string): boolean {
   return edge.surfaceAId === surfaceId || edge.surfaceBId === surfaceId
 }
@@ -422,6 +432,7 @@ function cornerInvolvesSurface(corner: StructuralCorner, surfaceId: string): boo
 function projectBoundaryConstraint(
   edge: StructuralBoundaryEdge,
   basis: RoomSurfacePlaneBasis,
+  canonicalCornerIntersectionIds: ReadonlySet<string>,
 ): BoundaryConstraint {
   return {
     id: edge.id,
@@ -430,6 +441,10 @@ function projectBoundaryConstraint(
     worldStart: edge.start,
     worldEnd: edge.end,
     sourceIds: [edge.id, edge.sourceIntersectionId],
+    sourceIntersectionId: edge.sourceIntersectionId,
+    status: edge.status,
+    confidence: edge.confidence,
+    canonicalCornerBacked: canonicalCornerIntersectionIds.has(edge.sourceIntersectionId),
   }
 }
 
@@ -441,9 +456,8 @@ function createConstructionContext(
 ): SurfaceConstructionContext | null {
   const supportPoints = supportPointsBySurfaceId.get(surface.planeId) ?? []
   const projectedSupport = supportPoints.filter(isFinitePoint).map((point) => worldToLocal(point, basisData.basis)).filter(isFiniteLocalPoint)
-  const constraints = boundary.edges
+  const selectedEdges = boundary.edges
     .filter((edge) => edge.status !== 'rejected' && edgeInvolvesSurface(edge, surface.planeId))
-    .map((edge) => projectBoundaryConstraint(edge, basisData.basis))
   const anchors = boundary.corners
     .filter((corner) => cornerInvolvesSurface(corner, surface.planeId))
     .map((corner) => ({
@@ -452,6 +466,10 @@ function createConstructionContext(
       source: 'corner' as const,
       sourceIds: [corner.id, ...corner.sourceEdgeIds, ...corner.sourceIntersectionIds],
     }))
+  const canonicalCornerIntersectionIds = new Set(boundary.corners
+    .filter((corner) => cornerInvolvesSurface(corner, surface.planeId))
+    .flatMap((corner) => corner.sourceIntersectionIds))
+  const constraints = selectedEdges.map((edge) => projectBoundaryConstraint(edge, basisData.basis, canonicalCornerIntersectionIds))
   const edgeAnchors = constraints.flatMap((constraint) => [
     { point: constraint.start, world: constraint.worldStart, source: 'edge' as const, sourceIds: constraint.sourceIds },
     { point: constraint.end, world: constraint.worldEnd, source: 'edge' as const, sourceIds: constraint.sourceIds },
@@ -464,8 +482,191 @@ function createConstructionContext(
     projectedSupport,
     constraints,
     anchors: [...anchors, ...edgeAnchors],
-    fallbackPoints: supportPoints.length > 0 ? [] : createFallbackSupportPoints(surface),
   }
+}
+
+function localSignedDistanceToConstraint(point: LocalPoint, constraint: BoundaryConstraint): number {
+  const lineLength = localDistance(constraint.start, constraint.end)
+  if (lineLength <= Number.EPSILON) {
+    return NaN
+  }
+  return localCross(constraint.start, constraint.end, point) / lineLength
+}
+
+function supportAreaOnSide(points: readonly LocalPoint[]): number {
+  const hull = convexHull(points)
+  return hull.length >= 3 ? Math.abs(signedArea(hull)) : 0
+}
+
+function calculateSupportSidedness(
+  points: readonly LocalPoint[],
+  constraint: BoundaryConstraint,
+  nearLineToleranceMeters: number,
+): SupportSidedness {
+  const positivePoints: LocalPoint[] = []
+  const negativePoints: LocalPoint[] = []
+  let positiveSupportCount = 0
+  let negativeSupportCount = 0
+  let nearLineSupportCount = 0
+  let signedDistanceTotal = 0
+  let finiteDistanceCount = 0
+  for (const point of points) {
+    const signedDistance = localSignedDistanceToConstraint(point, constraint)
+    if (!Number.isFinite(signedDistance)) {
+      continue
+    }
+    signedDistanceTotal += signedDistance
+    finiteDistanceCount += 1
+    if (Math.abs(signedDistance) <= nearLineToleranceMeters) {
+      nearLineSupportCount += 1
+    } else if (signedDistance > 0) {
+      positiveSupportCount += 1
+      positivePoints.push(point)
+    } else {
+      negativeSupportCount += 1
+      negativePoints.push(point)
+    }
+  }
+  const dominantSide: -1 | 0 | 1 = positiveSupportCount === negativeSupportCount
+    ? 0
+    : positiveSupportCount > negativeSupportCount ? 1 : -1
+  return {
+    positiveSupportCount,
+    negativeSupportCount,
+    nearLineSupportCount,
+    positiveSupportAreaMetersSquared: supportAreaOnSide(positivePoints),
+    negativeSupportAreaMetersSquared: supportAreaOnSide(negativePoints),
+    supportCentroidSignedDistanceMeters: finiteDistanceCount > 0 ? signedDistanceTotal / finiteDistanceCount : 0,
+    dominantSide,
+  }
+}
+
+function classifyConstraint(
+  constraint: BoundaryConstraint,
+  supportPoints: readonly LocalPoint[],
+  config: RoomSurfaceConstructionConfig,
+): ClassifiedConstraint {
+  const lineLength = localDistance(constraint.start, constraint.end)
+  const sidedness = calculateSupportSidedness(supportPoints, constraint, config.boundaryMatchToleranceMeters)
+  if (!Number.isFinite(lineLength) || lineLength <= Number.EPSILON) {
+    return {
+      constraint,
+      classification: 'rejected',
+      sidedness,
+      keepSide: 0,
+      reason: 'structural boundary line is degenerate',
+    }
+  }
+  const nonNearSupportCount = sidedness.positiveSupportCount + sidedness.negativeSupportCount
+  if (nonNearSupportCount === 0) {
+    return {
+      constraint,
+      classification: 'ambiguous',
+      sidedness,
+      keepSide: 0,
+      reason: 'support is concentrated on the structural line without a measurable side',
+    }
+  }
+  const opposingSideFraction = Math.min(sidedness.positiveSupportCount, sidedness.negativeSupportCount) / nonNearSupportCount
+  if (opposingSideFraction >= config.maximumExteriorOpposingSideFraction) {
+    return {
+      constraint,
+      classification: 'internal/non-boundary',
+      sidedness,
+      keepSide: 0,
+      reason: 'substantial occupied support exists on both sides of the line',
+    }
+  }
+  const dominantSideCount = Math.max(sidedness.positiveSupportCount, sidedness.negativeSupportCount)
+  const dominantSideFraction = dominantSideCount / nonNearSupportCount
+  if (dominantSideFraction < config.minimumBoundarySideDominance || sidedness.dominantSide === 0) {
+    return {
+      constraint,
+      classification: 'ambiguous',
+      sidedness,
+      keepSide: 0,
+      reason: 'support sidedness is not dominant enough to define an exterior boundary',
+    }
+  }
+  return {
+    constraint,
+    classification: 'usable-boundary',
+    sidedness,
+    keepSide: sidedness.dominantSide,
+    reason: constraint.canonicalCornerBacked
+      ? 'support is one-sided and the boundary participates in a canonical corner'
+      : constraint.status === 'partial'
+        ? 'support is one-sided; partial structural boundary retained conservatively'
+        : 'support is predominantly on one side of the structural line',
+  }
+}
+
+function clipPolygonToConstraint(
+  polygon: readonly LocalPoint[],
+  constraint: BoundaryConstraint,
+  keepSide: -1 | 1,
+  epsilonMeters: number,
+): LocalPoint[] {
+  if (polygon.length === 0) {
+    return []
+  }
+  const isInside = (point: LocalPoint): boolean => {
+    const signedDistance = localSignedDistanceToConstraint(point, constraint)
+    return Number.isFinite(signedDistance) && keepSide * signedDistance >= -epsilonMeters
+  }
+  const intersection = (first: LocalPoint, second: LocalPoint): LocalPoint => {
+    const firstValue = keepSide * localSignedDistanceToConstraint(first, constraint)
+    const secondValue = keepSide * localSignedDistanceToConstraint(second, constraint)
+    const denominator = firstValue - secondValue
+    if (!Number.isFinite(denominator) || Math.abs(denominator) <= Number.EPSILON) {
+      return first
+    }
+    return {
+      u: first.u + (second.u - first.u) * (firstValue / denominator),
+      v: first.v + (second.v - first.v) * (firstValue / denominator),
+    }
+  }
+  const clipped: LocalPoint[] = []
+  let previous = polygon[polygon.length - 1]
+  let previousInside = isInside(previous)
+  for (const current of polygon) {
+    const currentInside = isInside(current)
+    if (currentInside !== previousInside) {
+      clipped.push(intersection(previous, current))
+    }
+    if (currentInside) {
+      clipped.push(current)
+    }
+    previous = current
+    previousInside = currentInside
+  }
+  return clipped.filter(isFiniteLocalPoint)
+}
+
+function pointSatisfiesConstraints(
+  point: LocalPoint,
+  constraints: readonly ClassifiedConstraint[],
+  epsilonMeters: number,
+): boolean {
+  return constraints.every((classified) => {
+    if (classified.classification !== 'usable-boundary' || classified.keepSide === 0) {
+      return true
+    }
+    const signedDistance = localSignedDistanceToConstraint(point, classified.constraint)
+    return Number.isFinite(signedDistance) && classified.keepSide * signedDistance >= -epsilonMeters
+  })
+}
+
+function retainedSupportFraction(
+  supportPoints: readonly LocalPoint[],
+  constraints: readonly ClassifiedConstraint[],
+  epsilonMeters: number,
+): number {
+  if (supportPoints.length === 0) {
+    return 0
+  }
+  const retainedCount = supportPoints.filter((point) => pointSatisfiesConstraints(point, constraints, epsilonMeters)).length
+  return retainedCount / supportPoints.length
 }
 
 function pointMatches(first: LocalPoint, second: LocalPoint, tolerance: number): boolean {
@@ -478,8 +679,23 @@ function constraintMatchesPolygonEdge(
   constraint: BoundaryConstraint,
   tolerance: number,
 ): boolean {
-  return (pointMatches(first, constraint.start, tolerance) && pointMatches(second, constraint.end, tolerance)) ||
-    (pointMatches(first, constraint.end, tolerance) && pointMatches(second, constraint.start, tolerance))
+  const lineLength = localDistance(constraint.start, constraint.end)
+  if (lineLength <= Number.EPSILON) {
+    return false
+  }
+  const firstLineDistance = Math.abs(localSignedDistanceToConstraint(first, constraint))
+  const secondLineDistance = Math.abs(localSignedDistanceToConstraint(second, constraint))
+  if (firstLineDistance > tolerance || secondLineDistance > tolerance) {
+    return false
+  }
+  const direction = {
+    u: (constraint.end.u - constraint.start.u) / lineLength,
+    v: (constraint.end.v - constraint.start.v) / lineLength,
+  }
+  const firstParameter = (first.u - constraint.start.u) * direction.u + (first.v - constraint.start.v) * direction.v
+  const secondParameter = (second.u - constraint.start.u) * direction.u + (second.v - constraint.start.v) * direction.v
+  return Math.max(Math.min(firstParameter, secondParameter), 0) <=
+    Math.min(Math.max(firstParameter, secondParameter), lineLength) + tolerance
 }
 
 function nearestAnchor(
@@ -488,13 +704,14 @@ function nearestAnchor(
   tolerance: number,
 ): LocalAnchor | null {
   let closest: LocalAnchor | null = null
-  let closestDistance = tolerance
+  let closestDistance = Infinity
   for (const anchor of anchors) {
     const candidateDistance = localDistance(point, anchor.point)
     const sameDistancePrefersCanonicalCorner = closest !== null &&
       Math.abs(candidateDistance - closestDistance) <= 1e-9 &&
       anchor.source === 'corner' && closest.source !== 'corner'
-    if (candidateDistance < closestDistance || sameDistancePrefersCanonicalCorner || closest === null) {
+    if (candidateDistance <= tolerance &&
+      (candidateDistance < closestDistance || sameDistancePrefersCanonicalCorner)) {
       closest = anchor
       closestDistance = candidateDistance
     }
@@ -506,12 +723,13 @@ function createPolygonBoundaryProvenance(
   points: readonly LocalPoint[],
   worldPoints: readonly SpatialPoint[],
   context: SurfaceConstructionContext,
+  acceptedConstraints: readonly ClassifiedConstraint[],
   config: RoomSurfaceConstructionConfig,
 ): RoomSurfacePatchBoundary[] {
   return points.map((point, index) => {
     const nextIndex = (index + 1) % points.length
     const nextPoint = points[nextIndex]
-    const constraint = context.constraints.find((candidate) => constraintMatchesPolygonEdge(point, nextPoint, candidate, config.boundaryMatchToleranceMeters))
+    const constraint = acceptedConstraints.find((candidate) => constraintMatchesPolygonEdge(point, nextPoint, candidate.constraint, config.boundaryMatchToleranceMeters))?.constraint
     const pointAnchor = nearestAnchor(point, context.anchors, config.boundaryMatchToleranceMeters)
     const nextAnchor = nearestAnchor(nextPoint, context.anchors, config.boundaryMatchToleranceMeters)
     const provenance: RoomSurfaceBoundaryProvenance = constraint
@@ -563,34 +781,294 @@ function calculateConfidence(
   return clamp(surface.confidence * 0.5 + supportQuality * 0.25 + structuralQuality * 0.15 + cornerQuality * 0.1, 0, 1)
 }
 
+function polygonArea(points: readonly LocalPoint[]): number {
+  return Math.abs(signedArea(points))
+}
+
+function polygonIsValid(points: readonly LocalPoint[], minimumArea: number): boolean {
+  return points.length >= 3 &&
+    points.every(isFiniteLocalPoint) &&
+    Number.isFinite(polygonArea(points)) &&
+    polygonArea(points) >= minimumArea
+}
+
+function createConstraintDiagnostic(
+  classified: ClassifiedConstraint,
+  accepted: boolean,
+  retainedSupportFractionValue: number,
+  polygonBefore: readonly LocalPoint[],
+  polygonAfter: readonly LocalPoint[],
+  reason: string,
+): RoomSurfaceConstraintDiagnostic {
+  return {
+    id: classified.constraint.id,
+    sourceIntersectionId: classified.constraint.sourceIntersectionId,
+    classification: classified.classification,
+    accepted,
+    status: classified.constraint.status,
+    confidence: classified.constraint.confidence,
+    positiveSupportCount: classified.sidedness.positiveSupportCount,
+    negativeSupportCount: classified.sidedness.negativeSupportCount,
+    nearLineSupportCount: classified.sidedness.nearLineSupportCount,
+    positiveSupportAreaMetersSquared: classified.sidedness.positiveSupportAreaMetersSquared,
+    negativeSupportAreaMetersSquared: classified.sidedness.negativeSupportAreaMetersSquared,
+    supportCentroidSignedDistanceMeters: classified.sidedness.supportCentroidSignedDistanceMeters,
+    dominantSide: classified.sidedness.dominantSide,
+    retainedSupportFraction: retainedSupportFractionValue,
+    polygonVertexCountBefore: polygonBefore.length,
+    polygonVertexCountAfter: polygonAfter.length,
+    polygonAreaBeforeMetersSquared: polygonArea(polygonBefore),
+    polygonAreaAfterMetersSquared: polygonArea(polygonAfter),
+    reason,
+  }
+}
+
+function createClipDiagnostic(
+  constraintId: string,
+  accepted: boolean,
+  polygonBefore: readonly LocalPoint[],
+  polygonAfter: readonly LocalPoint[],
+  retainedSupportFractionValue: number,
+  reason: string,
+): RoomSurfaceClipDiagnostic {
+  return {
+    constraintId,
+    accepted,
+    polygonVertexCountBefore: polygonBefore.length,
+    polygonVertexCountAfter: polygonAfter.length,
+    polygonAreaBeforeMetersSquared: polygonArea(polygonBefore),
+    polygonAreaAfterMetersSquared: polygonArea(polygonAfter),
+    retainedSupportFraction: retainedSupportFractionValue,
+    reason,
+  }
+}
+
+function createSkippedSurfaceDiagnostic(
+  surface: ConstructibleSurface,
+  context: SurfaceConstructionContext | null,
+  reason: string,
+  initialHull: readonly LocalPoint[] = [],
+  robustSupportPointCount = 0,
+): RoomSurfaceSurfaceDiagnostic {
+  const projectedSupportCount = context?.projectedSupport.length ?? 0
+  const initialArea = polygonArea(initialHull)
+  return {
+    sourceSurfaceId: surface.planeId,
+    role: surface.role,
+    ownedSupportCount: context?.supportPoints.length ?? 0,
+    projectedSupportCount,
+    finiteProjectedSupportCount: projectedSupportCount,
+    robustSupportPointCount,
+    initialSupportHullVertexCount: initialHull.length,
+    initialSupportHullAreaMetersSquared: initialArea,
+    structuralConstraintsFound: context?.constraints.length ?? 0,
+    structuralConstraints: [],
+    acceptedStructuralBoundaryIds: [],
+    ignoredStructuralBoundaryIds: context?.constraints.map((constraint) => constraint.id) ?? [],
+    clipSequence: [],
+    finalPolygonVertexCount: 0,
+    finalPolygonAreaMetersSquared: 0,
+    finalRetainedSupportFraction: 0,
+    triangulationAttempted: false,
+    triangulationValid: false,
+    completionStatus: null,
+    valid: false,
+    skipReason: reason,
+  }
+}
+
 function buildPatch(
   surface: ConstructibleSurface,
-  context: SurfaceConstructionContext,
+  context: SurfaceConstructionContext | null,
   config: RoomSurfaceConstructionConfig,
-): RoomSurfacePatch | null {
-  const constrainedSupport = constrainSupportToStructuralBoundaries(
-    context.projectedSupport,
-    context.constraints,
-    config.boundaryMatchToleranceMeters,
+): PatchBuildOutcome {
+  if (!context) {
+    return {
+      patch: null,
+      diagnostic: createSkippedSurfaceDiagnostic(surface, context, 'plane basis could not be constructed'),
+    }
+  }
+
+  const finiteProjectedSupport = context.projectedSupport.filter(isFiniteLocalPoint)
+  const robustSupport = robustSupportPoints(finiteProjectedSupport, config.supportTrimFraction)
+  const initialHull = convexHull(robustSupport)
+  const initialHullArea = polygonArea(initialHull)
+  if (!polygonIsValid(initialHull, config.minimumPatchAreaMetersSquared)) {
+    const preliminaryConstraints = context.constraints
+      .map((constraint) => classifyConstraint(constraint, robustSupport, config))
+      .sort((first, second) => second.constraint.confidence - first.constraint.confidence || first.constraint.id.localeCompare(second.constraint.id))
+    const invalidBaselineConstraintDiagnostics = preliminaryConstraints.map((classified) => createConstraintDiagnostic(
+      classified,
+      false,
+      0,
+      initialHull,
+      initialHull,
+      'support hull is invalid; structural constraint was not applied',
+    ))
+    return {
+      patch: null,
+      diagnostic: {
+        ...createSkippedSurfaceDiagnostic(
+          surface,
+          context,
+          robustSupport.length < 3
+            ? 'support hull has fewer than three finite vertices'
+            : 'support hull has no meaningful finite area',
+          initialHull,
+          robustSupport.length,
+        ),
+        structuralConstraints: invalidBaselineConstraintDiagnostics,
+        ignoredStructuralBoundaryIds: preliminaryConstraints.map((classified) => classified.constraint.id),
+        initialSupportHullAreaMetersSquared: initialHullArea,
+      },
+    }
+  }
+
+  const classifiedConstraints = context.constraints
+    .map((constraint) => classifyConstraint(constraint, robustSupport, config))
+    .sort((first, second) => second.constraint.confidence - first.constraint.confidence || first.constraint.id.localeCompare(second.constraint.id))
+  const acceptedConstraints: ClassifiedConstraint[] = []
+  const constraintDiagnostics: RoomSurfaceConstraintDiagnostic[] = []
+  const clipSequence: RoomSurfaceClipDiagnostic[] = []
+  let polygon = initialHull
+
+  for (const classified of classifiedConstraints) {
+    const before = polygon
+    if (classified.classification !== 'usable-boundary' || classified.keepSide === 0) {
+      const retained = retainedSupportFraction(robustSupport, acceptedConstraints, config.polygonClipEpsilonMeters)
+      constraintDiagnostics.push(createConstraintDiagnostic(classified, false, retained, before, before, classified.reason))
+      continue
+    }
+
+    const clipped = removeDuplicateAndCollinearVertices(
+      clipPolygonToConstraint(before, classified.constraint, classified.keepSide, config.polygonClipEpsilonMeters),
+      config.vertexMergeToleranceMeters,
+    )
+    const candidateConstraints = [...acceptedConstraints, classified]
+    const retained = retainedSupportFraction(robustSupport, candidateConstraints, config.polygonClipEpsilonMeters)
+    const valid = polygonIsValid(clipped, config.minimumPatchAreaMetersSquared) &&
+      retained >= config.minimumRetainedSupportFraction
+    const reason = valid
+      ? 'support-sided structural clip retained a meaningful measured patch'
+      : !polygonIsValid(clipped, config.minimumPatchAreaMetersSquared)
+        ? 'clip would remove the valid support-hull polygon'
+        : `clip would retain only ${(retained * 100).toFixed(1)}% of robust support`
+    clipSequence.push(createClipDiagnostic(classified.constraint.id, valid, before, valid ? clipped : before, retained, reason))
+    constraintDiagnostics.push(createConstraintDiagnostic(classified, valid, retained, before, valid ? clipped : before, reason))
+    if (valid) {
+      polygon = clipped
+      acceptedConstraints.push(classified)
+    }
+  }
+
+  const anchoredPolygon = removeDuplicateAndCollinearVertices(
+    snapStructuralAnchors(polygon, context.anchors, config.boundaryMatchToleranceMeters),
+    config.vertexMergeToleranceMeters,
   )
-  const supportPoints = robustSupportPoints(constrainedSupport, config.supportTrimFraction)
-  const fallbackPoints = context.fallbackPoints.map((point) => worldToLocal(point, context.basis))
-  const candidatePoints = [...supportPoints, ...fallbackPoints, ...context.anchors.map((anchor) => anchor.point)]
-  const hull = convexHull(candidatePoints)
-  const anchoredHull = snapStructuralAnchors(hull, context.anchors, config.boundaryMatchToleranceMeters)
-  const localVertices = removeDuplicateAndCollinearVertices(anchoredHull, config.vertexMergeToleranceMeters)
-  if (localVertices.length < 3 || Math.abs(signedArea(localVertices)) < config.minimumPatchAreaMetersSquared) {
-    return null
+  const finalPolygonArea = polygonArea(anchoredPolygon)
+  const polygonValid = polygonIsValid(anchoredPolygon, config.minimumPatchAreaMetersSquared)
+  const acceptedStructuralBoundaryIds = acceptedConstraints.map((classified) => classified.constraint.id).sort((first, second) => first.localeCompare(second))
+  const ignoredStructuralBoundaryIds = classifiedConstraints
+    .filter((classified) => !acceptedStructuralBoundaryIds.includes(classified.constraint.id))
+    .map((classified) => classified.constraint.id)
+    .sort((first, second) => first.localeCompare(second))
+  const finalRetainedSupportFraction = retainedSupportFraction(
+    robustSupport,
+    acceptedConstraints,
+    config.polygonClipEpsilonMeters,
+  )
+
+  if (!polygonValid) {
+    return {
+      patch: null,
+      diagnostic: {
+        sourceSurfaceId: surface.planeId,
+        role: surface.role,
+        ownedSupportCount: context.supportPoints.length,
+        projectedSupportCount: context.projectedSupport.length,
+        finiteProjectedSupportCount: finiteProjectedSupport.length,
+        robustSupportPointCount: robustSupport.length,
+        initialSupportHullVertexCount: initialHull.length,
+        initialSupportHullAreaMetersSquared: initialHullArea,
+        structuralConstraintsFound: context.constraints.length,
+        structuralConstraints: constraintDiagnostics,
+        acceptedStructuralBoundaryIds,
+        ignoredStructuralBoundaryIds,
+        clipSequence,
+        finalPolygonVertexCount: anchoredPolygon.length,
+        finalPolygonAreaMetersSquared: finalPolygonArea,
+        finalRetainedSupportFraction,
+        triangulationAttempted: false,
+        triangulationValid: false,
+        completionStatus: null,
+        valid: false,
+        skipReason: 'polygon became invalid after structural clipping or anchor cleanup',
+      },
+    }
   }
-  const triangleIndices = triangulatePolygon(localVertices)
-  if (triangleIndices.length < 3) {
-    return null
+
+  const triangleIndices = triangulatePolygon(anchoredPolygon)
+  const triangulationValid = triangleIndices.length >= 3 && triangleIndices.length % 3 === 0
+  if (!triangulationValid) {
+    return {
+      patch: null,
+      diagnostic: {
+        sourceSurfaceId: surface.planeId,
+        role: surface.role,
+        ownedSupportCount: context.supportPoints.length,
+        projectedSupportCount: context.projectedSupport.length,
+        finiteProjectedSupportCount: finiteProjectedSupport.length,
+        robustSupportPointCount: robustSupport.length,
+        initialSupportHullVertexCount: initialHull.length,
+        initialSupportHullAreaMetersSquared: initialHullArea,
+        structuralConstraintsFound: context.constraints.length,
+        structuralConstraints: constraintDiagnostics,
+        acceptedStructuralBoundaryIds,
+        ignoredStructuralBoundaryIds,
+        clipSequence,
+        finalPolygonVertexCount: anchoredPolygon.length,
+        finalPolygonAreaMetersSquared: finalPolygonArea,
+        finalRetainedSupportFraction,
+        triangulationAttempted: true,
+        triangulationValid: false,
+        completionStatus: null,
+        valid: false,
+        skipReason: 'bounded polygon triangulation returned no valid triangles',
+      },
+    }
   }
+
+  const localVertices = anchoredPolygon
   const worldVertices = localVertices.map((point) => nearestAnchor(point, context.anchors, config.boundaryMatchToleranceMeters)?.world ?? localToWorld(point, context.basis))
   if (worldVertices.some((point) => !isFinitePoint(point))) {
-    return null
+    return {
+      patch: null,
+      diagnostic: {
+        sourceSurfaceId: surface.planeId,
+        role: surface.role,
+        ownedSupportCount: context.supportPoints.length,
+        projectedSupportCount: context.projectedSupport.length,
+        finiteProjectedSupportCount: finiteProjectedSupport.length,
+        robustSupportPointCount: robustSupport.length,
+        initialSupportHullVertexCount: initialHull.length,
+        initialSupportHullAreaMetersSquared: initialHullArea,
+        structuralConstraintsFound: context.constraints.length,
+        structuralConstraints: constraintDiagnostics,
+        acceptedStructuralBoundaryIds,
+        ignoredStructuralBoundaryIds,
+        clipSequence,
+        finalPolygonVertexCount: localVertices.length,
+        finalPolygonAreaMetersSquared: finalPolygonArea,
+        finalRetainedSupportFraction,
+        triangulationAttempted: true,
+        triangulationValid: false,
+        completionStatus: null,
+        valid: false,
+        skipReason: 'polygon reconstruction produced non-finite world vertices',
+      },
+    }
   }
-  const boundaryProvenance = createPolygonBoundaryProvenance(localVertices, worldVertices, context, config)
+  const boundaryProvenance = createPolygonBoundaryProvenance(localVertices, worldVertices, context, acceptedConstraints, config)
   const canonicalCornerCount = new Set(
     localVertices.flatMap((point) => context.anchors
       .filter((anchor) => anchor.source === 'corner' && pointMatches(point, anchor.point, config.boundaryMatchToleranceMeters))
@@ -599,7 +1077,6 @@ function buildPatch(
   ).size
   const structuralEdgeCount = boundaryProvenance.filter((boundary) => boundary.provenance === 'structural-intersection').length
   const supportDerivedEdgeCount = boundaryProvenance.filter((boundary) => boundary.provenance === 'observed-support-extent' || boundary.provenance === 'partial-completion').length
-  const areaMetersSquared = Math.abs(signedArea(localVertices))
   const maximumPlaneResidualMeters = worldVertices.reduce((maximum, point) => Math.max(
     maximum,
     Math.abs(dot(context.normalizedNormal, point) - context.normalizedPlaneConstant),
@@ -609,7 +1086,7 @@ function buildPatch(
     return Math.max(maximum, magnitude(subtract(roundTrip, point)))
   }, 0)
   const completionStatus = classifyCompletion(boundaryProvenance, context.supportPoints.length)
-  return Object.freeze({
+  const patch = Object.freeze({
     id: `room-surface-${surface.role}-${surface.planeId}`,
     sourceSurfaceId: surface.planeId,
     role: surface.role,
@@ -619,7 +1096,7 @@ function buildPatch(
     boundaryProvenance,
     confidence: calculateConfidence(surface, context.supportPoints.length, boundaryProvenance, canonicalCornerCount),
     completionStatus,
-    areaMetersSquared,
+    areaMetersSquared: finalPolygonArea,
     supportPointCount: context.supportPoints.length,
     normal: context.normalizedNormal,
     planeConstant: context.normalizedPlaneConstant,
@@ -629,8 +1106,34 @@ function buildPatch(
     canonicalCornerCount,
     maximumPlaneResidualMeters,
     maximumBasisRoundTripResidualMeters,
-    triangulationValid: triangleIndices.length >= 3 && triangleIndices.length % 3 === 0,
+    triangulationValid,
   })
+  return {
+    patch,
+    diagnostic: {
+      sourceSurfaceId: surface.planeId,
+      role: surface.role,
+      ownedSupportCount: context.supportPoints.length,
+      projectedSupportCount: context.projectedSupport.length,
+      finiteProjectedSupportCount: finiteProjectedSupport.length,
+      robustSupportPointCount: robustSupport.length,
+      initialSupportHullVertexCount: initialHull.length,
+      initialSupportHullAreaMetersSquared: initialHullArea,
+      structuralConstraintsFound: context.constraints.length,
+      structuralConstraints: constraintDiagnostics,
+      acceptedStructuralBoundaryIds,
+      ignoredStructuralBoundaryIds,
+      clipSequence,
+      finalPolygonVertexCount: localVertices.length,
+      finalPolygonAreaMetersSquared: finalPolygonArea,
+      finalRetainedSupportFraction,
+      triangulationAttempted: true,
+      triangulationValid,
+      completionStatus,
+      valid: true,
+      skipReason: null,
+    },
+  }
 }
 
 type ConstructibleSurface = StructuralSurfaceCandidate & { readonly role: RoomSurfacePatchRole }
@@ -692,17 +1195,20 @@ export class RoomSurfaceConstructionService {
     const supportProjectionMs = now() - supportProjectionStartedAt
 
     const polygonStartedAt = now()
-    const patchesInSurfaceOrder = contexts.map(({ surface, context }) => context ? buildPatch(surface, context, this.config) : null)
+    const buildOutcomes = contexts.map(({ surface, context }) => buildPatch(surface, context, this.config))
     const polygonConstructionMs = now() - polygonStartedAt
 
     const triangulationStartedAt = now()
-    const patches = patchesInSurfaceOrder.flatMap((patch) => patch ? [patch] : [])
+    const patches = buildOutcomes.flatMap((outcome) => outcome.patch ? [outcome.patch] : [])
     const triangulationMs = now() - triangulationStartedAt
-    const skippedSurfaceIds = contexts.flatMap(({ surface }, index) => patchesInSurfaceOrder[index] ? [] : [surface.planeId])
+    const surfaceDiagnostics = buildOutcomes.map((outcome) => outcome.diagnostic)
+    const skippedSurfaceIds = surfaceDiagnostics.filter((diagnostic) => !diagnostic.valid).map((diagnostic) => diagnostic.sourceSurfaceId)
     const supportPointCounts = Object.fromEntries(contexts.map(({ surface, context }) => [surface.planeId, context?.supportPoints.length ?? 0]))
     const structuralBoundaryCounts = Object.fromEntries(contexts.map(({ surface, context }) => [surface.planeId, context?.constraints.length ?? 0]))
     const totalMs = now() - startedAt
-    const warnings = skippedSurfaceIds.map((surfaceId) => `No valid bounded polygon could be constructed for ${surfaceId}.`)
+    const warnings = surfaceDiagnostics
+      .filter((diagnostic) => diagnostic.skipReason !== null)
+      .map((diagnostic) => `${diagnostic.sourceSurfaceId}: ${diagnostic.skipReason}`)
     return Object.freeze({
       sourceScanId: scan.id,
       surfaces: Object.freeze(patches),
@@ -715,6 +1221,7 @@ export class RoomSurfaceConstructionService {
         skippedSurfaceIds,
         supportPointCounts,
         structuralBoundaryCounts,
+        surfaceDiagnostics,
         warnings,
       }),
       timings: Object.freeze({
