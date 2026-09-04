@@ -1030,3 +1030,23 @@ renderer coverage limitations from a future need for higher-density Reality
 geometry. Future work may add denser capture, retained RGB keyframes, or
 post-scan mesh and texture projection; M8.4.2 is not photogrammetry-quality
 reconstruction.
+
+## M8.4.2.1 Reality splat compositing correction
+
+M8.4.2.1 corrects a post-scan rendering artifact introduced by the soft
+elliptical splat footprint. The captured RGB remains unchanged. Reality
+splats use normal straight-alpha blending only for a narrow feather outside
+an opaque, depth-writing measured-color core. The feather discards fragments
+below a small alpha threshold and does not write depth; this prevents
+near-transparent fragments from becoming invisible occluders. The shader
+keeps the captured RGB unchanged while alpha controls only edge coverage.
+
+Splat overlap is increased only from the compatible world-space neighbor
+spacing already built for M8.4. The expansion is bounded and uses the
+measured radius, compatible normals, and local plane residuals; it does not
+bridge large gaps or add unsupported geometry. Dense Reality Surface uses
+opaque local triangles for the same reason, followed by the explicit core
+and feather layers. Raw Reality Points, Reality Splats, and Dense Reality
+Surface remain available for comparison, while true unscanned regions remain
+empty. No camera capture, RGB-D registration, color fusion, surfel capacity,
+or structural model behavior changes in this correction.

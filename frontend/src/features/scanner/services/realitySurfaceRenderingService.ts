@@ -32,7 +32,7 @@ export interface RealitySurfaceRenderResources {
 const RAW_POINT_SIZE_METERS = 0.045
 const BASE_SPLAT_RADIUS_SCALE = 1.05
 const DENSE_SPLAT_RADIUS_SCALE = 1.02
-const SPLAT_MINOR_AXIS_SCALE = 0.9
+const SPLAT_MINOR_AXIS_SCALE = 0.95
 const MIN_VISUAL_RADIUS_METERS = 0.004
 const MAX_VISUAL_RADIUS_METERS = 0.055
 const MAX_LOCAL_EDGE_DISTANCE_METERS = 0.12
@@ -50,6 +50,12 @@ const LARGE_GAP_LIMIT_METERS = 0.16
 const POSITION_EPSILON = 1e-6
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
+const SPLAT_CORE_RADIUS = 0.82
+const SPLAT_FEATHER_START = 0.76
+const SPLAT_FEATHER_END = 0.99
+const SPLAT_ALPHA_THRESHOLD = 0.18
+const MAX_ADAPTIVE_EXPANSION_SCALE = 1.3
+const SPLAT_OVERLAP_MARGIN = 1.04
 
 const SPLAT_VERTEX_SHADER = `
 attribute vec3 color;
@@ -67,13 +73,25 @@ void main() {
 const SPLAT_FRAGMENT_SHADER = `
 precision mediump float;
 uniform float uOpacity;
+uniform float uCorePass;
 varying vec3 vColor;
 varying vec2 vSplatLocal;
 
 void main() {
   float distanceFromCenter = length(vSplatLocal);
-  float edgeAlpha = 1.0 - smoothstep(0.72, 1.0, distanceFromCenter);
-  if (edgeAlpha <= 0.01) {
+  if (uCorePass > 0.5) {
+    if (distanceFromCenter > ${SPLAT_CORE_RADIUS.toFixed(3)}) {
+      discard;
+    }
+    gl_FragColor = vec4(vColor, 1.0);
+    return;
+  }
+
+  if (distanceFromCenter < ${SPLAT_CORE_RADIUS.toFixed(3)}) {
+    discard;
+  }
+  float edgeAlpha = 1.0 - smoothstep(${SPLAT_FEATHER_START.toFixed(3)}, ${SPLAT_FEATHER_END.toFixed(3)}, distanceFromCenter);
+  if (edgeAlpha < ${SPLAT_ALPHA_THRESHOLD.toFixed(3)}) {
     discard;
   }
   gl_FragColor = vec4(vColor, edgeAlpha * uOpacity);
@@ -373,10 +391,13 @@ function getAdaptiveVisualRadius(
     return { radius: baseRadius, scale: baseRadius / measuredRadius }
   }
 
-  const desiredScale = 1 + ((nearestSpacing / Math.max(POSITION_EPSILON, baseRadius * 2)) - 1) * 0.42
-  const densityScale = clamp(desiredScale, 0.82, 1.18)
+  const coverageRadius = (nearestSpacing / (2 * SPLAT_MINOR_AXIS_SCALE)) * SPLAT_OVERLAP_MARGIN
+  const maxAdaptiveRadius = Math.min(
+    MAX_VISUAL_RADIUS_METERS,
+    baseRadius * MAX_ADAPTIVE_EXPANSION_SCALE,
+  )
   const radius = clamp(
-    baseRadius * densityScale,
+    Math.max(baseRadius, Math.min(maxAdaptiveRadius, coverageRadius)),
     MIN_VISUAL_RADIUS_METERS,
     MAX_VISUAL_RADIUS_METERS,
   )
@@ -556,17 +577,18 @@ function createPointMaterial(): THREE.PointsMaterial {
   })
 }
 
-function createSplatMaterial(opacity: number): THREE.ShaderMaterial {
+function createSplatMaterial(opacity: number, corePass: boolean): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     vertexShader: SPLAT_VERTEX_SHADER,
     fragmentShader: SPLAT_FRAGMENT_SHADER,
     uniforms: {
       uOpacity: { value: opacity },
+      uCorePass: { value: corePass ? 1 : 0 },
     },
     depthTest: true,
-    depthWrite: true,
+    depthWrite: corePass,
     side: THREE.DoubleSide,
-    transparent: true,
+    transparent: !corePass,
     toneMapped: false,
   })
 }
@@ -621,7 +643,7 @@ export function createRealitySurfaceRenderResources(
       const triangleStartedAt = getTimestamp()
       const triangleResult = createDenseTriangleGeometry(neighborIndex)
       triangleGenerationMs = Math.max(0, getTimestamp() - triangleStartedAt)
-      const triangleMaterial = createSurfaceMaterial(0.96)
+      const triangleMaterial = createSurfaceMaterial(1)
       group.add(new THREE.Mesh(triangleResult.geometry, triangleMaterial))
       geometries.push(triangleResult.geometry)
       materials.push(triangleMaterial)
@@ -634,10 +656,14 @@ export function createRealitySurfaceRenderResources(
       mode === 'dense' ? DENSE_SPLAT_RADIUS_SCALE : BASE_SPLAT_RADIUS_SCALE,
     )
     splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
-    const splatMaterial = createSplatMaterial(mode === 'dense' ? 0.92 : 1)
-    group.add(new THREE.Mesh(splatResult.geometry, splatMaterial))
+    const splatCoreMaterial = createSplatMaterial(1, true)
+    const splatFeatherMaterial = createSplatMaterial(mode === 'dense' ? 0.92 : 1, false)
+    group.add(
+      new THREE.Mesh(splatResult.geometry, splatCoreMaterial),
+      new THREE.Mesh(splatResult.geometry, splatFeatherMaterial),
+    )
     geometries.push(splatResult.geometry)
-    materials.push(splatMaterial)
+    materials.push(splatCoreMaterial, splatFeatherMaterial)
     renderedSplatCount = splatResult.renderedSplatCount
     visualRadiusScale = splatResult.averageVisualRadiusScale
   }
