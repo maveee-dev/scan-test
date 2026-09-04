@@ -1,6 +1,6 @@
 import type {
   DomOverlayStatus,
-  FinalizedSpatialScan,
+  FinalizedScannerCapture,
   RawCameraCopyFrame,
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
@@ -37,6 +37,7 @@ import {
   RgbDepthRegistrationService,
   createInitialRgbDepthRegistrationDebug,
 } from './rgbDepthRegistrationService'
+import { RealitySurfelColorFusionService } from './realitySurfelColorFusionService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -157,6 +158,8 @@ export class XRSessionService {
   private readonly rgbDepthRegistrationService = new RgbDepthRegistrationService(
     this.rawCameraService,
   )
+
+  private readonly realitySurfelColorFusionService = new RealitySurfelColorFusionService()
 
   private referenceSpace: XRReferenceSpace | null = null
 
@@ -286,6 +289,7 @@ export class XRSessionService {
 
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
+    this.realitySurfelColorFusionService.reset()
     this.rawCameraCopyPhase = 0
 
     try {
@@ -295,7 +299,7 @@ export class XRSessionService {
     }
   }
 
-  public async finish(): Promise<FinalizedSpatialScan> {
+  public async finish(): Promise<FinalizedScannerCapture> {
     if (this.startPromise) {
       throw new XRSessionError(
         'The scan session is still starting and cannot be finalized yet.',
@@ -321,23 +325,33 @@ export class XRSessionService {
     this.requestedEndReason = 'finished'
     this.isEnding = true
     this.stopFrameProcessing(session)
-    this.rawCameraService.dispose()
     this.rawCameraCopyPhase = 0
 
     try {
       const finishedAt = Date.now()
+      const fusedSurfaceSurfels = this.persistentLiveSurfaceService.getFinalizationSurfels(
+        this.spatialCoverageService,
+      )
+      const realityGeometrySurfels = this.persistentLiveSurfaceService.getRealityFinalizationSurfels()
       const finalizedScan = this.finalizedSpatialScanService.createSnapshot({
         startedAtMs: this.scanStartedAt,
         finishedAtMs: finishedAt,
         referenceSpaceType: this.referenceSpaceType,
         coverageCells: this.spatialCoverageService.getFinalizationCells(),
-        fusedSurfaceSurfels: this.persistentLiveSurfaceService.getFinalizationSurfels(
-          this.spatialCoverageService,
-        ),
+        fusedSurfaceSurfels,
       })
+      const realityReconstruction = this.realitySurfelColorFusionService.createSnapshot(
+        finalizedScan.id,
+        finalizedScan.referenceSpaceType,
+        realityGeometrySurfels,
+        this.rawCameraService.isAvailable(),
+      )
 
       await this.endActiveSession(session)
-      return finalizedScan
+      return {
+        spatialScan: finalizedScan,
+        realityReconstruction,
+      }
     } catch (error) {
       if (this.isActiveSession(session)) {
         await this.endActiveSession(session).catch(() => undefined)
@@ -358,6 +372,7 @@ export class XRSessionService {
     this.denseSurfaceMaskService.dispose()
     this.persistentLiveSurfaceService.dispose()
     this.rawCameraService.dispose()
+    this.realitySurfelColorFusionService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -408,6 +423,7 @@ export class XRSessionService {
       const presentationDiagnostics = await this.presentationService.initialize(session)
       this.applyPresentationDiagnostics(presentationDiagnostics)
       this.rawCameraService.initialize(session, this.presentationService.getRenderTarget())
+      this.realitySurfelColorFusionService.setCameraAvailability(this.rawCameraService.isAvailable())
       this.spatialCoverageRenderService.initialize(this.presentationService.getRenderTarget())
       this.emitDiagnostics()
 
@@ -588,7 +604,10 @@ export class XRSessionService {
 
           this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
           let currentRawCameraFrame: RawCameraCopyFrame | null = null
-          const cameraProbeVisible = this.rawCameraDebugVisible || this.rgbDepthDebugVisible
+          let currentRgbDepthResult: ReturnType<RgbDepthRegistrationService['process']> | null = null
+          const cameraProbeVisible = this.rawCameraDebugVisible ||
+            this.rgbDepthDebugVisible ||
+            this.rawCameraService.isAvailable()
           if (cameraProbeVisible && this.rawCameraCopyPhase === 0) {
             if (densePointFrame.validPointCount > 0) {
               const copied = this.rawCameraService.copyFrame(
@@ -607,28 +626,30 @@ export class XRSessionService {
 
           if (this.rgbDepthDebugVisible) {
             if (currentRawCameraFrame) {
-              const rgbDepthMesh = this.rgbDepthRegistrationService.process(
+              currentRgbDepthResult = this.rgbDepthRegistrationService.process(
                 densePointFrame,
                 primaryView,
                 currentRawCameraFrame,
                 time,
                 true,
               )
-              this.spatialCoverageRenderService.updateRgbDepthMesh(rgbDepthMesh)
+              if (this.rgbDepthDebugVisible) {
+                this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
+              }
             } else if (this.rawCameraService.isAvailable()) {
               this.rgbDepthRegistrationService.recordStaleFrame(
                 densePointFrame.validPointCount,
                 time,
               )
             } else {
-              const rgbDepthMesh = this.rgbDepthRegistrationService.process(
+              currentRgbDepthResult = this.rgbDepthRegistrationService.process(
                 densePointFrame,
                 primaryView,
                 null,
                 time,
                 false,
               )
-              this.spatialCoverageRenderService.updateRgbDepthMesh(rgbDepthMesh)
+              this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
             }
           }
 
@@ -661,6 +682,22 @@ export class XRSessionService {
             'fusionUpdate',
             persistentSurfaceResult.performance.fusionDurationMs,
           )
+
+          if (currentRgbDepthResult) {
+            this.realitySurfelColorFusionService.process(
+              currentRgbDepthResult,
+              densePointFrame,
+              persistentSurfaceResult.matchedSurfelIds,
+              persistentSurfaceResult.matchedSurfelGenerations,
+              persistentSurfaceResult.removedSurfelIds,
+              this.persistentLiveSurfaceService,
+              this.position,
+              time,
+              persistentSurfaceResult.activeSurfelCount,
+            )
+          } else if (!this.rawCameraService.isAvailable()) {
+            this.realitySurfelColorFusionService.setCameraAvailability(false)
+          }
 
           const persistentRenderStartedAt = getPerformanceTimestamp()
           this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
@@ -800,6 +837,7 @@ export class XRSessionService {
       rgbDepth: this.rgbDepthDebugVisible
         ? this.rgbDepthRegistrationService.getDiagnostics()
         : createInitialRgbDepthRegistrationDebug(),
+      realityColor: this.realitySurfelColorFusionService.getDiagnostics(),
     }
   }
 
@@ -842,6 +880,7 @@ export class XRSessionService {
     this.rawCameraCopyPhase = 0
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
+    this.realitySurfelColorFusionService.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -932,6 +971,7 @@ export class XRSessionService {
     this.persistentLiveSurfaceService.dispose()
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
+    this.realitySurfelColorFusionService.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

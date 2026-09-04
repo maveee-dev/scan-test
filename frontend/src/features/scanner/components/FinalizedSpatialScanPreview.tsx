@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import type { CoverageCellState, FinalizedSpatialScan } from '../types'
+import type {
+  CoverageCellState,
+  FinalizedRealityReconstruction,
+  FinalizedSpatialScan,
+} from '../types'
 import type {
   PlaneCandidate,
   RoomBoundaryResult,
@@ -20,6 +24,7 @@ import {
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
+  realityReconstruction?: FinalizedRealityReconstruction | null
   analysisResult?: RoomAnalysisResult | null
   roomBoundary?: RoomBoundaryResult | null
   roomSurfaceConstruction?: RoomSurfaceConstructionResult | null
@@ -55,7 +60,7 @@ const ROOM_BOUNDARY_COLORS = {
   'wall-ceiling': 0xd9a7ff,
   'wall-floor': 0x8ee2a8,
 } as const
-type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
+type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -420,8 +425,42 @@ function createFusedSurfaceGeometry(
   return geometry
 }
 
+function createRealitySurfelGeometry(
+  reconstruction: FinalizedRealityReconstruction,
+): THREE.BufferGeometry {
+  const coloredSurfels = reconstruction.surfels.filter((surfel) => surfel.colorRgb !== null)
+  const positions = new Float32Array(coloredSurfels.length * 3)
+  const colors = new Float32Array(coloredSurfels.length * 3)
+  coloredSurfels.forEach((surfel, index) => {
+    const positionOffset = index * 3
+    positions[positionOffset] = surfel.position.x
+    positions[positionOffset + 1] = surfel.position.y
+    positions[positionOffset + 2] = surfel.position.z
+    const color = surfel.colorRgb
+    if (!color) {
+      return
+    }
+    // Finalized Reality colors are sRGB. Buffer colors are consumed as linear
+    // values by Three.js, then encoded once by the renderer for display.
+    colors[positionOffset] = color.r <= 0.04045
+      ? color.r / 12.92
+      : Math.pow((color.r + 0.055) / 1.055, 2.4)
+    colors[positionOffset + 1] = color.g <= 0.04045
+      ? color.g / 12.92
+      : Math.pow((color.g + 0.055) / 1.055, 2.4)
+    colors[positionOffset + 2] = color.b <= 0.04045
+      ? color.b / 12.92
+      : Math.pow((color.b + 0.055) / 1.055, 2.4)
+  })
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  return geometry
+}
+
 function FinalizedSpatialScanPreview({
   analysisResult,
+  realityReconstruction,
   roomBoundary,
   roomSurfaceConstruction,
   scan,
@@ -500,6 +539,7 @@ function FinalizedSpatialScanPreview({
       antialias: true,
       powerPreference: 'low-power',
     })
+    renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setPixelRatio(
       Math.min(
         typeof window === 'undefined' ? 1 : window.devicePixelRatio,
@@ -538,6 +578,8 @@ function FinalizedSpatialScanPreview({
 
     let pointsForBounds = mode === 'fused'
       ? scan.fusedSurface.map((surfel) => surfel.position)
+      : mode === 'reality-preview'
+        ? realityReconstruction?.surfels.map((surfel) => surfel.position) ?? []
       : mode === 'planes' || mode === 'structural'
         ? analysisResult?.planes.flatMap((plane) => [plane.bounds.min, plane.bounds.max]) ?? []
         : mode === 'intersections'
@@ -586,6 +628,9 @@ function FinalizedSpatialScanPreview({
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+    let realityGeometry: THREE.BufferGeometry | null = null
+    let realityMaterial: THREE.PointsMaterial | null = null
+    let realityPoints: THREE.Points | null = null
     let roomSurfaceResources: {
       geometries: THREE.BufferGeometry[]
       materials: THREE.Material[]
@@ -628,6 +673,16 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources = addRoomSurfaces(scene, roomSurfaceConstruction)
       roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
       roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
+    } else if (mode === 'reality-preview' && realityReconstruction) {
+      realityGeometry = createRealitySurfelGeometry(realityReconstruction)
+      realityMaterial = new THREE.PointsMaterial({
+        size: 0.045,
+        sizeAttenuation: true,
+        vertexColors: true,
+        toneMapped: false,
+      })
+      realityPoints = new THREE.Points(realityGeometry, realityMaterial)
+      scene.add(realityPoints)
     }
 
     const selectableMeshes = roomSurfaceResources?.surfaceMeshes ?? new Map<string, RoomSurfaceMesh>()
@@ -732,6 +787,8 @@ function FinalizedSpatialScanPreview({
       boundaryResources?.materials.forEach((boundaryMaterial) => boundaryMaterial.dispose())
       roomSurfaceResources?.geometries.forEach((surfaceGeometry) => surfaceGeometry.dispose())
       roomSurfaceResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
+      realityGeometry?.dispose()
+      realityMaterial?.dispose()
       renderer.dispose()
       canvas.removeEventListener('pointerdown', onSelectionPointerDown)
       canvas.removeEventListener('pointerup', onSelectionPointerUp)
@@ -743,8 +800,11 @@ function FinalizedSpatialScanPreview({
       if (fusedSurface) {
         scene.remove(fusedSurface)
       }
+      if (realityPoints) {
+        scene.remove(realityPoints)
+      }
     }
-  }, [analysisResult, mode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, mode, realityReconstruction, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -810,6 +870,16 @@ function FinalizedSpatialScanPreview({
               onClick={() => setMode('fused')}
             >
               Fused Surface Data
+            </button>
+          ) : null}
+          {realityReconstruction ? (
+            <button
+              type="button"
+              className="scanner-preview-mode scanner-preview-mode-reality"
+              aria-pressed={mode === 'reality-preview'}
+              onClick={() => setMode('reality-preview')}
+            >
+              Reality Preview
             </button>
           ) : null}
           {analysisResult ? (
@@ -921,6 +991,21 @@ function FinalizedSpatialScanPreview({
         <p className="scanner-scan-preview-note">
           No bounded room-surface patches were constructed from the selected structural surfaces.
         </p>
+      ) : null}
+      {mode === 'reality-preview' && realityReconstruction ? (
+        <div className="scanner-scan-preview-note scanner-reality-summary">
+          <strong>Reality Reconstruction: {realityReconstruction.status}</strong>
+          <span>
+            Colored surfels {realityReconstruction.captureSummary.coloredSurfels} / {realityReconstruction.captureSummary.totalSurfels}
+            {' · '}
+            {realityReconstruction.captureSummary.colorCoveragePercentage.toFixed(1)}% color coverage
+            {' · '}
+            {realityReconstruction.captureSummary.cameraCapturesUsed} camera captures
+          </span>
+          {realityReconstruction.status !== 'available' ? (
+            <span>Original camera colors were not retained for this scan; structural review remains available.</span>
+          ) : null}
+        </div>
       ) : null}
     </div>
   )

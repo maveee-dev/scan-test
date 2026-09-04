@@ -240,6 +240,7 @@ function ScannerDomOverlay({
   const coverage = sessionState.debug.coverage
   const rawCamera = sessionState.debug.rawCamera
   const rgbDepth = sessionState.debug.rgbDepth
+  const realityColor = sessionState.debug.realityColor
 
   useEffect(() => {
     const canvas = rawCameraPreviewCanvasRef.current
@@ -718,6 +719,39 @@ function ScannerDomOverlay({
                   </strong>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="xr-dom-overlay-depth xr-reality-color-debug" aria-label="Reality color fusion diagnostics">
+            <div className="xr-dom-overlay-depth-header">
+              <span>REALITY COLOR FUSION</span>
+              <strong>{formatRawCameraState(realityColor.status)}</strong>
+            </div>
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Observations fused</span>
+                <strong>{realityColor.colorSamplesFused} / {realityColor.colorSamplesAttempted}</strong>
+              </div>
+              <div>
+                <span>Colored surfels</span>
+                <strong>{realityColor.coloredSurfelCount} / {realityColor.totalSurfelCount}</strong>
+              </div>
+              <div>
+                <span>Coverage / avg observations</span>
+                <strong>{realityColor.colorCoveragePercentage.toFixed(1)}% / {realityColor.averageColorObservations.toFixed(1)}</strong>
+              </div>
+              <div>
+                <span>Rejects / unmatched</span>
+                <strong>{realityColor.colorRejects} / {realityColor.unmatchedSurfelSamples}</strong>
+              </div>
+              <div>
+                <span>Fusion / captures</span>
+                <strong>{formatPerformanceMilliseconds(realityColor.colorFusionMs)} / {realityColor.cameraCapturesUsed}</strong>
+              </div>
+              <div>
+                <span>Color confidence</span>
+                <strong>{realityColor.averageColorConfidence.toFixed(2)}</strong>
+              </div>
             </div>
           </div>
 

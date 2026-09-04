@@ -895,3 +895,44 @@ crop. The debug preview uses the copied dimensions, so portrait source
 imagery remains visibly portrait. This changes only camera-copy coverage;
 world-to-camera projection, depth semantics, structural results, and color
 persistence remain unchanged.
+
+## M8.3 persistent colored Reality Reconstruction
+
+M8.3 adds the first persistent Reality Reconstruction output while keeping
+the validated Structural / Design reconstruction independent:
+
+```text
+current accepted RGB-D observation
+        + geometry-fusion surfel ID
+        -> compact per-surfel linear-RGB sidecar
+        -> immutable FinalizedRealityReconstruction on Finish
+        -> Reality Preview
+
+the same scan
+        -> FinalizedSpatialScan -> M7 structural/design workflow
+```
+
+The color sidecar consumes the exact persistent-surfel identity selected by
+geometry fusion; it does not perform a second spatial match and does not
+change position, normal, coverage, or geometry weights. Camera bytes are
+treated as sRGB, converted to linear RGB for a bounded weighted running mean,
+then converted back to sRGB in the finalized companion snapshot. The first
+color fusion path uses only the current depth observation that produced the
+match, which keeps the RGB/depth association and occlusion behavior
+conservative. Reused surfel slots carry generations so a new surfel cannot
+inherit an old color.
+
+`FinalizedRealityReconstruction` contains application-owned colored surfel
+geometry and summary data only. It retains no browser-owned camera texture,
+raw frame sequence, or camera image. When raw camera access is unavailable,
+structural scanning and `FinalizedSpatialScan` remain fully usable and the
+Reality companion reports `unavailable`; when no color was fused it reports
+`empty` rather than inventing appearance.
+
+Reality Preview renders all sufficiently stable finalized persistent surfels
+that have real fused RGB, including non-structural observed geometry where
+the existing surfel fusion preserved it. It uses direct, unlit vertex colors
+for the original captured appearance. Room Surfaces, First-Person Room, and
+M8 paint customization continue to use the separate structural/design data;
+paint never changes Reality Preview. This is a colored-surfel proof, not a
+textured mesh or photogrammetry-quality reconstruction.

@@ -2,6 +2,7 @@ import type {
   CoverageCellState,
   DenseCoverageMesh,
   DenseSpatialPointFrame,
+  FinalizedRealityGeometrySurfel,
   FinalizedSurfaceSurfel,
   PersistentLiveSurfaceDebug,
   SpatialPoint,
@@ -19,8 +20,9 @@ const FLOATS_PER_VERTEX = 7
 const VERTICES_PER_SURFEL = 6
 const VECTOR_EPSILON = 1e-6
 
-interface LiveSurfaceSurfel {
+export interface LiveSurfaceSurfel {
   id: number
+  generation: number
   bucketKey: string
   position: SpatialPoint
   normal: SpatialPoint | null
@@ -43,6 +45,11 @@ interface CompatibleSurfelResult {
 export interface PersistentLiveSurfaceFrameResult {
   persistentSurfaceMesh: DenseCoverageMesh
   candidateSurfaceMesh: DenseCoverageMesh
+  /** Dense-frame slot -> the exact geometry-fusion surfel that accepted it. */
+  matchedSurfelIds: Int32Array
+  matchedSurfelGenerations: Int32Array
+  removedSurfelIds: readonly number[]
+  activeSurfelCount: number
   performance: {
     normalFilteringDurationMs: number
     fusionDurationMs: number
@@ -147,6 +154,14 @@ export class PersistentLiveSurfaceService {
 
   private readonly buckets = new Map<string, number[]>()
 
+  private nextSurfelGeneration = 1
+
+  private matchedSurfelIds = new Int32Array(0)
+
+  private matchedSurfelGenerations = new Int32Array(0)
+
+  private readonly removedSurfelIds: number[] = []
+
   private activeSurfelCount = 0
 
   private readonly samplePoint: SpatialPoint = { x: 0, y: 0, z: 0 }
@@ -204,6 +219,10 @@ export class PersistentLiveSurfaceService {
     const sampleCount = frame.columns * frame.rows
     this.updateSequence += 1
     this.candidateVertexOffset = 0
+    this.ensureMatchCapacity(sampleCount)
+    this.matchedSurfelIds.fill(-1, 0, sampleCount)
+    this.matchedSurfelGenerations.fill(0, 0, sampleCount)
+    this.removedSurfelIds.length = 0
     this.ensureNormalCapacity(sampleCount)
     const normalFilteringStartedAt = getPerformanceTimestamp()
     this.estimateNormals(frame, cameraPosition)
@@ -313,6 +332,8 @@ export class PersistentLiveSurfaceService {
         surfel.lastTouchedUpdate = this.updateSequence
         this.touchedSurfelIds.push(surfel.id)
       }
+      this.matchedSurfelIds[index] = surfel.id
+      this.matchedSurfelGenerations[index] = surfel.generation
     }
 
     for (const surfelId of this.touchedSurfelIds) {
@@ -381,6 +402,10 @@ export class PersistentLiveSurfaceService {
     return {
       persistentSurfaceMesh,
       candidateSurfaceMesh,
+      matchedSurfelIds: this.matchedSurfelIds.subarray(0, sampleCount),
+      matchedSurfelGenerations: this.matchedSurfelGenerations.subarray(0, sampleCount),
+      removedSurfelIds: this.removedSurfelIds,
+      activeSurfelCount: this.activeSurfelCount,
       performance: {
         normalFilteringDurationMs,
         fusionDurationMs,
@@ -394,6 +419,13 @@ export class PersistentLiveSurfaceService {
 
   public getDiagnostics(): PersistentLiveSurfaceDebug {
     return { ...this.diagnostics }
+  }
+
+  /** Returns the same live surfel selected by geometry fusion; it performs no
+   * second spatial lookup and is only consumed during the active frame. */
+  public getSurfelColorFusionTarget(id: number): LiveSurfaceSurfel | null {
+    const surfel = this.surfels[id]
+    return surfel?.active ? surfel : null
   }
 
   /**
@@ -433,6 +465,33 @@ export class PersistentLiveSurfaceService {
     return Object.freeze(finalized)
   }
 
+  /** Copies the same finalizable geometry for Reality without changing the
+   * locked structural snapshot schema. */
+  public getRealityFinalizationSurfels(): readonly FinalizedRealityGeometrySurfel[] {
+    const finalized: FinalizedRealityGeometrySurfel[] = []
+    for (const surfel of this.surfels) {
+      if (
+        !surfel.active ||
+        !surfel.normal ||
+        surfel.geometryObservationCount < LIVE_SURFACE_CONFIG.minimumFinalizationObservationCount
+      ) {
+        continue
+      }
+
+      // Keep final Reality geometry eligibility identical to the structural
+      // finalization path; only the identity/radius metadata is additional.
+      finalized.push(Object.freeze({
+        id: surfel.id,
+        position: Object.freeze({ ...surfel.position }),
+        normal: Object.freeze({ ...surfel.normal }),
+        radius: surfel.radius,
+        geometryConfidence: Math.min(1, surfel.geometryObservationCount / 3),
+      }))
+    }
+
+    return Object.freeze(finalized)
+  }
+
   public rebuildForDebugVisibility(visible: boolean): DenseCoverageMesh {
     return this.buildMesh(visible)
   }
@@ -443,6 +502,10 @@ export class PersistentLiveSurfaceService {
     this.buckets.clear()
     this.touchedSurfelIds.length = 0
     this.activeSurfelCount = 0
+    this.nextSurfelGeneration = 1
+    this.matchedSurfelIds = new Int32Array(0)
+    this.matchedSurfelGenerations = new Int32Array(0)
+    this.removedSurfelIds.length = 0
     this.vertexData = new Float32Array(0)
     this.candidateVertexData = new Float32Array(0)
     this.candidateVertexOffset = 0
@@ -723,6 +786,7 @@ export class PersistentLiveSurfaceService {
     const bucketKey = getPointBucketKey(point)
     const surfel: LiveSurfaceSurfel = {
       id,
+      generation: this.nextSurfelGeneration,
       bucketKey,
       position: { ...point },
       normal: normal ? { ...normal } : null,
@@ -736,6 +800,7 @@ export class PersistentLiveSurfaceService {
       active: true,
       lastTouchedUpdate: 0,
     }
+    this.nextSurfelGeneration += 1
     if (recycledId === undefined) {
       this.surfels.push(surfel)
     } else {
@@ -835,6 +900,7 @@ export class PersistentLiveSurfaceService {
 
   private removeSurfel(surfel: LiveSurfaceSurfel): void {
     surfel.active = false
+    this.removedSurfelIds.push(surfel.id)
     this.freeSurfelIds.push(surfel.id)
     this.activeSurfelCount = Math.max(0, this.activeSurfelCount - 1)
     const bucket = this.buckets.get(surfel.bucketKey)
@@ -848,6 +914,15 @@ export class PersistentLiveSurfaceService {
     if (bucket.length === 0) {
       this.buckets.delete(surfel.bucketKey)
     }
+  }
+
+  private ensureMatchCapacity(sampleCount: number): void {
+    if (this.matchedSurfelIds.length >= sampleCount) {
+      return
+    }
+
+    this.matchedSurfelIds = new Int32Array(sampleCount)
+    this.matchedSurfelGenerations = new Int32Array(sampleCount)
   }
 
   private addToBucket(bucketKey: string, surfelId: number): void {

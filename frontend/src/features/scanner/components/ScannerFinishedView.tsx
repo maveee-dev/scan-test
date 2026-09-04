@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { BUILD_INFO } from '../../../config/buildInfo'
-import type { FinalizedSpatialScan } from '../types'
+import type { FinalizedRealityReconstruction, FinalizedSpatialScan } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
 import { RoomBoundaryReconstructionService } from '../../room-analysis/services/roomBoundaryReconstructionService'
 import {
@@ -22,6 +22,7 @@ import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
 
 interface ScannerFinishedViewProps {
   scan: FinalizedSpatialScan
+  realityReconstruction: FinalizedRealityReconstruction | null
   onStartNewScan: () => void
   onDiscardScan: () => void
 }
@@ -800,6 +801,7 @@ function RoomSurfaceSummary({
 function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
+  realityReconstruction,
   scan,
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
@@ -948,6 +950,7 @@ function ScannerFinishedView({
       {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
         <FinalizedSpatialScanPreview
           analysisResult={analysisResult}
+          realityReconstruction={realityReconstruction}
           scan={scan}
           roomBoundary={boundaryResult}
           roomSurfaceConstruction={roomSurfaceResult}

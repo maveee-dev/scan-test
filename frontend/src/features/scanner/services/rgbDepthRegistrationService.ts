@@ -20,6 +20,16 @@ interface CameraProjection {
   v: number
 }
 
+export interface RgbDepthRegistrationResult {
+  mesh: DenseCoverageMesh
+  /** Indexes into the dense frame for successfully sampled RGB observations. */
+  sourceSampleIndices: Int32Array
+  /** sRGB bytes in tightly packed RGB order, three bytes per source index. */
+  srgbColors: Uint8Array
+  coloredSampleCount: number
+  cameraCopySequence: number
+}
+
 function getTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
 }
@@ -122,6 +132,10 @@ export class RgbDepthRegistrationService {
 
   private revision = 0
 
+  private sourceSampleIndices = new Int32Array(0)
+
+  private srgbColors = new Uint8Array(0)
+
   private diagnostics: RgbDepthRegistrationDebug = createInitialDiagnostics()
 
   private readonly pointScratch: SpatialPoint = { x: 0, y: 0, z: 0 }
@@ -146,7 +160,7 @@ export class RgbDepthRegistrationService {
     cameraFrame: RawCameraCopyFrame | null,
     depthTimestamp: number,
     cameraAvailable: boolean,
-  ): DenseCoverageMesh {
+  ): RgbDepthRegistrationResult {
     const registrationStartedAt = getTimestamp()
     const attempted = denseFrame.validPointCount
     this.diagnostics = {
@@ -161,7 +175,7 @@ export class RgbDepthRegistrationService {
       this.diagnostics.cameraBufferMisses = attempted > 0 ? attempted : 0
       this.diagnostics.successPercentage = 0
       this.diagnostics.registrationMs = Math.max(0, getTimestamp() - registrationStartedAt)
-      return this.createMesh(0)
+      return this.createResult(0, -1)
     }
 
     if (
@@ -173,7 +187,7 @@ export class RgbDepthRegistrationService {
       this.diagnostics.pairingStatus = 'stale'
       this.diagnostics.staleCameraRejects = attempted > 0 ? attempted : 0
       this.diagnostics.registrationMs = Math.max(0, getTimestamp() - registrationStartedAt)
-      return this.createMesh(0)
+      return this.createResult(0, -1)
     }
 
     this.diagnostics.status = 'active'
@@ -237,6 +251,7 @@ export class RgbDepthRegistrationService {
 
       const vertexOffset = coloredCount * BYTES_PER_RGBD_VERTEX
       this.ensureCapacity(vertexOffset + BYTES_PER_RGBD_VERTEX)
+      this.ensureObservationCapacity(coloredCount + 1)
       this.vertexData[vertexOffset] = point.x
       this.vertexData[vertexOffset + 1] = point.y
       this.vertexData[vertexOffset + 2] = point.z
@@ -244,6 +259,11 @@ export class RgbDepthRegistrationService {
       this.vertexData[vertexOffset + 4] = pixel.green / 255
       this.vertexData[vertexOffset + 5] = pixel.blue / 255
       this.vertexData[vertexOffset + 6] = 1
+      this.sourceSampleIndices[coloredCount] = index
+      const colorOffset = coloredCount * 3
+      this.srgbColors[colorOffset] = pixel.red
+      this.srgbColors[colorOffset + 1] = pixel.green
+      this.srgbColors[colorOffset + 2] = pixel.blue
       coloredCount += 1
 
       if (validationSamples.length < MAX_VALIDATION_SAMPLES) {
@@ -260,7 +280,7 @@ export class RgbDepthRegistrationService {
     this.diagnostics.successPercentage = attempted > 0 ? (coloredCount / attempted) * 100 : 0
     this.diagnostics.validationSamples = validationSamples
     this.diagnostics.registrationMs = Math.max(0, getTimestamp() - registrationStartedAt)
-    return this.createMesh(coloredCount)
+    return this.createResult(coloredCount, cameraFrame.sequence)
   }
 
   /** Records an eligible dense tick without replacing the last valid debug mesh. */
@@ -296,6 +316,8 @@ export class RgbDepthRegistrationService {
     this.revision = 0
     this.diagnostics = createInitialDiagnostics()
     this.vertexData.fill(0)
+    this.sourceSampleIndices = new Int32Array(0)
+    this.srgbColors = new Uint8Array(0)
   }
 
   private ensureCapacity(requiredFloats: number): void {
@@ -309,12 +331,36 @@ export class RgbDepthRegistrationService {
     this.vertexData = nextData
   }
 
+  private ensureObservationCapacity(requiredSamples: number): void {
+    if (requiredSamples <= this.sourceSampleIndices.length) {
+      return
+    }
+
+    const nextCapacity = Math.max(requiredSamples, this.sourceSampleIndices.length * 2, 64)
+    const nextIndices = new Int32Array(nextCapacity)
+    nextIndices.set(this.sourceSampleIndices)
+    this.sourceSampleIndices = nextIndices
+    const nextColors = new Uint8Array(nextCapacity * 3)
+    nextColors.set(this.srgbColors)
+    this.srgbColors = nextColors
+  }
+
   private createMesh(vertexCount: number): DenseCoverageMesh {
     this.revision += 1
     return {
       revision: this.revision,
       vertexData: this.vertexData.subarray(0, vertexCount * BYTES_PER_RGBD_VERTEX),
       vertexCount,
+    }
+  }
+
+  private createResult(coloredSampleCount: number, cameraCopySequence: number): RgbDepthRegistrationResult {
+    return {
+      mesh: this.createMesh(coloredSampleCount),
+      sourceSampleIndices: this.sourceSampleIndices.subarray(0, coloredSampleCount),
+      srgbColors: this.srgbColors.subarray(0, coloredSampleCount * 3),
+      coloredSampleCount,
+      cameraCopySequence,
     }
   }
 }

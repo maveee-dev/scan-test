@@ -10,9 +10,10 @@ import { createInitialSpatialCoverageDebug } from '../services/spatialCoverageSe
 import { createInitialLivePerformanceDebug } from '../services/livePerformanceService'
 import { createInitialRawCameraDebug } from '../services/xrRawCameraService'
 import { createInitialRgbDepthRegistrationDebug } from '../services/rgbDepthRegistrationService'
+import { createInitialRealityColorFusionDebug } from '../services/realitySurfelColorFusionService'
 import type {
-  FinalizedSpatialScan,
   DenseMaskStabilizationOptions,
+  FinalizedScannerCapture,
   ScanSessionStatus,
   ScannerSessionState,
   ViewerPoseDebug,
@@ -36,6 +37,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   performance: createInitialLivePerformanceDebug(),
   rawCamera: createInitialRawCameraDebug(),
   rgbDepth: createInitialRgbDepthRegistrationDebug(),
+  realityColor: createInitialRealityColorFusionDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -44,6 +46,7 @@ const createInitialState = (): ScannerSessionState => ({
   domOverlayStatus: 'unknown',
   error: null,
   finalizedScan: null,
+  realityReconstruction: null,
 })
 
 function getErrorMessage(error: unknown, fallbackMessage: string): string {
@@ -180,6 +183,7 @@ export function useScannerSession(
                   performance: createInitialLivePerformanceDebug(),
                   rawCamera: createInitialRawCameraDebug(),
                   rgbDepth: createInitialRgbDepthRegistrationDebug(),
+                  realityColor: createInitialRealityColorFusionDebug(),
                 },
                 error:
                   currentState.error ??
@@ -194,6 +198,7 @@ export function useScannerSession(
               status: 'ready',
               debug: createInitialDebug(),
               finalizedScan: null,
+              realityReconstruction: null,
               error: null,
             }))
           },
@@ -211,6 +216,7 @@ export function useScannerSession(
           ...currentState,
           status: 'scanning',
           finalizedScan: null,
+          realityReconstruction: null,
           error: null,
         }))
       })
@@ -256,6 +262,7 @@ export function useScannerSession(
           status: 'ready',
           debug: createInitialDebug(),
           finalizedScan: null,
+          realityReconstruction: null,
           error: null,
         }))
       })
@@ -287,7 +294,7 @@ export function useScannerSession(
 
     void service
       .finish()
-      .then((finalizedScan: FinalizedSpatialScan) => {
+      .then((capture: FinalizedScannerCapture) => {
         if (!mountedRef.current || statusRef.current !== 'finishing') {
           return
         }
@@ -298,7 +305,8 @@ export function useScannerSession(
           status: 'finished',
           debug: createInitialDebug(),
           domOverlayStatus: 'unknown',
-          finalizedScan,
+          finalizedScan: capture.spatialScan,
+          realityReconstruction: capture.realityReconstruction,
           error: null,
         }))
       })

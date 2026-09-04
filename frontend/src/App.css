@@ -599,6 +599,17 @@
   background: rgba(204, 255, 0, 0.08);
 }
 
+.scanner-preview-mode-reality {
+  border-color: rgba(212, 239, 105, 0.42);
+  color: var(--ink);
+}
+
+.scanner-preview-mode-reality[aria-pressed="true"] {
+  border-color: var(--acid);
+  color: var(--acid);
+  background: rgba(212, 239, 105, 0.1);
+}
+
 .scanner-first-person-entry {
   width: auto;
   min-width: 0;
@@ -623,6 +634,11 @@
   font-family: var(--mono);
   font-size: 9px;
   line-height: 1.45;
+}
+
+.scanner-reality-summary {
+  display: grid;
+  gap: 4px;
 }
 
 .scanner-analysis-controls {
@@ -1481,6 +1497,10 @@
 
 .xr-rgb-depth-debug {
   border-color: rgba(111, 192, 255, 0.35);
+}
+
+.xr-reality-color-debug {
+  border-color: rgba(212, 239, 105, 0.35);
 }
 
 .xr-dom-overlay-rgbd-samples {

@@ -218,6 +218,7 @@ function ScannerPage({
             <ScannerFinishedView
               onDiscardScan={onDiscardScan}
               onStartNewScan={onStartNewScan}
+              realityReconstruction={sessionState.realityReconstruction}
               scan={sessionState.finalizedScan}
             />
           ) : (

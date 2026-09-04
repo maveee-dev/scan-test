@@ -599,6 +599,31 @@ export interface RgbDepthRegistrationDebug {
   validationSamples: readonly RgbDepthValidationSample[]
 }
 
+export interface RealityRgbColor {
+  readonly r: number
+  readonly g: number
+  readonly b: number
+}
+
+export type RealityReconstructionStatus = 'available' | 'unavailable' | 'empty'
+
+export interface RealityColorFusionDebug {
+  status: 'idle' | 'active' | 'unavailable' | 'empty'
+  colorSamplesAttempted: number
+  colorSamplesFused: number
+  unmatchedSurfelSamples: number
+  colorRejects: number
+  coloredSurfelCount: number
+  totalSurfelCount: number
+  colorCoveragePercentage: number
+  averageColorObservations: number
+  averageColorConfidence: number
+  colorFusionMs: number
+  cameraCapturesUsed: number
+  lastCameraSequence: number | null
+  lastColorTimestamp: number | null
+}
+
 export interface DenseCoverageMesh {
   revision: number
   vertexData: Float32Array
@@ -622,6 +647,15 @@ export interface FinalizedSurfaceSurfel {
   readonly coverageState: CoverageCellState
 }
 
+/** Reality-only geometry copy with the live surfel identity preserved. */
+export interface FinalizedRealityGeometrySurfel {
+  readonly id: number
+  readonly position: SpatialPoint
+  readonly normal: SpatialPoint
+  readonly radius: number
+  readonly geometryConfidence: number
+}
+
 export interface FinalizedSpatialScanStatistics {
   readonly uniqueCells: number
   readonly observedCells: number
@@ -638,6 +672,41 @@ export interface FinalizedSpatialScan {
   readonly coverage: readonly FinalizedCoverageCell[]
   readonly fusedSurface: readonly FinalizedSurfaceSurfel[]
   readonly statistics: FinalizedSpatialScanStatistics
+}
+
+export interface FinalizedRealitySurfel {
+  readonly id: number
+  readonly position: SpatialPoint
+  readonly normal: SpatialPoint
+  readonly radius: number
+  readonly colorRgb: RealityRgbColor | null
+  readonly colorSpace: 'srgb'
+  readonly geometryConfidence: number
+  readonly colorConfidence: number
+  readonly colorObservationCount: number
+}
+
+export interface RealityCaptureSummary {
+  readonly totalSurfels: number
+  readonly coloredSurfels: number
+  readonly colorCoveragePercentage: number
+  readonly averageColorObservations: number
+  readonly cameraCapturesUsed: number
+  readonly averageColorConfidence: number
+}
+
+export interface FinalizedRealityReconstruction {
+  readonly scanId: string
+  readonly referenceSpaceType: ScannerReferenceSpaceType
+  readonly status: RealityReconstructionStatus
+  readonly surfels: readonly FinalizedRealitySurfel[]
+  readonly bounds: SpatialBounds | null
+  readonly captureSummary: RealityCaptureSummary
+}
+
+export interface FinalizedScannerCapture {
+  readonly spatialScan: FinalizedSpatialScan
+  readonly realityReconstruction: FinalizedRealityReconstruction
 }
 
 export interface ViewerPoseDebug {
@@ -658,6 +727,7 @@ export interface ViewerPoseDebug {
   performance: LivePerformanceDebug
   rawCamera: RawCameraDebug
   rgbDepth: RgbDepthRegistrationDebug
+  realityColor: RealityColorFusionDebug
 }
 
 export interface ScannerSessionState {
@@ -666,4 +736,5 @@ export interface ScannerSessionState {
   domOverlayStatus: DomOverlayStatus
   error: string | null
   finalizedScan: FinalizedSpatialScan | null
+  realityReconstruction: FinalizedRealityReconstruction | null
 }
