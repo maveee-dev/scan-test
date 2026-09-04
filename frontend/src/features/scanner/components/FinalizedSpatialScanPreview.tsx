@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { CoverageCellState, FinalizedSpatialScan } from '../types'
@@ -6,11 +6,17 @@ import type {
   PlaneCandidate,
   RoomBoundaryResult,
   RoomAnalysisResult,
+  RoomSurfacePatch,
   RoomSurfaceConstructionResult,
   RoomStructureInterpretationResult,
   StructuralIntersectionResult,
 } from '../../room-analysis/types'
 import FirstPersonRoomViewer from './FirstPersonRoomViewer'
+import SurfaceCustomizationPanel from './SurfaceCustomizationPanel'
+import {
+  getSurfacePaintColor,
+  type SurfaceCustomizationMap,
+} from '../services/surfaceCustomizationService'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -49,16 +55,13 @@ const ROOM_BOUNDARY_COLORS = {
   'wall-ceiling': 0xd9a7ff,
   'wall-floor': 0x8ee2a8,
 } as const
-const ROOM_SURFACE_COLORS = {
-  wall: 0x56c7d9,
-  ceiling: 0xb89be8,
-  floor: 0x7ed69b,
-} as const
-
 type PreviewMode = 'coverage' | 'fused' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
+
+type RoomSurfaceMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
+type RoomSurfaceOutline = THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>
 
 function createPlaneGeometry(plane: PlaneCandidate): THREE.BufferGeometry {
   const { centroid, tangentU, tangentV, localBounds } = plane
@@ -300,10 +303,17 @@ function addRoomBoundary(
 function addRoomSurfaces(
   scene: THREE.Scene,
   construction: RoomSurfaceConstructionResult,
-): { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } {
+): {
+  geometries: THREE.BufferGeometry[]
+  materials: THREE.Material[]
+  surfaceMeshes: Map<string, RoomSurfaceMesh>
+  surfaceOutlines: Map<string, RoomSurfaceOutline>
+} {
   const group = new THREE.Group()
   const geometries: THREE.BufferGeometry[] = []
   const materials: THREE.Material[] = []
+  const surfaceMeshes = new Map<string, RoomSurfaceMesh>()
+  const surfaceOutlines = new Map<string, RoomSurfaceOutline>()
 
   for (const patch of construction.surfaces) {
     const positions = new Float32Array(patch.vertices3D.length * 3)
@@ -317,7 +327,7 @@ function addRoomSurfaces(
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setIndex([...patch.triangleIndices])
     const material = new THREE.MeshBasicMaterial({
-      color: ROOM_SURFACE_COLORS[patch.role],
+      color: getSurfacePaintColor(patch, {}),
       depthWrite: false,
       opacity: 0.58,
       side: THREE.DoubleSide,
@@ -326,17 +336,45 @@ function addRoomSurfaces(
     const mesh = new THREE.Mesh(geometry, material)
     const outlineGeometry = new THREE.EdgesGeometry(geometry)
     const outlineMaterial = new THREE.LineBasicMaterial({
-      color: ROOM_SURFACE_COLORS[patch.role],
+      color: getSurfacePaintColor(patch, {}),
       opacity: 0.82,
       transparent: true,
     })
-    group.add(mesh, new THREE.LineSegments(outlineGeometry, outlineMaterial))
+    const outline = new THREE.LineSegments(outlineGeometry, outlineMaterial)
+    group.add(mesh, outline)
     geometries.push(geometry, outlineGeometry)
     materials.push(material, outlineMaterial)
+    surfaceMeshes.set(patch.id, mesh)
+    surfaceOutlines.set(patch.id, outline)
   }
 
   scene.add(group)
-  return { geometries, materials }
+  return { geometries, materials, surfaceMeshes, surfaceOutlines }
+}
+
+function applyRoomSurfaceAppearance(
+  surfaces: readonly RoomSurfacePatch[],
+  meshes: ReadonlyMap<string, RoomSurfaceMesh>,
+  outlines: ReadonlyMap<string, RoomSurfaceOutline>,
+  customizations: SurfaceCustomizationMap,
+  selectedSurfaceId: string | null,
+): void {
+  const patchById = new Map<string, RoomSurfacePatch>(surfaces.map((surface) => [surface.id, surface]))
+  for (const [surfaceId, mesh] of meshes) {
+    const patch = patchById.get(surfaceId)
+    if (!patch) {
+      continue
+    }
+    const color = getSurfacePaintColor(patch, customizations)
+    const isSelected = surfaceId === selectedSurfaceId
+    mesh.material.color.set(color)
+    mesh.material.opacity = isSelected ? 0.78 : 0.58
+    const outline = outlines.get(surfaceId)
+    if (outline) {
+      outline.material.color.set(isSelected ? '#ffffff' : color)
+      outline.material.opacity = isSelected ? 1 : 0.82
+    }
+  }
 }
 
 function createFusedSurfaceGeometry(
@@ -392,11 +430,45 @@ function FinalizedSpatialScanPreview({
 }: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const resetViewRef = useRef<(() => void) | null>(null)
+  const roomSurfaceMeshesRef = useRef<Map<string, RoomSurfaceMesh>>(new Map())
+  const roomSurfaceOutlinesRef = useRef<Map<string, RoomSurfaceOutline>>(new Map())
   const [mode, setMode] = useState<PreviewMode>('coverage')
+  const [selectedSurfaceId, setSelectedSurfaceId] = useState<string | null>(null)
+  const [surfaceCustomizations, setSurfaceCustomizations] = useState<SurfaceCustomizationMap>({})
+
+  const selectSurface = useCallback((surfaceId: string | null): void => {
+    setSelectedSurfaceId(surfaceId)
+  }, [])
+
+  const setSurfacePaintColor = useCallback((surfaceId: string, color: string): void => {
+    setSurfaceCustomizations((current) => ({
+      ...current,
+      [surfaceId]: { ...current[surfaceId], paintColor: color },
+    }))
+  }, [])
+
+  const resetSelectedSurface = useCallback((): void => {
+    if (!selectedSurfaceId) {
+      return
+    }
+    setSurfaceCustomizations((current) => {
+      const next = { ...current }
+      delete next[selectedSurfaceId]
+      return next
+    })
+  }, [selectedSurfaceId])
+
+  const resetAllSurfaceColors = useCallback((): void => {
+    setSurfaceCustomizations({})
+  }, [])
+
+  const selectedSurface = roomSurfaceConstruction?.surfaces.find((surface) => surface.id === selectedSurfaceId) ?? null
 
   useEffect(() => {
     const canvas = canvasRef.current
     const hasSpatialData = scan.coverage.length > 0 || scan.fusedSurface.length > 0
+    roomSurfaceMeshesRef.current.clear()
+    roomSurfaceOutlinesRef.current.clear()
     if (!canvas || !hasSpatialData || mode === 'first-person-room') {
       return undefined
     }
@@ -493,7 +565,12 @@ function FinalizedSpatialScanPreview({
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
-    let roomSurfaceResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
+    let roomSurfaceResources: {
+      geometries: THREE.BufferGeometry[]
+      materials: THREE.Material[]
+      surfaceMeshes: Map<string, RoomSurfaceMesh>
+      surfaceOutlines: Map<string, RoomSurfaceOutline>
+    } | null = null
 
     if (mode === 'coverage') {
       coverageGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -528,7 +605,45 @@ function FinalizedSpatialScanPreview({
       boundaryResources = addRoomBoundary(scene, analysisResult, structuralInterpretation, roomBoundary)
     } else if (mode === 'room-surfaces' && roomSurfaceConstruction) {
       roomSurfaceResources = addRoomSurfaces(scene, roomSurfaceConstruction)
+      roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
+      roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
     }
+
+    const selectableMeshes = roomSurfaceResources?.surfaceMeshes ?? new Map<string, RoomSurfaceMesh>()
+    const selectionRaycaster = new THREE.Raycaster()
+    const selectionPointer = new THREE.Vector2()
+    let selectionPointerStart: { id: number; x: number; y: number } | null = null
+    const onSelectionPointerDown = (event: PointerEvent): void => {
+      if (mode !== 'room-surfaces' || event.button !== 0) {
+        return
+      }
+      selectionPointerStart = { id: event.pointerId, x: event.clientX, y: event.clientY }
+    }
+    const onSelectionPointerUp = (event: PointerEvent): void => {
+      const start = selectionPointerStart
+      selectionPointerStart = null
+      if (!start || start.id !== event.pointerId || mode !== 'room-surfaces' || selectableMeshes.size === 0) {
+        return
+      }
+      const movedDistance = Math.hypot(event.clientX - start.x, event.clientY - start.y)
+      if (movedDistance > 7) {
+        return
+      }
+      const bounds = canvas.getBoundingClientRect()
+      if (bounds.width <= 0 || bounds.height <= 0) {
+        return
+      }
+      selectionPointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+      selectionPointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+      selectionRaycaster.setFromCamera(selectionPointer, camera)
+      const hit = selectionRaycaster.intersectObjects([...selectableMeshes.values()], false)[0]
+      const hitEntry = hit
+        ? [...selectableMeshes.entries()].find(([, mesh]) => mesh === hit.object)
+        : undefined
+      selectSurface(hitEntry?.[0] ?? null)
+    }
+    canvas.addEventListener('pointerdown', onSelectionPointerDown)
+    canvas.addEventListener('pointerup', onSelectionPointerUp)
 
     const center = new THREE.Vector3(
       (minimum.x + maximum.x) / 2,
@@ -597,6 +712,10 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources?.geometries.forEach((surfaceGeometry) => surfaceGeometry.dispose())
       roomSurfaceResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       renderer.dispose()
+      canvas.removeEventListener('pointerdown', onSelectionPointerDown)
+      canvas.removeEventListener('pointerup', onSelectionPointerUp)
+      roomSurfaceMeshesRef.current.clear()
+      roomSurfaceOutlinesRef.current.clear()
       if (pointCloud) {
         scene.remove(pointCloud)
       }
@@ -604,7 +723,17 @@ function FinalizedSpatialScanPreview({
         scene.remove(fusedSurface)
       }
     }
-  }, [analysisResult, mode, roomBoundary, roomSurfaceConstruction, scan, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, mode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
+
+  useEffect(() => {
+    applyRoomSurfaceAppearance(
+      roomSurfaceConstruction?.surfaces ?? [],
+      roomSurfaceMeshesRef.current,
+      roomSurfaceOutlinesRef.current,
+      surfaceCustomizations,
+      selectedSurfaceId,
+    )
+  }, [roomSurfaceConstruction, selectedSurfaceId, surfaceCustomizations])
 
   return (
     <div className="scanner-scan-preview">
@@ -612,6 +741,12 @@ function FinalizedSpatialScanPreview({
         roomSurfaceConstruction ? (
           <FirstPersonRoomViewer
             construction={roomSurfaceConstruction}
+            customizations={surfaceCustomizations}
+            onPaintColorChange={setSurfacePaintColor}
+            onResetAllColors={resetAllSurfaceColors}
+            onResetSelectedSurface={resetSelectedSurface}
+            onSelectSurface={selectSurface}
+            selectedSurfaceId={selectedSurfaceId}
             referenceSpaceType={scan.referenceSpaceType}
             onExit={() => setMode('room-surfaces')}
           />
@@ -731,6 +866,15 @@ function FinalizedSpatialScanPreview({
           </button>
         ) : null}
       </div>
+      {mode === 'room-surfaces' && selectedSurface ? (
+        <SurfaceCustomizationPanel
+          surface={selectedSurface}
+          customizations={surfaceCustomizations}
+          onPaintColorChange={(color) => setSurfacePaintColor(selectedSurface.id, color)}
+          onResetSelected={resetSelectedSurface}
+          onResetAll={resetAllSurfaceColors}
+        />
+      ) : null}
       {mode === 'planes' && analysisResult?.planes.length === 0 ? (
         <p className="scanner-scan-preview-note">
           No major geometric plane candidates were detected in this scan.

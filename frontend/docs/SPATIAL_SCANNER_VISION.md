@@ -664,6 +664,33 @@ remain missing; entering the viewer does not imply that the room is closed or
 automatically completed. The viewer uses simple deterministic role materials,
 basic lighting, reusable meshes, and explicit disposal when the mode ends.
 
+M8.0 adds a presentation-only customization layer after room-surface
+construction:
+
+```text
+bounded M7.4 room-surface patches
+        |
+stable surface-ID selection by mesh raycast
+        |
+in-memory surface customization state
+        |
+paint color presentation in Room Surfaces and First-Person Room
+        |
+future wallpaper / tile / product material selection
+```
+
+Customization state is separate from the immutable M7.4 geometry and is keyed
+by the generated patch ID. A tap or click on an actual patch selects one
+surface; a drag remains a camera/orbit gesture. The selected patch exposes its
+role, area, confidence, and current paint color, while a small preset/custom
+color control updates only that patch's render material. Room Surfaces and the
+first-person viewer receive the same in-memory state, so a color remains
+consistent while navigating the current finalized scan. Reset controls clear
+customization state only; they do not rebuild geometry, alter collision
+surfaces, or change scan/evaluation data. Only generated M7.4 patches are
+selectable, so missing room surfaces remain missing. M8.0 does not add a
+product catalog, material estimation, persistence, or pricing.
+
 The post-scan geometry direction is now:
 
 ```text

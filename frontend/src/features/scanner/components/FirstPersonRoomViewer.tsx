@@ -8,9 +8,20 @@ import {
   isFiniteNavigationPoint,
   resolveWallCollision,
 } from '../services/firstPersonNavigationService'
+import SurfaceCustomizationPanel from './SurfaceCustomizationPanel'
+import {
+  getSurfacePaintColor,
+  type SurfaceCustomizationMap,
+} from '../services/surfaceCustomizationService'
 
 interface FirstPersonRoomViewerProps {
   construction: RoomSurfaceConstructionResult
+  customizations: SurfaceCustomizationMap
+  onPaintColorChange: (surfaceId: string, color: string) => void
+  onResetAllColors: () => void
+  onResetSelectedSurface: () => void
+  onSelectSurface: (surfaceId: string | null) => void
+  selectedSurfaceId: string | null
   referenceSpaceType?: 'local-floor' | 'local'
   onExit: () => void
 }
@@ -42,6 +53,13 @@ interface MovementButtons {
   strafe: number
 }
 
+interface PatchMeshResource {
+  surfaceId: string
+  mesh: THREE.Mesh
+  geometry: THREE.BufferGeometry
+  material: THREE.MeshStandardMaterial
+}
+
 const MAX_PIXEL_RATIO = 2
 const EYE_HEIGHT_METERS = 1.6
 const MOVE_SPEED_METERS_PER_SECOND = 0.9
@@ -50,12 +68,6 @@ const MAX_PITCH_RADIANS = Math.PI * 0.47
 const COLLISION_RADIUS_METERS = 0.16
 const CAMERA_NEAR_METERS = 0.04
 const CAMERA_FAR_METERS = 45
-const ROOM_COLORS = {
-  wall: 0xc8e1e4,
-  ceiling: 0xd8cceb,
-  floor: 0xc9e3cf,
-} as const
-
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
@@ -180,7 +192,7 @@ function calculateInitialCamera(
   return { position, yaw, pitch }
 }
 
-function createPatchMesh(patch: RoomSurfacePatch): { mesh: THREE.Mesh; geometry: THREE.BufferGeometry; material: THREE.MeshStandardMaterial } {
+function createPatchMesh(patch: RoomSurfacePatch): PatchMeshResource {
   const positions = new Float32Array(patch.vertices3D.length * 3)
   patch.vertices3D.forEach((point, index) => {
     const offset = index * 3
@@ -193,21 +205,32 @@ function createPatchMesh(patch: RoomSurfacePatch): { mesh: THREE.Mesh; geometry:
   geometry.setIndex([...patch.triangleIndices])
   geometry.computeVertexNormals()
   const material = new THREE.MeshStandardMaterial({
-    color: ROOM_COLORS[patch.role],
+    color: getSurfacePaintColor(patch, {}),
     roughness: 0.92,
     metalness: 0,
     side: THREE.DoubleSide,
   })
-  return { mesh: new THREE.Mesh(geometry, material), geometry, material }
+  return { surfaceId: patch.id, mesh: new THREE.Mesh(geometry, material), geometry, material }
 }
 
 function formatPosition(point: SpatialPoint): string {
   return `${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}`
 }
 
-function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'local' }: FirstPersonRoomViewerProps) {
+function FirstPersonRoomViewer({
+  construction,
+  customizations,
+  onExit,
+  onPaintColorChange,
+  onResetAllColors,
+  onResetSelectedSurface,
+  onSelectSurface,
+  referenceSpaceType = 'local',
+  selectedSurfaceId,
+}: FirstPersonRoomViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const resetRef = useRef<(() => void) | null>(null)
+  const patchResourcesRef = useRef<Map<string, PatchMeshResource>>(new Map())
   const movementButtonsRef = useRef<MovementButtons>({ forward: 0, strafe: 0 })
   const keyboardRef = useRef<Set<string>>(new Set())
   const [showDebug, setShowDebug] = useState(false)
@@ -256,6 +279,7 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
       scene.add(resource.mesh)
       return resource
     })
+    patchResourcesRef.current = new Map(patchResources.map((resource) => [resource.surfaceId, resource]))
     let collisionCount = 0
     let lastCollisionSurfaceId: string | null = null
     let lastFrameTime = performance.now()
@@ -265,8 +289,13 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
     let fps = 0
     let animationFrameId = 0
     let pointerId: number | null = null
+    let pointerStartX = 0
+    let pointerStartY = 0
     let previousPointerX = 0
     let previousPointerY = 0
+    let pointerMoved = false
+    const selectionRaycaster = new THREE.Raycaster()
+    const selectionPointer = new THREE.Vector2()
 
     const applyCamera = (): void => {
       camera.position.set(navigation.position.x, navigation.position.y, navigation.position.z)
@@ -304,8 +333,11 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
       }
       event.preventDefault()
       pointerId = event.pointerId
+      pointerStartX = event.clientX
+      pointerStartY = event.clientY
       previousPointerX = event.clientX
       previousPointerY = event.clientY
+      pointerMoved = false
       canvas.setPointerCapture(event.pointerId)
     }
     const onPointerMove = (event: PointerEvent): void => {
@@ -317,6 +349,9 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
       const deltaY = event.clientY - previousPointerY
       previousPointerX = event.clientX
       previousPointerY = event.clientY
+      if (Math.hypot(event.clientX - pointerStartX, event.clientY - pointerStartY) > 7) {
+        pointerMoved = true
+      }
       navigation.yaw -= deltaX * LOOK_SENSITIVITY_RADIANS_PER_PIXEL
       navigation.pitch = clamp(
         navigation.pitch - deltaY * LOOK_SENSITIVITY_RADIANS_PER_PIXEL,
@@ -332,6 +367,19 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
       pointerId = null
       if (canvas.hasPointerCapture(event.pointerId)) {
         canvas.releasePointerCapture(event.pointerId)
+      }
+      if (!pointerMoved) {
+        const bounds = canvas.getBoundingClientRect()
+        if (bounds.width > 0 && bounds.height > 0) {
+          selectionPointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+          selectionPointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+          selectionRaycaster.setFromCamera(selectionPointer, camera)
+          const hit = selectionRaycaster.intersectObjects(patchResources.map((resource) => resource.mesh), false)[0]
+          const selectedResource = hit
+            ? patchResources.find((resource) => resource.mesh === hit.object)
+            : undefined
+          onSelectSurface(selectedResource?.surfaceId ?? null)
+        }
       }
     }
     const onContextMenu = (event: MouseEvent): void => {
@@ -407,9 +455,23 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
         geometry.dispose()
         material.dispose()
       })
+      patchResourcesRef.current.clear()
       renderer.dispose()
     }
-  }, [construction, initialCamera])
+  }, [construction, initialCamera, onSelectSurface])
+
+  useEffect(() => {
+    for (const [surfaceId, resource] of patchResourcesRef.current) {
+      const patch = construction.surfaces.find((surface) => surface.id === surfaceId)
+      if (!patch) {
+        continue
+      }
+      const isSelected = surfaceId === selectedSurfaceId
+      resource.material.color.set(getSurfacePaintColor(patch, customizations))
+      resource.material.emissive.set(isSelected ? '#ffffff' : '#000000')
+      resource.material.setValues({ emissiveIntensity: isSelected ? 0.24 : 0 })
+    }
+  }, [construction, customizations, selectedSurfaceId])
 
   if (construction.surfaces.length === 0) {
     return (
@@ -427,6 +489,7 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
   const ceilingCount = construction.surfaces.filter((patch) => patch.role === 'ceiling').length
   const floorCount = construction.surfaces.filter((patch) => patch.role === 'floor').length
   const bounds = calculateBounds(construction.surfaces)
+  const selectedSurface = construction.surfaces.find((surface) => surface.id === selectedSurfaceId) ?? null
   return (
     <div className="first-person-room-viewer">
       <canvas ref={canvasRef} className="first-person-room-canvas" aria-label="First-person reconstructed room viewer" />
@@ -446,6 +509,17 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
           {showDebug ? 'Hide Details' : 'Details'}
         </button>
       </div>
+      {selectedSurface ? (
+        <div className="first-person-room-customization">
+          <SurfaceCustomizationPanel
+            surface={selectedSurface}
+            customizations={customizations}
+            onPaintColorChange={(color) => onPaintColorChange(selectedSurface.id, color)}
+            onResetSelected={onResetSelectedSurface}
+            onResetAll={onResetAllColors}
+          />
+        </div>
+      ) : null}
       <div className="first-person-room-joystick" aria-label="Room movement controls">
         <button type="button" aria-label="Move forward" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); movementButtonsRef.current.forward = 1 }} onPointerUp={() => { movementButtonsRef.current.forward = 0 }} onPointerCancel={() => { movementButtonsRef.current.forward = 0 }}>↑</button>
         <button type="button" aria-label="Move left" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); movementButtonsRef.current.strafe = -1 }} onPointerUp={() => { movementButtonsRef.current.strafe = 0 }} onPointerCancel={() => { movementButtonsRef.current.strafe = 0 }}>←</button>
@@ -459,6 +533,7 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
           <span>Initial {formatPosition(initialCamera.position)} | eye height {EYE_HEIGHT_METERS.toFixed(2)} m | speed {MOVE_SPEED_METERS_PER_SECOND.toFixed(2)} m/s</span>
           <span>Bounds {bounds ? `${formatPosition(bounds.minimum)} → ${formatPosition(bounds.maximum)}` : 'n/a'} | walls {wallCount} | ceiling {ceilingCount} | floor {floorCount}</span>
           <span>Collision {wallCount > 0 ? 'enabled' : 'disabled'} | wall patches {wallCount} | events {hud.collisionCount} | last {hud.lastCollisionSurfaceId ?? 'none'} | FPS {hud.fps.toFixed(0)} | elapsed {hud.elapsedSeconds.toFixed(1)} s</span>
+          <span>Selected {selectedSurface?.id ?? 'none'} | paint {selectedSurface ? getSurfacePaintColor(selectedSurface, customizations) : 'n/a'} | customizations {Object.keys(customizations).length}</span>
         </div>
       ) : null}
     </div>
