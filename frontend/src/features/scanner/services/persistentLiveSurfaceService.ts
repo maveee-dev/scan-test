@@ -429,6 +429,27 @@ export class PersistentLiveSurfaceService {
   }
 
   /**
+   * Exposes the normal already estimated for a current dense-frame slot.
+   * Reality-only refinement consumes this read-only result after geometry
+   * fusion; it does not perform another normal estimate or spatial match.
+   */
+  public copySampleNormal(index: number, target: SpatialPoint): boolean {
+    if (
+      index < 0 ||
+      index >= this.normalValidity.length ||
+      this.normalValidity[index] !== 1
+    ) {
+      return false
+    }
+
+    const offset = index * 3
+    target.x = this.sampleNormals[offset]
+    target.y = this.sampleNormals[offset + 1]
+    target.z = this.sampleNormals[offset + 2]
+    return true
+  }
+
+  /**
    * Copies confirmed measured geometry for FinalizedSpatialScan. The returned
    * values contain no service, spatial-index, or GPU references and are
    * independently safe to retain after active-session cleanup.

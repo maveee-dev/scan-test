@@ -37,6 +37,7 @@ import {
   RgbDepthRegistrationService,
 } from './rgbDepthRegistrationService'
 import { RealitySurfelColorFusionService } from './realitySurfelColorFusionService'
+import { DenseRealityReconstructionService } from './denseRealityReconstructionService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -159,6 +160,8 @@ export class XRSessionService {
   )
 
   private readonly realitySurfelColorFusionService = new RealitySurfelColorFusionService()
+
+  private readonly denseRealityReconstructionService = new DenseRealityReconstructionService()
 
   private referenceSpace: XRReferenceSpace | null = null
 
@@ -291,6 +294,7 @@ export class XRSessionService {
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
+    this.denseRealityReconstructionService.reset()
     this.realityCaptureEnabled = false
     this.rawCameraCopyPhase = 0
 
@@ -351,11 +355,17 @@ export class XRSessionService {
         persistentSurfaceDiagnostics.surfelCapacity,
         persistentSurfaceDiagnostics.capacityReached,
       )
+      const denseRealityReconstruction = this.denseRealityReconstructionService.createSnapshot(
+        finalizedScan.id,
+        finalizedScan.referenceSpaceType,
+        this.rawCameraService.isAvailable(),
+      )
 
       await this.endActiveSession(session)
       return {
         spatialScan: finalizedScan,
         realityReconstruction,
+        denseRealityReconstruction,
       }
     } catch (error) {
       if (this.isActiveSession(session)) {
@@ -378,6 +388,7 @@ export class XRSessionService {
     this.persistentLiveSurfaceService.dispose()
     this.rawCameraService.dispose()
     this.realitySurfelColorFusionService.dispose()
+    this.denseRealityReconstructionService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -716,6 +727,13 @@ export class XRSessionService {
               time,
               persistentSurfaceResult.activeSurfelCount,
             )
+            this.denseRealityReconstructionService.process(
+              currentRgbDepthResult,
+              densePointFrame,
+              this.persistentLiveSurfaceService,
+              this.position,
+              time,
+            )
           }
 
           const persistentRenderStartedAt = getPerformanceTimestamp()
@@ -855,6 +873,7 @@ export class XRSessionService {
       rawCamera: this.rawCameraService.getDiagnostics(this.rawCameraDebugVisible),
       rgbDepth: this.rgbDepthRegistrationService.getDiagnostics(),
       realityColor: this.realitySurfelColorFusionService.getDiagnostics(),
+      denseReality: this.denseRealityReconstructionService.getDiagnostics(),
     }
   }
 
@@ -899,6 +918,7 @@ export class XRSessionService {
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
+    this.denseRealityReconstructionService.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -991,6 +1011,7 @@ export class XRSessionService {
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
+    this.denseRealityReconstructionService.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

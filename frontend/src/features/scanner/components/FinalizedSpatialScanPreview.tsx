@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type {
   CoverageCellState,
+  FinalizedDenseRealityReconstruction,
   FinalizedRealityReconstruction,
   FinalizedSpatialScan,
 } from '../types'
@@ -29,6 +30,7 @@ import {
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
+  denseRealityReconstruction?: FinalizedDenseRealityReconstruction | null
   realityReconstruction?: FinalizedRealityReconstruction | null
   analysisResult?: RoomAnalysisResult | null
   roomBoundary?: RoomBoundaryResult | null
@@ -444,6 +446,7 @@ function createFusedSurfaceGeometry(
 
 function FinalizedSpatialScanPreview({
   analysisResult,
+  denseRealityReconstruction,
   realityReconstruction,
   roomBoundary,
   roomSurfaceConstruction,
@@ -462,6 +465,11 @@ function FinalizedSpatialScanPreview({
   const [realityRenderMode, setRealityRenderMode] = useState<RealitySurfaceRenderMode>('dense')
   const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
   const [realityRuntimeStats, setRealityRuntimeStats] = useState<RealityRuntimeStats | null>(null)
+
+  const preferredRealityReconstruction = denseRealityReconstruction?.status === 'available' &&
+      denseRealityReconstruction.surfels.length > 0
+    ? denseRealityReconstruction
+    : realityReconstruction
 
   const selectSurface = useCallback((surfaceId: string | null): void => {
     setSelectedSurfaceId(surfaceId)
@@ -566,7 +574,7 @@ function FinalizedSpatialScanPreview({
     let pointsForBounds = mode === 'fused'
       ? scan.fusedSurface.map((surfel) => surfel.position)
       : mode === 'reality-preview'
-        ? realityReconstruction?.surfels.map((surfel) => surfel.position) ?? []
+        ? preferredRealityReconstruction?.surfels.map((surfel) => surfel.position) ?? []
       : mode === 'planes' || mode === 'structural'
         ? analysisResult?.planes.flatMap((plane) => [plane.bounds.min, plane.bounds.max]) ?? []
         : mode === 'intersections'
@@ -658,9 +666,9 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources = addRoomSurfaces(scene, roomSurfaceConstruction)
       roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
       roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
-    } else if (mode === 'reality-preview' && realityReconstruction) {
+    } else if (mode === 'reality-preview' && preferredRealityReconstruction) {
       realityResources = createRealitySurfaceRenderResources(
-        realityReconstruction,
+        preferredRealityReconstruction,
         realityRenderMode,
       )
       scene.add(realityResources.group)
@@ -813,7 +821,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityResources.group)
       }
     }
-  }, [analysisResult, mode, realityReconstruction, realityRenderMode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, denseRealityReconstruction, mode, preferredRealityReconstruction, realityReconstruction, realityRenderMode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -881,7 +889,7 @@ function FinalizedSpatialScanPreview({
               Fused Surface Data
             </button>
           ) : null}
-          {realityReconstruction ? (
+          {preferredRealityReconstruction ? (
             <button
               type="button"
               className="scanner-preview-mode scanner-preview-mode-reality"
@@ -1001,39 +1009,60 @@ function FinalizedSpatialScanPreview({
           No bounded room-surface patches were constructed from the selected structural surfaces.
         </p>
       ) : null}
-      {mode === 'reality-preview' && realityReconstruction ? (
+      {mode === 'reality-preview' && preferredRealityReconstruction ? (
         <div className="scanner-scan-preview-note scanner-reality-summary">
-          <strong>Reality Reconstruction: {realityReconstruction.status}</strong>
+          <strong>Reality Reconstruction: {preferredRealityReconstruction.status}</strong>
+          {denseRealityReconstruction?.status === 'available' && denseRealityReconstruction.surfels.length > 0 ? (
+            <span>Dense Reality geometry is active; structural Reality surfels remain available as a reference.</span>
+          ) : null}
+          {denseRealityReconstruction?.status === 'available' ? (
+            <span>
+              Structural Reality {realityReconstruction?.captureSummary.totalSurfels ?? 0} surfels / median {realityReconstruction?.captureSummary.medianNearestNeighborSpacingMeters === null || realityReconstruction?.captureSummary.medianNearestNeighborSpacingMeters === undefined
+                ? 'N/A'
+                : `${realityReconstruction.captureSummary.medianNearestNeighborSpacingMeters.toFixed(3)} m`} / p90 {realityReconstruction?.captureSummary.p90NearestNeighborSpacingMeters === null || realityReconstruction?.captureSummary.p90NearestNeighborSpacingMeters === undefined
+                  ? 'N/A'
+                  : `${realityReconstruction.captureSummary.p90NearestNeighborSpacingMeters.toFixed(3)} m`} · Dense Reality {denseRealityReconstruction.surfels.length} stable / {denseRealityReconstruction.fusionDiagnostics.activeSampleCount} active / median {denseRealityReconstruction.captureSummary.medianNearestNeighborSpacingMeters === null
+                    ? 'N/A'
+                    : `${denseRealityReconstruction.captureSummary.medianNearestNeighborSpacingMeters.toFixed(3)} m`} / p90 {denseRealityReconstruction.captureSummary.p90NearestNeighborSpacingMeters === null
+                      ? 'N/A'
+                      : `${denseRealityReconstruction.captureSummary.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
+            </span>
+          ) : null}
+          {denseRealityReconstruction?.status === 'available' ? (
+            <span>
+              Dense created {denseRealityReconstruction.fusionDiagnostics.createdSampleCount} · fused {denseRealityReconstruction.fusionDiagnostics.fusedSampleCount} · rejected {denseRealityReconstruction.fusionDiagnostics.rejectedSampleCount} · capacity {denseRealityReconstruction.fusionDiagnostics.capacityUtilizationPercentage.toFixed(1)}%
+            </span>
+          ) : null}
           <span>
-            Colored surfels {realityReconstruction.captureSummary.coloredSurfels} / {realityReconstruction.captureSummary.totalSurfels}
+            Colored surfels {preferredRealityReconstruction.captureSummary.coloredSurfels} / {preferredRealityReconstruction.captureSummary.totalSurfels}
             {' · '}
-            {realityReconstruction.captureSummary.colorCoveragePercentage.toFixed(1)}% color coverage
+            {preferredRealityReconstruction.captureSummary.colorCoveragePercentage.toFixed(1)}% color coverage
             {' · '}
-            {realityReconstruction.captureSummary.cameraCapturesUsed} camera captures
+            {preferredRealityReconstruction.captureSummary.cameraCapturesUsed} camera captures
           </span>
           <span>
-            Average spacing {realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters === null
+            Average spacing {preferredRealityReconstruction.captureSummary.averageNearestNeighborSpacingMeters === null
               ? 'N/A'
-              : `${realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters.toFixed(3)} m`}
+              : `${preferredRealityReconstruction.captureSummary.averageNearestNeighborSpacingMeters.toFixed(3)} m`}
             {' / '}
-            median {realityReconstruction.captureSummary.medianNearestNeighborSpacingMeters === null
+            median {preferredRealityReconstruction.captureSummary.medianNearestNeighborSpacingMeters === null
               ? 'N/A'
-              : `${realityReconstruction.captureSummary.medianNearestNeighborSpacingMeters.toFixed(3)} m`}
+              : `${preferredRealityReconstruction.captureSummary.medianNearestNeighborSpacingMeters.toFixed(3)} m`}
             {' / '}
-            p90 {realityReconstruction.captureSummary.p90NearestNeighborSpacingMeters === null
+            p90 {preferredRealityReconstruction.captureSummary.p90NearestNeighborSpacingMeters === null
               ? 'N/A'
-              : `${realityReconstruction.captureSummary.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
+              : `${preferredRealityReconstruction.captureSummary.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
             {' · '}
-            estimated gaps {realityReconstruction.captureSummary.approximateUncoveredGapMeters === null
+            estimated gaps {preferredRealityReconstruction.captureSummary.approximateUncoveredGapMeters === null
               ? 'N/A'
-              : `${realityReconstruction.captureSummary.approximateUncoveredGapMeters.toFixed(3)} m`}
+              : `${preferredRealityReconstruction.captureSummary.approximateUncoveredGapMeters.toFixed(3)} m`}
             {' / '}
-            small-gap regions {realityReconstruction.captureSummary.estimatedSmallGapRegionCount}
+            small-gap regions {preferredRealityReconstruction.captureSummary.estimatedSmallGapRegionCount}
             {' / '}
-            large unsupported gaps {realityReconstruction.captureSummary.estimatedLargeUnsupportedGapCount}
+            large unsupported gaps {preferredRealityReconstruction.captureSummary.estimatedLargeUnsupportedGapCount}
             {' / '}
-            capacity {realityReconstruction.captureSummary.capacityUtilizationPercentage.toFixed(1)}%
-            {realityReconstruction.captureSummary.capacityReached ? ' (reached)' : ''}
+            capacity {preferredRealityReconstruction.captureSummary.capacityUtilizationPercentage.toFixed(1)}%
+            {preferredRealityReconstruction.captureSummary.capacityReached ? ' (reached)' : ''}
           </span>
           {import.meta.env.DEV ? (
             <>
@@ -1084,7 +1113,7 @@ function FinalizedSpatialScanPreview({
               ) : null}
             </>
           ) : null}
-          {realityReconstruction.status !== 'available' ? (
+          {preferredRealityReconstruction.status !== 'available' ? (
             <span>Original camera colors were not retained for this scan; structural review remains available.</span>
           ) : null}
         </div>

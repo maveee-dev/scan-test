@@ -11,6 +11,7 @@ import { createInitialLivePerformanceDebug } from '../services/livePerformanceSe
 import { createInitialRawCameraDebug } from '../services/xrRawCameraService'
 import { createInitialRgbDepthRegistrationDebug } from '../services/rgbDepthRegistrationService'
 import { createInitialRealityColorFusionDebug } from '../services/realitySurfelColorFusionService'
+import { createInitialDenseRealityFusionDebug } from '../services/denseRealityReconstructionService'
 import type {
   DenseMaskStabilizationOptions,
   FinalizedScannerCapture,
@@ -38,6 +39,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
   rawCamera: createInitialRawCameraDebug(),
   rgbDepth: createInitialRgbDepthRegistrationDebug(),
   realityColor: createInitialRealityColorFusionDebug(),
+  denseReality: createInitialDenseRealityFusionDebug(),
 })
 
 const createInitialState = (): ScannerSessionState => ({
@@ -47,6 +49,7 @@ const createInitialState = (): ScannerSessionState => ({
   error: null,
   finalizedScan: null,
   realityReconstruction: null,
+  denseRealityReconstruction: null,
 })
 
 function getErrorMessage(error: unknown, fallbackMessage: string): string {
@@ -184,6 +187,7 @@ export function useScannerSession(
                   rawCamera: createInitialRawCameraDebug(),
                   rgbDepth: createInitialRgbDepthRegistrationDebug(),
                   realityColor: createInitialRealityColorFusionDebug(),
+                  denseReality: createInitialDenseRealityFusionDebug(),
                 },
                 error:
                   currentState.error ??
@@ -199,6 +203,7 @@ export function useScannerSession(
               debug: createInitialDebug(),
               finalizedScan: null,
               realityReconstruction: null,
+              denseRealityReconstruction: null,
               error: null,
             }))
           },
@@ -217,6 +222,7 @@ export function useScannerSession(
           status: 'scanning',
           finalizedScan: null,
           realityReconstruction: null,
+          denseRealityReconstruction: null,
           error: null,
         }))
       })
@@ -263,6 +269,7 @@ export function useScannerSession(
           debug: createInitialDebug(),
           finalizedScan: null,
           realityReconstruction: null,
+          denseRealityReconstruction: null,
           error: null,
         }))
       })
@@ -307,6 +314,7 @@ export function useScannerSession(
           domOverlayStatus: 'unknown',
           finalizedScan: capture.spatialScan,
           realityReconstruction: capture.realityReconstruction,
+          denseRealityReconstruction: capture.denseRealityReconstruction,
           error: null,
         }))
       })

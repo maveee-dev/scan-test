@@ -720,9 +720,38 @@ export interface FinalizedRealityReconstruction {
   readonly captureSummary: RealityCaptureSummary
 }
 
+export interface DenseRealityFusionDebug {
+  readonly status: 'idle' | 'active' | 'empty'
+  readonly inputSampleCount: number
+  readonly inputColorSampleCount: number
+  readonly createdSampleCount: number
+  readonly fusedSampleCount: number
+  readonly rejectedSampleCount: number
+  readonly activeSampleCount: number
+  readonly stableSampleCount: number
+  readonly capacity: number
+  readonly capacityUtilizationPercentage: number
+  readonly capacityReached: boolean
+  readonly fusionMs: number
+  readonly lastCaptureTimestamp: number | null
+  readonly lastCameraSequence: number | null
+  readonly cameraCapturesUsed: number
+}
+
+export interface FinalizedDenseRealityReconstruction {
+  readonly scanId: string
+  readonly referenceSpaceType: ScannerReferenceSpaceType
+  readonly status: RealityReconstructionStatus
+  readonly surfels: readonly FinalizedRealitySurfel[]
+  readonly bounds: SpatialBounds | null
+  readonly captureSummary: RealityCaptureSummary
+  readonly fusionDiagnostics: DenseRealityFusionDebug
+}
+
 export interface FinalizedScannerCapture {
   readonly spatialScan: FinalizedSpatialScan
   readonly realityReconstruction: FinalizedRealityReconstruction
+  readonly denseRealityReconstruction: FinalizedDenseRealityReconstruction | null
 }
 
 export interface ViewerPoseDebug {
@@ -744,6 +773,7 @@ export interface ViewerPoseDebug {
   rawCamera: RawCameraDebug
   rgbDepth: RgbDepthRegistrationDebug
   realityColor: RealityColorFusionDebug
+  denseReality: DenseRealityFusionDebug
 }
 
 export interface ScannerSessionState {
@@ -753,4 +783,5 @@ export interface ScannerSessionState {
   error: string | null
   finalizedScan: FinalizedSpatialScan | null
   realityReconstruction: FinalizedRealityReconstruction | null
+  denseRealityReconstruction: FinalizedDenseRealityReconstruction | null
 }

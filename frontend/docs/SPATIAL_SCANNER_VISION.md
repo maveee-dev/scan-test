@@ -1070,3 +1070,46 @@ opaque measured-color core, narrow depth-non-writing feather, alpha
 threshold, and bounded compatible-neighbor overlap. It changes no camera,
 RGB-D, fusion, capacity, or structural data and does not fill unsupported
 space.
+
+## M8.4.3 higher-density Reality-only reconstruction
+
+The structural persistent surfel store remains the coarse, stable geometry
+used for room understanding, M7 analysis, measurements, collision, and the
+editable Design view. M8.4.3 adds a separate visual-only Reality store fed by
+the same accepted, same-frame RGB-D observations after normal estimation.
+It does not change structural matching, structural capacity, coverage, or any
+M7 output:
+
+```text
+one accepted RGB-D measurement
+        + measured world point/normal + fused RGB
+        |\
+        | \-> structural persistent surfel (existing bounded store)
+        |\
+        \----> finer Reality spatial hash (2.5 cm cells, 60,000 max samples)
+                         -> immutable dense Reality snapshot on Finish
+                         -> existing Reality Points/Splats/Dense Surface renderer
+```
+
+The dense store uses a packed typed-array representation and bounded local
+neighbor checks. A measurement is merged only when its world-space distance,
+point-to-plane residual, and sign-invariant normal agreement are compatible;
+this prevents nearby foreground objects and background walls from becoming a
+single visual surface. Each new visual sample is confirmed by a second
+observation before finalization, while non-structural measured geometry is
+kept because the branch does not filter by wall, floor, or ceiling role.
+Actual camera RGB follows the existing M8.3 path (sRGB bytes, linear fusion,
+sRGB finalized output); no second readback, camera loop, or image frame store
+is introduced.
+
+Reality Preview prefers the dense snapshot and falls back to the M8.3
+structural Reality surfels if dense data is unavailable. The render modes,
+adaptive splats, triangle safeguards, depth ordering, and orbit controls are
+reused unchanged. Debug comparison reports structural versus dense counts,
+stable samples, spacing, capacity, created/fused/rejected measurements, and
+triangle/fallback participation so physical testing can determine whether
+denser measured geometry reduces visible sample footprints. The 60,000-sample
+bound is a visual-only capacity (about 3.9 MiB for the primary live numeric
+arrays before the compact hash and finalized objects); it does not increase
+the structural 20,000-surfel limit. Unscanned regions remain absent, and
+this is still not a watertight mesh or photogrammetry-quality result.

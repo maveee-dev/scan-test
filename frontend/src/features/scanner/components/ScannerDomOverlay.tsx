@@ -255,6 +255,7 @@ function ScannerDomOverlay({
   const rawCamera = sessionState.debug.rawCamera
   const rgbDepth = sessionState.debug.rgbDepth
   const realityColor = sessionState.debug.realityColor
+  const denseReality = sessionState.debug.denseReality
 
   useEffect(() => {
     const canvas = rawCameraPreviewCanvasRef.current
@@ -789,6 +790,39 @@ function ScannerDomOverlay({
               <div>
                 <span>Color confidence</span>
                 <strong>{realityColor.averageColorConfidence.toFixed(2)}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="xr-dom-overlay-depth xr-reality-color-debug" aria-label="Dense Reality reconstruction diagnostics">
+            <div className="xr-dom-overlay-depth-header">
+              <span>DENSE REALITY GEOMETRY</span>
+              <strong>{formatRawCameraState(denseReality.status)}</strong>
+            </div>
+            <div className="xr-dom-overlay-diagnostics">
+              <div>
+                <span>Input RGB-D samples</span>
+                <strong>{denseReality.inputColorSampleCount} / {denseReality.inputSampleCount}</strong>
+              </div>
+              <div>
+                <span>Created / fused</span>
+                <strong>{denseReality.createdSampleCount} / {denseReality.fusedSampleCount}</strong>
+              </div>
+              <div>
+                <span>Active / stable samples</span>
+                <strong>{denseReality.activeSampleCount} / {denseReality.stableSampleCount}</strong>
+              </div>
+              <div>
+                <span>Rejected / capacity</span>
+                <strong>{denseReality.rejectedSampleCount} / {denseReality.capacityUtilizationPercentage.toFixed(1)}%</strong>
+              </div>
+              <div>
+                <span>Fusion / captures</span>
+                <strong>{formatPerformanceMilliseconds(denseReality.fusionMs)} / {denseReality.cameraCapturesUsed}</strong>
+              </div>
+              <div>
+                <span>Last Reality tick</span>
+                <strong>{denseReality.lastCaptureTimestamp === null ? 'N/A' : `${denseReality.lastCaptureTimestamp.toFixed(0)} ms`}</strong>
               </div>
             </div>
           </div>
