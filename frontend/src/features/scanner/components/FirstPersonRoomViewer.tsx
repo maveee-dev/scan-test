@@ -416,6 +416,9 @@ function FirstPersonRoomViewer({ construction, onExit, referenceSpaceType = 'loc
       <div className="first-person-room-empty">
         <strong>No room surfaces available for first-person viewing.</strong>
         <span>Run post-scan analysis after capturing structural room surfaces.</span>
+        <button type="button" className="scan-button scan-button-secondary" onClick={onExit}>
+          Back to Room Surfaces
+        </button>
       </div>
     )
   }

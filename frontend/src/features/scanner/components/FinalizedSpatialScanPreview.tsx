@@ -608,12 +608,22 @@ function FinalizedSpatialScanPreview({
 
   return (
     <div className="scanner-scan-preview">
-      {mode === 'first-person-room' && roomSurfaceConstruction ? (
-        <FirstPersonRoomViewer
-          construction={roomSurfaceConstruction}
-          referenceSpaceType={scan.referenceSpaceType}
-          onExit={() => setMode('room-surfaces')}
-        />
+      {mode === 'first-person-room' ? (
+        roomSurfaceConstruction ? (
+          <FirstPersonRoomViewer
+            construction={roomSurfaceConstruction}
+            referenceSpaceType={scan.referenceSpaceType}
+            onExit={() => setMode('room-surfaces')}
+          />
+        ) : (
+          <div className="first-person-room-empty">
+            <strong>No room surfaces available for first-person viewing.</strong>
+            <span>Run post-scan analysis after capturing structural room surfaces.</span>
+            <button type="button" className="scan-button scan-button-secondary" onClick={() => setMode('room-surfaces')}>
+              Back to Finished Review
+            </button>
+          </div>
+        )
       ) : (
         <canvas
           ref={canvasRef}
@@ -622,7 +632,7 @@ function FinalizedSpatialScanPreview({
         />
       )}
       <div className="scanner-scan-preview-toolbar">
-        <div className="scanner-scan-preview-modes" role="group" aria-label="Spatial scan preview mode">
+        <div className="scanner-scan-preview-modes" role="group" aria-label="Spatial scan preview modes">
           <button
             type="button"
             className="scanner-preview-mode"
@@ -691,10 +701,10 @@ function FinalizedSpatialScanPreview({
               Room Surfaces
             </button>
           ) : null}
-          {roomSurfaceConstruction ? (
+          {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
             <button
               type="button"
-              className="scanner-preview-mode"
+              className="scanner-preview-mode scanner-preview-mode-first-person"
               aria-pressed={mode === 'first-person-room'}
               onClick={() => setMode('first-person-room')}
             >
@@ -702,6 +712,15 @@ function FinalizedSpatialScanPreview({
             </button>
           ) : null}
         </div>
+        {mode === 'room-surfaces' && roomSurfaceConstruction ? (
+          <button
+            type="button"
+            className="scan-button scanner-first-person-entry"
+            onClick={() => setMode('first-person-room')}
+          >
+            Enter First-Person Room
+          </button>
+        ) : null}
         {mode !== 'first-person-room' ? (
           <button
             type="button"
