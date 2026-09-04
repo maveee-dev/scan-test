@@ -434,10 +434,16 @@ function FinalizedSpatialScanPreview({
   const roomSurfaceOutlinesRef = useRef<Map<string, RoomSurfaceOutline>>(new Map())
   const [mode, setMode] = useState<PreviewMode>('coverage')
   const [selectedSurfaceId, setSelectedSurfaceId] = useState<string | null>(null)
+  const [customizationPanelOpen, setCustomizationPanelOpen] = useState(false)
   const [surfaceCustomizations, setSurfaceCustomizations] = useState<SurfaceCustomizationMap>({})
 
   const selectSurface = useCallback((surfaceId: string | null): void => {
     setSelectedSurfaceId(surfaceId)
+    setCustomizationPanelOpen(surfaceId !== null)
+  }, [])
+
+  const closeCustomizationPanel = useCallback((): void => {
+    setCustomizationPanelOpen(false)
   }, [])
 
   const setSurfacePaintColor = useCallback((surfaceId: string, color: string): void => {
@@ -463,6 +469,21 @@ function FinalizedSpatialScanPreview({
   }, [])
 
   const selectedSurface = roomSurfaceConstruction?.surfaces.find((surface) => surface.id === selectedSurfaceId) ?? null
+
+  useEffect(() => {
+    if (!customizationPanelOpen) {
+      return undefined
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') {
+        return
+      }
+      event.preventDefault()
+      closeCustomizationPanel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [closeCustomizationPanel, customizationPanelOpen])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -747,8 +768,13 @@ function FinalizedSpatialScanPreview({
             onResetSelectedSurface={resetSelectedSurface}
             onSelectSurface={selectSurface}
             selectedSurfaceId={selectedSurfaceId}
+            customizationPanelOpen={customizationPanelOpen}
+            onCloseCustomizationPanel={closeCustomizationPanel}
             referenceSpaceType={scan.referenceSpaceType}
-            onExit={() => setMode('room-surfaces')}
+            onExit={() => {
+              closeCustomizationPanel()
+              setMode('room-surfaces')
+            }}
           />
         ) : (
           <div className="first-person-room-empty">
@@ -866,13 +892,14 @@ function FinalizedSpatialScanPreview({
           </button>
         ) : null}
       </div>
-      {mode === 'room-surfaces' && selectedSurface ? (
+      {mode === 'room-surfaces' && customizationPanelOpen && selectedSurface ? (
         <SurfaceCustomizationPanel
           surface={selectedSurface}
           customizations={surfaceCustomizations}
           onPaintColorChange={(color) => setSurfacePaintColor(selectedSurface.id, color)}
           onResetSelected={resetSelectedSurface}
           onResetAll={resetAllSurfaceColors}
+          onClose={closeCustomizationPanel}
         />
       ) : null}
       {mode === 'planes' && analysisResult?.planes.length === 0 ? (

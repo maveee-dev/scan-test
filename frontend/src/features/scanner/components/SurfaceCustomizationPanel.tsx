@@ -12,6 +12,7 @@ interface SurfaceCustomizationPanelProps {
   onPaintColorChange: (color: string) => void
   onResetSelected: () => void
   onResetAll: () => void
+  onClose: () => void
 }
 
 function SurfaceCustomizationPanel({
@@ -19,6 +20,7 @@ function SurfaceCustomizationPanel({
   onPaintColorChange,
   onResetAll,
   onResetSelected,
+  onClose,
   surface,
 }: SurfaceCustomizationPanelProps) {
   const currentColor = getSurfacePaintColor(surface, customizations)
@@ -27,8 +29,18 @@ function SurfaceCustomizationPanel({
   return (
     <section className="surface-customization-panel" aria-labelledby="surface-customization-title">
       <div className="surface-customization-heading">
-        <span className="scanner-analysis-label" id="surface-customization-title">Selected Surface</span>
-        <strong>{surface.id}</strong>
+        <div className="surface-customization-heading-copy">
+          <span className="scanner-analysis-label" id="surface-customization-title">Selected Surface</span>
+          <strong>{surface.id}</strong>
+        </div>
+        <button
+          type="button"
+          className="surface-customization-close"
+          aria-label="Close customization panel"
+          onClick={onClose}
+        >
+          ×
+        </button>
       </div>
       <div className="surface-customization-meta">
         <span>{getSurfaceRoleLabel(surface.role)}</span>

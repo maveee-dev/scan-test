@@ -22,6 +22,8 @@ interface FirstPersonRoomViewerProps {
   onResetSelectedSurface: () => void
   onSelectSurface: (surfaceId: string | null) => void
   selectedSurfaceId: string | null
+  customizationPanelOpen: boolean
+  onCloseCustomizationPanel: () => void
   referenceSpaceType?: 'local-floor' | 'local'
   onExit: () => void
 }
@@ -225,6 +227,8 @@ function FirstPersonRoomViewer({
   onResetAllColors,
   onResetSelectedSurface,
   onSelectSurface,
+  customizationPanelOpen,
+  onCloseCustomizationPanel,
   referenceSpaceType = 'local',
   selectedSurfaceId,
 }: FirstPersonRoomViewerProps) {
@@ -509,7 +513,7 @@ function FirstPersonRoomViewer({
           {showDebug ? 'Hide Details' : 'Details'}
         </button>
       </div>
-      {selectedSurface ? (
+      {customizationPanelOpen && selectedSurface ? (
         <div className="first-person-room-customization">
           <SurfaceCustomizationPanel
             surface={selectedSurface}
@@ -517,6 +521,7 @@ function FirstPersonRoomViewer({
             onPaintColorChange={(color) => onPaintColorChange(selectedSurface.id, color)}
             onResetSelected={onResetSelectedSurface}
             onResetAll={onResetAllColors}
+            onClose={onCloseCustomizationPanel}
           />
         </div>
       ) : null}

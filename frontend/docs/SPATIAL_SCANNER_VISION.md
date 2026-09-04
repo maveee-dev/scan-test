@@ -691,6 +691,18 @@ surfaces, or change scan/evaluation data. Only generated M7.4 patches are
 selectable, so missing room surfaces remain missing. M8.0 does not add a
 product catalog, material estimation, persistence, or pricing.
 
+M8.0.1 refines the customization panel workflow without changing that state
+or the reconstructed geometry. The selected surface ID remains separate from
+`customizationPanelOpen`: closing the panel hides the controls while
+preserving the selected surface and every applied paint color. A visible close
+button is available in both Room Surfaces and First-Person Room, Escape closes
+the panel on desktop, and selecting a patch again reopens the controls on
+mobile or desktop. The panel is a bounded editing sheet rather than a blocking
+modal, so the room remains usable and no backdrop or browser-history
+interception is needed. Small-screen color controls can scroll inside the
+panel, and leaving First-Person closes the editing sheet before returning to
+Room Surfaces.
+
 The post-scan geometry direction is now:
 
 ```text
