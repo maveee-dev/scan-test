@@ -827,6 +827,46 @@ function ScannerFinishedView({
     }
   }, [])
 
+  useEffect(() => {
+    if (!import.meta.env.DEV || !analysisResult) {
+      return undefined
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const viewportWidth = window.innerWidth
+      const documentWidth = document.documentElement.scrollWidth
+      if (documentWidth <= viewportWidth + 1) {
+        return
+      }
+
+      const offenders = Array.from(document.querySelectorAll<HTMLElement>('.scanner-complete *'))
+        .filter((element) => {
+          const styles = window.getComputedStyle(element)
+          if (styles.overflowX === 'auto' || styles.overflowX === 'scroll') {
+            return false
+          }
+          const bounds = element.getBoundingClientRect()
+          return element.scrollWidth > element.clientWidth + 1
+            || bounds.left < -1
+            || bounds.right > viewportWidth + 1
+        })
+        .slice(0, 8)
+        .map((element) => {
+          const className = element.className.trim().split(/\s+/).slice(0, 2).join('.')
+          return `${element.tagName.toLowerCase()}.${className || 'no-class'} ${element.scrollWidth}px/${element.clientWidth}px`
+        })
+
+      console.warn('[scanner] Finished-review horizontal overflow detected', {
+        overflowPixels: documentWidth - viewportWidth,
+        viewportWidth,
+        documentWidth,
+        offenders,
+      })
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [analysisResult])
+
   const analyzeSurfaces = (): void => {
     if (isAnalyzing) {
       return
