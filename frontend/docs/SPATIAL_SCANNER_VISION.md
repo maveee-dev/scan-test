@@ -829,14 +829,14 @@ WebXR immersive-ar
 ```
 
 M8.1 is only a capability and copy proof. On an active XR frame, the raw
-camera service samples the browser-owned camera texture into a reusable
-160 × 90 application-owned framebuffer, then optionally performs a bounded
-CPU readback for the development-only `RAW CAMERA COPY DEBUG` preview. The
+camera service samples the browser-owned camera texture into a bounded,
+application-owned framebuffer, then optionally performs a bounded CPU
+readback for the development-only `RAW CAMERA COPY DEBUG` preview. The
 browser-owned texture is never retained, uploaded, persisted, or used after
 the frame/session lifecycle. The copy uses a centralized orientation setting
-and a centered aspect-preserving crop; the source camera dimensions and copy
-diagnostics are exposed so physical Android testing can verify orientation,
-frame changes, and real camera content.
+and exposes source/copy dimensions and mapping diagnostics so physical
+Android testing can verify orientation, frame changes, and real camera
+content.
 
 Camera access is requested as an optional session feature and is sampled on
 the existing bounded dense-depth cadence, not from a second XR loop. If the
@@ -856,18 +856,19 @@ registration without changing the scanner's structural data:
 current dense depth/world points
         + current XRView transform and projection
         -> camera normalized UV
-        + M8.1 copy crop/orientation mapping
-        -> pixel in the application-owned 160 × 90 RGBA copy
+        + M8.1 copy orientation/mapping
+        -> pixel in the application-owned RGBA copy
         -> current world point with sampled camera RGB
 ```
 
 World-space depth points are projected through the active view's inverse
 transform and projection matrix. They are not matched by assuming equal RGB
 and depth resolutions. The registration service reuses the raw-camera
-service's authoritative centered crop and orientation mapping, and samples
-the same application-owned readback buffer. A colored point is accepted only
-when its camera copy belongs to the same eligible dense processing tick;
-stale or unavailable copies are rejected and never silently reused.
+service's authoritative full-frame mapping and orientation transform, and
+samples the same application-owned readback buffer. A colored point is
+accepted only when its camera copy belongs to the same eligible dense
+processing tick; stale or unavailable copies are rejected and never silently
+reused.
 
 The debug renderer draws bounded current world points with their sampled
 camera RGB values and reports projection, crop/buffer misses, stale pairing,
@@ -876,3 +877,21 @@ physical alignment proof, not persistent color fusion: M8.2 does not modify
 `FinalizedSpatialScan`, persistent surfels, structural surfaces, or saved
 camera data. Persistent colored Reality Reconstruction is a future M8.3
 stage.
+
+## M8.2.2 full-frame RGB-D camera copy
+
+M8.2.2 removes the destructive center crop that previously forced portrait
+camera imagery into a landscape 160 × 90 buffer. The raw-camera service now
+derives reusable copy dimensions from the actual `XRCamera.width` and
+`XRCamera.height`, preserving the complete source aspect ratio under a
+maximum dimension of 160 pixels and the previous 14,400-pixel budget. For
+example, an 864 × 1920 portrait source becomes approximately 72 × 160;
+the mapping reports the full source UV rectangle from 0..1 in both axes.
+
+RGB-D registration therefore maps every valid projected camera UV through
+the centralized orientation transform into the full copied image without
+rejecting the top or bottom of a portrait frame because of an artificial
+crop. The debug preview uses the copied dimensions, so portrait source
+imagery remains visibly portrait. This changes only camera-copy coverage;
+world-to-camera projection, depth semantics, structural results, and color
+persistence remain unchanged.

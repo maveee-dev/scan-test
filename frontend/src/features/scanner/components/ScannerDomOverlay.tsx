@@ -631,7 +631,7 @@ function ScannerDomOverlay({
               </div>
               <div>
                 <span>Copy size / status</span>
-                <strong>{rawCamera.copyWidth} × {rawCamera.copyHeight} / {formatRawCameraState(rawCamera.copyStatus)}</strong>
+                <strong>{formatDepthResolution(rawCamera.copyWidth, rawCamera.copyHeight)} / {formatRawCameraState(rawCamera.copyStatus)}</strong>
               </div>
               <div>
                 <span>Texture / orientation</span>

@@ -13,10 +13,9 @@ import type {
   XRWebGLContext,
 } from './xrPresentationService'
 
-const COPY_WIDTH = 160
-const COPY_HEIGHT = 90
+const MAX_COPY_DIMENSION = 160
+const MAX_COPY_PIXELS = 160 * 90
 const READBACK_SAMPLE_CAPACITY = 32
-const TARGET_ASPECT = COPY_WIDTH / COPY_HEIGHT
 
 const FULLSCREEN_TRIANGLE = new Float32Array([
   -1, -1,
@@ -71,8 +70,8 @@ interface RawCameraDiagnosticsState {
   sourceHeight: number | null
   textureAvailable: boolean
   copyStatus: RawCameraCopyStatus
-  copyWidth: number
-  copyHeight: number
+  copyWidth: number | null
+  copyHeight: number | null
   successfulCopyCount: number
   failedCopyCount: number
   skippedCopyCount: number
@@ -157,8 +156,8 @@ function createInitialDiagnostics(): RawCameraDiagnosticsState {
     sourceHeight: null,
     textureAvailable: false,
     copyStatus: 'idle',
-    copyWidth: COPY_WIDTH,
-    copyHeight: COPY_HEIGHT,
+    copyWidth: null,
+    copyHeight: null,
     successfulCopyCount: 0,
     failedCopyCount: 0,
     skippedCopyCount: 0,
@@ -193,15 +192,18 @@ function getOrientationIndex(orientation: RawCameraOrientation): number {
   }
 }
 
-function getSourceCrop(sourceWidth: number, sourceHeight: number): [number, number, number, number] {
-  const sourceAspect = sourceWidth / sourceHeight
-  if (sourceAspect > TARGET_ASPECT) {
-    const cropWidth = TARGET_ASPECT / sourceAspect
-    return [(1 - cropWidth) / 2, 0, cropWidth, 1]
-  }
-
-  const cropHeight = sourceAspect / TARGET_ASPECT
-  return [0, (1 - cropHeight) / 2, 1, cropHeight]
+function getFullFrameCopyDimensions(sourceWidth: number, sourceHeight: number): [number, number] {
+  const sourcePixelCount = sourceWidth * sourceHeight
+  const sourceMaxDimension = Math.max(sourceWidth, sourceHeight)
+  const scale = Math.min(
+    1,
+    MAX_COPY_DIMENSION / sourceMaxDimension,
+    Math.sqrt(MAX_COPY_PIXELS / sourcePixelCount),
+  )
+  return [
+    Math.max(1, Math.floor(sourceWidth * scale)),
+    Math.max(1, Math.floor(sourceHeight * scale)),
+  ]
 }
 
 function calculateSignature(readback: Uint8Array): number {
@@ -331,7 +333,11 @@ export class XRRawCameraService {
 
   private orientationUniform: WebGLUniformLocation | null = null
 
-  private readback = new Uint8Array(COPY_WIDTH * COPY_HEIGHT * 4)
+  private readback = new Uint8Array(4)
+
+  private copyWidth = 1
+
+  private copyHeight = 1
 
   private readonly readbackDurations: number[] = []
 
@@ -466,8 +472,10 @@ export class XRRawCameraService {
     try {
       previousState = this.captureGlState()
       const { gl } = this
+      const [copyWidth, copyHeight] = getFullFrameCopyDimensions(sourceWidth, sourceHeight)
+      this.ensureCopySize(copyWidth, copyHeight)
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.outputFramebuffer)
-      gl.viewport(0, 0, COPY_WIDTH, COPY_HEIGHT)
+      gl.viewport(0, 0, copyWidth, copyHeight)
       gl.disable(gl.BLEND)
       gl.disable(gl.DEPTH_TEST)
       gl.disable(gl.CULL_FACE)
@@ -478,8 +486,7 @@ export class XRRawCameraService {
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, cameraTexture)
       gl.uniform1i(this.cameraImageUniform, 0)
-      const crop = getSourceCrop(sourceWidth, sourceHeight)
-      gl.uniform4f(this.sourceCropUniform, crop[0], crop[1], crop[2], crop[3])
+      gl.uniform4f(this.sourceCropUniform, 0, 0, 1, 1)
       gl.uniform1i(this.orientationUniform, getOrientationIndex(this.diagnostics.orientation))
       gl.bindBuffer(gl.ARRAY_BUFFER, this.fullscreenBuffer)
       gl.enableVertexAttribArray(this.positionAttribute)
@@ -488,7 +495,7 @@ export class XRRawCameraService {
       this.diagnostics.shaderCopyMs = Math.max(0, getTimestamp() - copyStartedAt)
 
       const readbackStartedAt = getTimestamp()
-      gl.readPixels(0, 0, COPY_WIDTH, COPY_HEIGHT, gl.RGBA, gl.UNSIGNED_BYTE, this.readback)
+      gl.readPixels(0, 0, copyWidth, copyHeight, gl.RGBA, gl.UNSIGNED_BYTE, this.readback)
       this.diagnostics.readPixelsMs = Math.max(0, getTimestamp() - readbackStartedAt)
       this.readbackDurations.push(this.diagnostics.readPixelsMs)
       if (this.readbackDurations.length > READBACK_SAMPLE_CAPACITY) {
@@ -506,20 +513,21 @@ export class XRRawCameraService {
       this.diagnostics.lastCopyTimestamp = timestamp
       this.diagnostics.readbackP95Ms = calculateP95(this.readbackDurations)
       this.copySequence += 1
-      const [cropX, cropY, cropWidth, cropHeight] = crop
       this.diagnostics.mapping = {
         sourceCameraWidth: sourceWidth,
         sourceCameraHeight: sourceHeight,
-        copyWidth: COPY_WIDTH,
-        copyHeight: COPY_HEIGHT,
+        copyWidth,
+        copyHeight,
         sourceUvRect: {
-          x: cropX,
-          y: cropY,
-          width: cropWidth,
-          height: cropHeight,
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1,
         },
         orientation: this.diagnostics.orientation,
       }
+      this.diagnostics.copyWidth = copyWidth
+      this.diagnostics.copyHeight = copyHeight
       this.diagnostics.preview = includePreview ? this.createPreview() : null
       return true
     } catch {
@@ -613,7 +621,9 @@ export class XRRawCameraService {
     this.session = null
     this.gl = null
     this.binding = null
-    this.readback.fill(0)
+    this.readback = new Uint8Array(4)
+    this.copyWidth = 1
+    this.copyHeight = 1
     this.readbackDurations.length = 0
     this.copySequence = 0
     this.diagnostics = createInitialDiagnostics()
@@ -657,8 +667,8 @@ export class XRRawCameraService {
       gl.TEXTURE_2D,
       0,
       gl.RGBA,
-      COPY_WIDTH,
-      COPY_HEIGHT,
+      this.copyWidth,
+      this.copyHeight,
       0,
       gl.RGBA,
       gl.UNSIGNED_BYTE,
@@ -682,12 +692,39 @@ export class XRRawCameraService {
 
   private createPreview(): RawCameraPreview {
     const pixels = new Uint8ClampedArray(this.readback.length)
-    const rowBytes = COPY_WIDTH * 4
-    for (let row = 0; row < COPY_HEIGHT; row += 1) {
-      const sourceOffset = (COPY_HEIGHT - 1 - row) * rowBytes
+    const rowBytes = this.copyWidth * 4
+    for (let row = 0; row < this.copyHeight; row += 1) {
+      const sourceOffset = (this.copyHeight - 1 - row) * rowBytes
       pixels.set(this.readback.subarray(sourceOffset, sourceOffset + rowBytes), row * rowBytes)
     }
-    return { width: COPY_WIDTH, height: COPY_HEIGHT, pixels }
+    return { width: this.copyWidth, height: this.copyHeight, pixels }
+  }
+
+  private ensureCopySize(copyWidth: number, copyHeight: number): void {
+    if (copyWidth === this.copyWidth && copyHeight === this.copyHeight) {
+      return
+    }
+
+    const gl = this.gl
+    if (!gl || !this.outputTexture) {
+      throw new Error('The raw camera output texture is unavailable.')
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, this.outputTexture)
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      copyWidth,
+      copyHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      null,
+    )
+    this.copyWidth = copyWidth
+    this.copyHeight = copyHeight
+    this.readback = new Uint8Array(copyWidth * copyHeight * 4)
   }
 
   private captureGlState(): {

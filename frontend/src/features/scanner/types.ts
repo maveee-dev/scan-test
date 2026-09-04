@@ -548,8 +548,8 @@ export interface RawCameraDebug {
   sourceHeight: number | null
   textureAvailable: boolean
   copyStatus: RawCameraCopyStatus
-  copyWidth: number
-  copyHeight: number
+  copyWidth: number | null
+  copyHeight: number | null
   successfulCopyCount: number
   failedCopyCount: number
   skippedCopyCount: number

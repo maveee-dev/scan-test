@@ -1462,9 +1462,9 @@
   display: block;
   width: 100%;
   height: auto;
-  min-height: 90px;
+  min-height: 0;
   margin-top: 9px;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: auto;
   border: 1px solid rgba(212, 239, 105, 0.35);
   border-radius: 6px;
   background: #050806;
