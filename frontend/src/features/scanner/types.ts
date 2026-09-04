@@ -693,6 +693,10 @@ export interface RealityCaptureSummary {
   readonly averageColorObservations: number
   readonly cameraCapturesUsed: number
   readonly averageColorConfidence: number
+  readonly averageNearestNeighborSpacingMeters: number | null
+  readonly approximateUncoveredGapMeters: number | null
+  readonly surfelCapacity: number
+  readonly capacityReached: boolean
 }
 
 export interface FinalizedRealityReconstruction {

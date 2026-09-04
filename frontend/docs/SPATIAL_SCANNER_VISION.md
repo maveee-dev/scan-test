@@ -936,3 +936,37 @@ for the original captured appearance. Room Surfaces, First-Person Room, and
 M8 paint customization continue to use the separate structural/design data;
 paint never changes Reality Preview. This is a colored-surfel proof, not a
 textured mesh or photogrammetry-quality reconstruction.
+
+## M8.4 dense continuous Reality surface visualization
+
+M8.4 keeps the M8.3 persistent colored surfels and adds a post-scan
+visualization layer for continuity. The development comparison modes are:
+
+- `Raw Reality Points`: the original one-point-per-colored-surfel renderer.
+- `Reality Splats`: oriented camera-visible patches built from each surfel's
+  measured normal and stored footprint/radius, with a small bounded visual
+  expansion to reduce holes.
+- `Dense Reality Surface`: the default continuous mode. It combines the
+  oriented splats with bounded local triangles between nearby, normal-compatible
+  and locally coplanar Reality surfels.
+
+The triangle pass is deliberately local and deterministic. It rejects long
+edges, incompatible normals, excessive point-to-plane residuals, and tiny
+triangles, so it does not fill unscanned regions or bridge obvious
+wall/object and foreground/background discontinuities. All rendered colors
+remain the actual M8.3 fused camera colors, and depth testing preserves the
+occlusion ordering of the measured 3D scene. No M7.4 structural polygon is
+textured or used to fill Reality geometry.
+
+The Reality branch still uses the existing bounded persistent surfel capacity
+(approximately 20,000 slots). M8.4 reports colored count, average nearest
+neighbor spacing, estimated uncovered gaps, and whether capacity was reached;
+it does not silently increase structural fusion capacity or introduce a
+separate Reality-only store. If future scans show that measured density,
+rather than splat/triangle coverage, is the limiting factor, that can be
+addressed by a separate Reality-density milestone.
+
+This remains a dense surface visualization, not a textured mesh or
+photogrammetry-quality reconstruction. Future work may retain selected RGB
+keyframes and build a post-scan mesh/texture projection pipeline, while the
+structural/design reconstruction remains a separate semantic model.

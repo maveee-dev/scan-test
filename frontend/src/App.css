@@ -641,6 +641,32 @@
   gap: 4px;
 }
 
+.scanner-reality-render-modes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.scanner-reality-render-mode {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.03);
+  font: inherit;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.scanner-reality-render-mode[aria-pressed="true"] {
+  border-color: var(--acid);
+  color: var(--acid);
+  background: rgba(204, 255, 0, 0.08);
+}
+
 .scanner-analysis-controls {
   display: flex;
   width: 100%;

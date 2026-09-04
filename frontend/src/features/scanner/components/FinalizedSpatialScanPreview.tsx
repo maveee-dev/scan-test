@@ -21,6 +21,11 @@ import {
   getSurfacePaintColor,
   type SurfaceCustomizationMap,
 } from '../services/surfaceCustomizationService'
+import {
+  createRealitySurfaceRenderResources,
+  type RealitySurfaceRenderMode,
+  type RealitySurfaceRenderStats,
+} from '../services/realitySurfaceRenderingService'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -65,8 +70,20 @@ type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'struct
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
 
+function getPreviewTimestamp(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
+
 type RoomSurfaceMesh = THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>
 type RoomSurfaceOutline = THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>
+
+interface RealityRuntimeStats {
+  readonly fps: number
+  readonly frameTimeMs: number
+  readonly drawCalls: number
+  readonly geometryCount: number
+  readonly textureCount: number
+}
 
 function createPlaneGeometry(plane: PlaneCandidate): THREE.BufferGeometry {
   const { centroid, tangentU, tangentV, localBounds } = plane
@@ -425,39 +442,6 @@ function createFusedSurfaceGeometry(
   return geometry
 }
 
-function createRealitySurfelGeometry(
-  reconstruction: FinalizedRealityReconstruction,
-): THREE.BufferGeometry {
-  const coloredSurfels = reconstruction.surfels.filter((surfel) => surfel.colorRgb !== null)
-  const positions = new Float32Array(coloredSurfels.length * 3)
-  const colors = new Float32Array(coloredSurfels.length * 3)
-  coloredSurfels.forEach((surfel, index) => {
-    const positionOffset = index * 3
-    positions[positionOffset] = surfel.position.x
-    positions[positionOffset + 1] = surfel.position.y
-    positions[positionOffset + 2] = surfel.position.z
-    const color = surfel.colorRgb
-    if (!color) {
-      return
-    }
-    // Finalized Reality colors are sRGB. Buffer colors are consumed as linear
-    // values by Three.js, then encoded once by the renderer for display.
-    colors[positionOffset] = color.r <= 0.04045
-      ? color.r / 12.92
-      : Math.pow((color.r + 0.055) / 1.055, 2.4)
-    colors[positionOffset + 1] = color.g <= 0.04045
-      ? color.g / 12.92
-      : Math.pow((color.g + 0.055) / 1.055, 2.4)
-    colors[positionOffset + 2] = color.b <= 0.04045
-      ? color.b / 12.92
-      : Math.pow((color.b + 0.055) / 1.055, 2.4)
-  })
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  return geometry
-}
-
 function FinalizedSpatialScanPreview({
   analysisResult,
   realityReconstruction,
@@ -475,6 +459,9 @@ function FinalizedSpatialScanPreview({
   const [selectedSurfaceId, setSelectedSurfaceId] = useState<string | null>(null)
   const [customizationPanelOpen, setCustomizationPanelOpen] = useState(false)
   const [surfaceCustomizations, setSurfaceCustomizations] = useState<SurfaceCustomizationMap>({})
+  const [realityRenderMode, setRealityRenderMode] = useState<RealitySurfaceRenderMode>('dense')
+  const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
+  const [realityRuntimeStats, setRealityRuntimeStats] = useState<RealityRuntimeStats | null>(null)
 
   const selectSurface = useCallback((surfaceId: string | null): void => {
     setSelectedSurfaceId(surfaceId)
@@ -628,9 +615,7 @@ function FinalizedSpatialScanPreview({
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
-    let realityGeometry: THREE.BufferGeometry | null = null
-    let realityMaterial: THREE.PointsMaterial | null = null
-    let realityPoints: THREE.Points | null = null
+    let realityResources: ReturnType<typeof createRealitySurfaceRenderResources> | null = null
     let roomSurfaceResources: {
       geometries: THREE.BufferGeometry[]
       materials: THREE.Material[]
@@ -674,15 +659,11 @@ function FinalizedSpatialScanPreview({
       roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
       roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
     } else if (mode === 'reality-preview' && realityReconstruction) {
-      realityGeometry = createRealitySurfelGeometry(realityReconstruction)
-      realityMaterial = new THREE.PointsMaterial({
-        size: 0.045,
-        sizeAttenuation: true,
-        vertexColors: true,
-        toneMapped: false,
-      })
-      realityPoints = new THREE.Points(realityGeometry, realityMaterial)
-      scene.add(realityPoints)
+      realityResources = createRealitySurfaceRenderResources(
+        realityReconstruction,
+        realityRenderMode,
+      )
+      scene.add(realityResources.group)
     }
 
     const selectableMeshes = roomSurfaceResources?.surfaceMeshes ?? new Map<string, RoomSurfaceMesh>()
@@ -761,14 +742,42 @@ function FinalizedSpatialScanPreview({
     resizeObserver?.observe(canvas)
 
     let animationFrameId = 0
-    const render = (): void => {
+    let renderLoopActive = true
+    let publishedAt = getPreviewTimestamp()
+    let publishedFrameCount = 0
+    let previousFrameAt: number | null = null
+    let renderStatsPublished = false
+    const render = (frameTimestamp: number): void => {
       controls.update()
       renderer.render(scene, camera)
+      if (realityResources && !renderStatsPublished) {
+        setRealityRenderStats(realityResources.stats)
+        renderStatsPublished = true
+      }
+      if (realityResources && frameTimestamp - publishedAt >= 500) {
+        const elapsedMs = frameTimestamp - publishedAt
+        if (renderLoopActive) {
+          setRealityRuntimeStats({
+            fps: (publishedFrameCount / Math.max(1, elapsedMs)) * 1000,
+            frameTimeMs: previousFrameAt === null
+              ? 0
+              : elapsedMs / Math.max(1, publishedFrameCount),
+            drawCalls: renderer.info.render.calls,
+            geometryCount: renderer.info.memory.geometries,
+            textureCount: renderer.info.memory.textures,
+          })
+        }
+        publishedAt = frameTimestamp
+        publishedFrameCount = 0
+      }
+      publishedFrameCount += 1
+      previousFrameAt = frameTimestamp
       animationFrameId = window.requestAnimationFrame(render)
     }
     animationFrameId = window.requestAnimationFrame(render)
 
     return () => {
+      renderLoopActive = false
       window.cancelAnimationFrame(animationFrameId)
       resizeObserver?.disconnect()
       resetViewRef.current = null
@@ -787,8 +796,8 @@ function FinalizedSpatialScanPreview({
       boundaryResources?.materials.forEach((boundaryMaterial) => boundaryMaterial.dispose())
       roomSurfaceResources?.geometries.forEach((surfaceGeometry) => surfaceGeometry.dispose())
       roomSurfaceResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
-      realityGeometry?.dispose()
-      realityMaterial?.dispose()
+      realityResources?.geometries.forEach((geometry) => geometry.dispose())
+      realityResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       renderer.dispose()
       canvas.removeEventListener('pointerdown', onSelectionPointerDown)
       canvas.removeEventListener('pointerup', onSelectionPointerUp)
@@ -800,11 +809,11 @@ function FinalizedSpatialScanPreview({
       if (fusedSurface) {
         scene.remove(fusedSurface)
       }
-      if (realityPoints) {
-        scene.remove(realityPoints)
+      if (realityResources) {
+        scene.remove(realityResources.group)
       }
     }
-  }, [analysisResult, mode, realityReconstruction, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, mode, realityReconstruction, realityRenderMode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1002,6 +1011,49 @@ function FinalizedSpatialScanPreview({
             {' · '}
             {realityReconstruction.captureSummary.cameraCapturesUsed} camera captures
           </span>
+          <span>
+            Average spacing {realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters === null
+              ? 'N/A'
+              : `${realityReconstruction.captureSummary.averageNearestNeighborSpacingMeters.toFixed(3)} m`}
+            {' · '}
+            estimated gaps {realityReconstruction.captureSummary.approximateUncoveredGapMeters === null
+              ? 'N/A'
+              : `${realityReconstruction.captureSummary.approximateUncoveredGapMeters.toFixed(3)} m`}
+            {' · '}
+            capacity {realityReconstruction.captureSummary.capacityReached ? 'reached' : 'available'}
+          </span>
+          {import.meta.env.DEV ? (
+            <>
+              <div className="scanner-reality-render-modes" role="group" aria-label="Reality render comparison modes">
+                <span>Debug render</span>
+                {(['points', 'splats', 'dense'] as const).map((renderMode) => (
+                  <button
+                    key={renderMode}
+                    type="button"
+                    className="scanner-reality-render-mode"
+                    aria-pressed={realityRenderMode === renderMode}
+                    onClick={() => setRealityRenderMode(renderMode)}
+                  >
+                    {renderMode === 'points'
+                      ? 'Raw Reality Points'
+                      : renderMode === 'splats'
+                        ? 'Reality Splats'
+                        : 'Dense Reality Surface'}
+                  </button>
+                ))}
+              </div>
+              {realityRenderStats?.mode === realityRenderMode ? (
+                <span>
+                  Rendered {realityRenderStats.renderedSurfelCount} surfels · {realityRenderStats.renderedSplatCount} splats · {realityRenderStats.renderedTriangleCount} triangles · preparation {realityRenderStats.renderPreparationMs.toFixed(1)} ms
+                </span>
+              ) : null}
+              {realityRuntimeStats ? (
+                <span>
+                  Runtime {realityRuntimeStats.fps.toFixed(0)} FPS · {realityRuntimeStats.frameTimeMs.toFixed(1)} ms · {realityRuntimeStats.drawCalls} draw calls · {realityRuntimeStats.geometryCount} geometries
+                </span>
+              ) : null}
+            </>
+          ) : null}
           {realityReconstruction.status !== 'available' ? (
             <span>Original camera colors were not retained for this scan; structural review remains available.</span>
           ) : null}

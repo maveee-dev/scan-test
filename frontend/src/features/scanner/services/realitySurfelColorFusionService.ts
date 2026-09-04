@@ -18,6 +18,7 @@ const MAX_COLOR_WEIGHT = 16
 const MIN_OUTLIER_OBSERVATIONS = 3
 const COLOR_OUTLIER_DISTANCE = 0.45
 const MAX_COLOR_FUSION_DISTANCE_METERS = 0.12
+const DENSITY_CELL_SIZE_METERS = 0.16
 const MAX_SURFELS = LIVE_SURFACE_CONFIG.maxSurfels
 
 function getTimestamp(): number {
@@ -89,6 +90,91 @@ function calculateBounds(surfels: readonly FinalizedRealitySurfel[]): SpatialBou
     min: copyPoint(minimum),
     max: copyPoint(maximum),
   })
+}
+
+function getDensityCellKey(point: SpatialPoint): string {
+  return `${Math.floor(point.x / DENSITY_CELL_SIZE_METERS)}:${Math.floor(point.y / DENSITY_CELL_SIZE_METERS)}:${Math.floor(point.z / DENSITY_CELL_SIZE_METERS)}`
+}
+
+function calculateDensitySummary(
+  surfels: readonly FinalizedRealityGeometrySurfel[],
+  surfelCapacity: number,
+  capacityReached: boolean,
+): Pick<
+  import('../types').RealityCaptureSummary,
+  'averageNearestNeighborSpacingMeters' | 'approximateUncoveredGapMeters' | 'surfelCapacity' | 'capacityReached'
+> {
+  if (surfels.length < 2) {
+    return {
+      averageNearestNeighborSpacingMeters: null,
+      approximateUncoveredGapMeters: null,
+      surfelCapacity,
+      capacityReached,
+    }
+  }
+
+  const cells = new Map<string, number[]>()
+  for (let index = 0; index < surfels.length; index += 1) {
+    const key = getDensityCellKey(surfels[index].position)
+    const cell = cells.get(key)
+    if (cell) {
+      cell.push(index)
+    } else {
+      cells.set(key, [index])
+    }
+  }
+
+  let spacingTotal = 0
+  let spacingCount = 0
+  let radiusTotal = 0
+  for (let index = 0; index < surfels.length; index += 1) {
+    const surfel = surfels[index]
+    radiusTotal += surfel.radius
+    const cellX = Math.floor(surfel.position.x / DENSITY_CELL_SIZE_METERS)
+    const cellY = Math.floor(surfel.position.y / DENSITY_CELL_SIZE_METERS)
+    const cellZ = Math.floor(surfel.position.z / DENSITY_CELL_SIZE_METERS)
+    let nearestDistanceSquared = Infinity
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
+          const neighborCell = cells.get(`${cellX + offsetX}:${cellY + offsetY}:${cellZ + offsetZ}`)
+          if (!neighborCell) {
+            continue
+          }
+          for (const neighborIndex of neighborCell) {
+            if (neighborIndex === index) {
+              continue
+            }
+            const neighbor = surfels[neighborIndex]
+            const dx = surfel.position.x - neighbor.position.x
+            const dy = surfel.position.y - neighbor.position.y
+            const dz = surfel.position.z - neighbor.position.z
+            nearestDistanceSquared = Math.min(
+              nearestDistanceSquared,
+              dx * dx + dy * dy + dz * dz,
+            )
+          }
+        }
+      }
+    }
+    if (Number.isFinite(nearestDistanceSquared)) {
+      spacingTotal += Math.sqrt(nearestDistanceSquared)
+      spacingCount += 1
+    }
+  }
+
+  const averageNearestNeighborSpacingMeters = spacingCount > 0
+    ? spacingTotal / spacingCount
+    : null
+  const averageRadius = radiusTotal / surfels.length
+  return {
+    averageNearestNeighborSpacingMeters,
+    approximateUncoveredGapMeters: averageNearestNeighborSpacingMeters === null
+      ? null
+      : Math.max(0, averageNearestNeighborSpacingMeters - averageRadius * 2),
+    surfelCapacity,
+    capacityReached,
+  }
 }
 
 /**
@@ -308,6 +394,8 @@ export class RealitySurfelColorFusionService {
     referenceSpaceType: ScannerReferenceSpaceType,
     surfels: readonly FinalizedRealityGeometrySurfel[],
     cameraAvailable: boolean,
+    surfelCapacity: number = MAX_SURFELS,
+    capacityReached = false,
   ): FinalizedRealityReconstruction {
     const finalizedSurfels: FinalizedRealitySurfel[] = surfels.map((surfel) => {
       const hasColor = surfel.id >= 0 && surfel.id < MAX_SURFELS && this.colorWeight[surfel.id] > 0
@@ -342,6 +430,7 @@ export class RealitySurfelColorFusionService {
       colorObservationTotal += surfel.colorObservationCount
       confidenceTotal += surfel.colorConfidence
     }
+    const densitySummary = calculateDensitySummary(surfels, surfelCapacity, capacityReached)
     const captureSummary = Object.freeze({
       totalSurfels: frozenSurfels.length,
       coloredSurfels,
@@ -351,6 +440,7 @@ export class RealitySurfelColorFusionService {
       averageColorObservations: coloredSurfels > 0 ? colorObservationTotal / coloredSurfels : 0,
       cameraCapturesUsed: this.cameraCapturesUsed,
       averageColorConfidence: coloredSurfels > 0 ? confidenceTotal / coloredSurfels : 0,
+      ...densitySummary,
     })
     const status = !cameraAvailable
       ? 'unavailable'

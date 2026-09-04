@@ -333,6 +333,7 @@ export class XRSessionService {
         this.spatialCoverageService,
       )
       const realityGeometrySurfels = this.persistentLiveSurfaceService.getRealityFinalizationSurfels()
+      const persistentSurfaceDiagnostics = this.persistentLiveSurfaceService.getDiagnostics()
       const finalizedScan = this.finalizedSpatialScanService.createSnapshot({
         startedAtMs: this.scanStartedAt,
         finishedAtMs: finishedAt,
@@ -345,6 +346,8 @@ export class XRSessionService {
         finalizedScan.referenceSpaceType,
         realityGeometrySurfels,
         this.rawCameraService.isAvailable(),
+        persistentSurfaceDiagnostics.surfelCapacity,
+        persistentSurfaceDiagnostics.capacityReached,
       )
 
       await this.endActiveSession(session)
