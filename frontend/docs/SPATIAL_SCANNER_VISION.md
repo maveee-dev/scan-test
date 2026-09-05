@@ -1406,3 +1406,57 @@ expansion bounds, and seed/index/growth/finalization timings. Reality Wall Mask
 uses cyan for core, green for expanded, amber for uncertain, and dark red for
 non-wall. Only core and expanded samples receive Design paint; Original Reality
 remains immutable.
+
+### M8.5.3 — Structural Surface Recall + Reality Membership Calibration
+
+M8.5.3 improves Design coverage without changing M7.0 plane extraction, M7.4
+patch construction, or any live Reality capture/reconstruction path. It treats
+two distinct post-scan limitations independently:
+
+```text
+Geometric plane
+        ↓
+structural interpretation
+        ↓
+selected wall OR strong standalone wall
+        ↓
+M7.4 observed patch
+        ↓
+LogicalStructuralSurface
+        ↓
+derived Reality membership calibration
+        ↓
+CORE / EXPANDED / UNCERTAIN / NON_WALL
+        ↓
+Design paint
+```
+
+- A **strong standalone wall** is a high-confidence vertical plane with
+  sufficient observed area, support, span, fit quality, and wall envelope
+  evidence. It can survive even without a closed-room triad or corner graph.
+  The path still rejects weak/tiny planar objects, poor fits, duplicates, and
+  unsupported same-direction layers; it does not complete a missing room.
+- Membership exposes signed M7-plane residual distributions. When locally
+  connected, high-confidence Reality support establishes a bounded, robust
+  systematic offset, a separate **Reality membership reference plane** is used
+  for masking only. M7 positions, dimensions, area, collision, and patch
+  polygons are never moved.
+- Each logical surface gets an adaptive, tightly clamped residual envelope from
+  its robust calibrated distribution. Strict original-plane seeds remain the
+  precision anchor; calibration anchors and multi-neighbor connected growth
+  improve measured-surface recall without turning a broad plane band into paint.
+- An M7.4 polygon remains the observed structural support boundary, but the
+  paint-mask domain may grow a small distance beyond it only along a measured,
+  connected, plane-compatible dense-Reality chain. Empty space, disconnected
+  coplanar components, and missing wall extents remain unpainted.
+- Foreground offsets, depth discontinuities, conflicting logical surfaces, and
+  disconnected components remain propagation barriers. Ambiguous samples are
+  `UNCERTAIN` and preserve original RGB; `NON_WALL` is reserved for positive
+  contradictory/foreground evidence.
+
+Diagnostics now report structural standalone-wall promotions; raw and signed
+residual distributions; reference offset and calibrated envelope; inside/outside
+patch candidates; connected observed extension; core/expanded coverage; and
+mutually exclusive terminal non-paintable reasons. These are post-analysis
+worker measurements only: no new XR work, camera reads, or scan-time fusion is
+introduced.

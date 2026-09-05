@@ -1,6 +1,6 @@
 const configuredCommit = import.meta.env.VITE_GIT_COMMIT?.trim()
 
 export const BUILD_INFO = Object.freeze({
-  scannerMilestone: 'M8.5.2',
+  scannerMilestone: 'M8.5.3',
   commit: configuredCommit ? configuredCommit.slice(0, 7) : 'dev',
 })

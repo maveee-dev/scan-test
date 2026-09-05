@@ -230,6 +230,10 @@ function StructuralSurfaceSummary({
           <strong>{interpretation.stats.selectedWallCount}</strong>
         </div>
         <div>
+          <span>Strong standalone walls promoted</span>
+          <strong>{interpretation.stats.promotedStrongStandaloneWallCount}</strong>
+        </div>
+        <div>
           <span>Selected floor</span>
           <strong>{interpretation.stats.floorCandidate ?? 'Not confidently observed'}</strong>
         </div>

@@ -58,6 +58,14 @@ export interface StructuralSurfaceInterpretationConfig {
   readonly minimumWallNoRelationshipAreaScore: number
   readonly minimumWallNoRelationshipSupportScore: number
   readonly minimumWallNoRelationshipExtentScore: number
+  /** Strong independently observed wall path; does not require a room triad. */
+  readonly minimumStrongStandaloneWallConfidence: number
+  readonly minimumStrongStandaloneWallOrientationScore: number
+  readonly minimumStrongStandaloneWallEnvelopeScore: number
+  readonly minimumStrongStandaloneWallAreaScore: number
+  readonly minimumStrongStandaloneWallSupportScore: number
+  readonly minimumStrongStandaloneWallExtentScore: number
+  readonly maximumStrongStandaloneWallRmsMeters: number
   readonly independentParallelOffsetMeters: number
   readonly independentParallelSupportGapMeters: number
   readonly independentParallelEnvelopeScore: number
@@ -107,6 +115,13 @@ export const DEFAULT_STRUCTURAL_SURFACE_INTERPRETATION_CONFIG: StructuralSurface
   minimumWallNoRelationshipAreaScore: 0.7,
   minimumWallNoRelationshipSupportScore: 0.7,
   minimumWallNoRelationshipExtentScore: 0.55,
+  minimumStrongStandaloneWallConfidence: 0.76,
+  minimumStrongStandaloneWallOrientationScore: 0.82,
+  minimumStrongStandaloneWallEnvelopeScore: 0.68,
+  minimumStrongStandaloneWallAreaScore: 0.58,
+  minimumStrongStandaloneWallSupportScore: 0.58,
+  minimumStrongStandaloneWallExtentScore: 0.48,
+  maximumStrongStandaloneWallRmsMeters: 0.038,
   independentParallelOffsetMeters: 0.75,
   independentParallelSupportGapMeters: 0.8,
   independentParallelEnvelopeScore: 0.72,
@@ -866,6 +881,32 @@ function isIndependentParallelWall(
     supportGap >= config.independentParallelSupportGapMeters &&
     candidate.envelopeSelectionScore >= config.independentParallelEnvelopeScore &&
     structuralEvidence
+}
+
+/**
+ * A deliberately high bar for a partial physical wall that is independently
+ * observed but has no valid corner/triad graph evidence. This is selection
+ * policy only: the M7.0 plane itself, its support, and downstream geometry are
+ * unchanged.
+ */
+function isStrongStandaloneWall(
+  evaluation: RoleEvaluation,
+  config: StructuralSurfaceInterpretationConfig,
+): boolean {
+  const context = evaluation.context
+  return evaluation.role === 'wall' &&
+    evaluation.confidence >= config.minimumStrongStandaloneWallConfidence &&
+    context.orientationScore >= config.minimumStrongStandaloneWallOrientationScore &&
+    evaluation.envelopeSelectionScore >= config.minimumStrongStandaloneWallEnvelopeScore &&
+    context.areaScore >= config.minimumStrongStandaloneWallAreaScore &&
+    context.supportScore >= config.minimumStrongStandaloneWallSupportScore &&
+    context.verticalExtentScore >= config.minimumStrongStandaloneWallExtentScore &&
+    context.plane.rmsError <= config.maximumStrongStandaloneWallRmsMeters
+}
+
+function getStrongStandaloneWallReason(evaluation: RoleEvaluation): string {
+  const context = evaluation.context
+  return `strong standalone wall: role ${evaluation.confidence.toFixed(2)}, orientation ${context.orientationScore.toFixed(2)}, envelope ${evaluation.envelopeSelectionScore.toFixed(2)}, area ${context.areaScore.toFixed(2)}, support ${context.supportScore.toFixed(2)}, extent ${context.verticalExtentScore.toFixed(2)}, rms ${context.plane.rmsError.toFixed(3)} m`
 }
 
 function getSelectionReason(
@@ -2732,6 +2773,38 @@ export class StructuralSurfaceInterpretationService {
       }
     })
 
+    // M8.5.3: graph evidence can introduce the first wall, but it must not
+    // suppress a separate, strongly observed partial wall merely because the
+    // second orientation lacks a triad. Keep same-direction duplicate
+    // protection intact; only independently strong, non-redundant walls pass.
+    const strongStandaloneWallIds = new Set<string>()
+    // This deliberately starts from all wall-role evaluations rather than
+    // `eligibleWalls`: that older graph-envelope gate requires the much
+    // stronger no-relationship support threshold and would make this new
+    // independently-evidenced path unreachable for legitimate partial walls.
+    const standaloneCandidates = evaluations
+      .filter((evaluation) => evaluation.role === 'wall')
+      .filter((evaluation) => !selectedWallIds.has(evaluation.context.plane.id) && !alternateWallIds.has(evaluation.context.plane.id))
+      .filter((evaluation) => isStrongStandaloneWall(evaluation, this.config))
+      .sort((left, right) => getRoleSelectionScore(right) - getRoleSelectionScore(left) ||
+        left.context.plane.id.localeCompare(right.context.plane.id))
+    for (const candidate of standaloneCandidates) {
+      const selectedEvaluations = [...selectedWallIds]
+        .map((planeId) => evaluationByPlaneId.get(planeId))
+        .filter((evaluation): evaluation is RoleEvaluation => Boolean(evaluation && evaluation.role === 'wall'))
+      const closestSelected = getClosestSelectedWall(candidate, selectedEvaluations)
+      const sameOrientation = Boolean(closestSelected &&
+        getNormalAngleDegrees(candidate.context.plane, closestSelected.context.plane) <= this.config.selectedWallRedundancyAngleDegrees)
+      const independentParallel = hasIndependentParallelBoundaryEvidence(candidate, selectedEvaluations, this.config)
+      if (sameOrientation && !independentParallel) {
+        alternateWallIds.add(candidate.context.plane.id)
+        wallSelectionReasons.set(candidate.context.plane.id, `strong standalone evidence rejected: orientation duplicate of ${closestSelected?.context.plane.id ?? 'selected wall'}`)
+        continue
+      }
+      addSelectedWall(candidate, getStrongStandaloneWallReason(candidate))
+      strongStandaloneWallIds.add(candidate.context.plane.id)
+    }
+
     const finalEvaluations = evaluations.map((evaluation) => {
       const multiSurfaceCoherenceScore = multiSurfaceCoherenceByPlaneId.get(evaluation.context.plane.id) ?? 0
       const finalSelectionScore = multiSurfaceCoherenceScore > 0
@@ -2882,6 +2955,7 @@ export class StructuralSurfaceInterpretationService {
         likelyWallCount: selectedWalls.length,
         selectedWallCount: selectedWalls.length,
         alternateWallCount: alternateWallCandidates.length,
+        promotedStrongStandaloneWallCount: strongStandaloneWallIds.size,
         selectedFloorCount: selectedFloor ? 1 : 0,
         alternateFloorCount: alternateFloorCandidates.length,
         selectedCeilingCount: selectedCeiling ? 1 : 0,

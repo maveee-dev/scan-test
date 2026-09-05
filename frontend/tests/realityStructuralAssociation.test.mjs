@@ -17,6 +17,7 @@ function moduleUrl(url) {
 
 const logicalService = await import(moduleUrl(new URL('../src/features/scanner/services/logicalSurfaceService.ts', import.meta.url)))
 const association = await import(moduleUrl(new URL('../src/features/scanner/services/realityStructuralAssociationService.ts', import.meta.url)))
+const structuralInterpretation = await import(moduleUrl(new URL('../src/features/room-analysis/services/structuralSurfaceInterpretationService.ts', import.meta.url)))
 
 function patch(id, {
   offsetX = 0,
@@ -97,6 +98,62 @@ function clusteredWallSamples({ badCenterNormal = false } = {}) {
     }
   }
   return result
+}
+
+function structuralPlane(id, {
+  normal,
+  planeConstant = 0,
+  area = 4,
+  support = 800,
+  rmsError = 0.012,
+  min = { x: 0, y: 0, z: 0 },
+  max = { x: 3, y: 2.4, z: 0.04 },
+} = {}) {
+  const tangentU = Math.abs(normal.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 }
+  const tangentV = Math.abs(normal.y) < 0.9
+    ? { x: normal.z, y: 0, z: -normal.x }
+    : { x: 0, y: 0, z: 1 }
+  return {
+    id,
+    normal,
+    centroid: {
+      x: (min.x + max.x) / 2,
+      y: (min.y + max.y) / 2,
+      z: (min.z + max.z) / 2,
+    },
+    planeConstant,
+    supportPointCount: support,
+    areaEstimate: area,
+    projectedBoundsAreaEstimate: area,
+    rmsError,
+    bounds: { min, max },
+    localBounds: { minU: 0, maxU: 3, minV: 0, maxV: 2.4 },
+    tangentU,
+    tangentV,
+    orientationAngleDegrees: 90,
+    orientationCategory: Math.abs(normal.y) < 0.2 ? 'vertical-like' : 'horizontal-like',
+    confidence: 0.9,
+  }
+}
+
+function interpretationInput(planes) {
+  return {
+    sourceScanId: 'synthetic-structural-scan',
+    planes,
+    surfaceConsensus: planes.map((plane) => ({
+      consensusId: `consensus-${plane.id}`,
+      finalPlaneId: plane.id,
+      memberFamilyIds: [],
+      memberPlaneIds: [plane.id],
+      totalDepthSpanMeters: 0.01,
+      representativePlaneId: plane.id,
+      directRepresentativeSupport: plane.supportPointCount,
+      absorbedLayerSupport: 0,
+      finalOwnedSupport: plane.supportPointCount,
+      finalOwnedAreaEstimate: plane.areaEstimate,
+      representativeRmsError: plane.rmsError,
+    })),
+  }
 }
 
 // 1. Two coplanar, adjacent M7.4 patches belonging to same physical wall form 1 LogicalStructuralSurface.
@@ -396,4 +453,110 @@ test('23. Expanded wall tap is accepted and foreground tap is rejected', () => {
   assert.equal(expandedTap.accepted, true)
   const curtainTap = association.evaluateRealityTapHit({ x: center.x, y: center.y, z: 0.06 }, { x: 0, y: 0, z: 1 }, null, table)
   assert.equal(curtainTap.accepted, false)
+})
+
+function offsetWallSamples(offset, { startX = 0.9, startY = 0.9, idStart = 200 } = {}) {
+  const samples = []
+  let id = idStart
+  for (const y of [startY, startY + 0.02, startY + 0.04]) {
+    for (const x of [startX, startX + 0.02, startX + 0.04]) {
+      samples.push(surfel(id++, x, y, offset))
+    }
+  }
+  return samples
+}
+
+// 24. A coherent +3.5 cm dense Reality offset is calibrated only as a
+// derived membership reference and restores paintability without moving M7.
+test('24. Systematic dense Reality offset derives membership reference', () => {
+  const samples = offsetWallSamples(0.035)
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const diagnostic = table.perLogicalSurface[0]
+  assert.equal(diagnostic.membershipReferenceApplied, true)
+  assert.ok(Math.abs(diagnostic.membershipReferenceOffsetMeters - 0.035) < 0.008)
+  assert.equal(table.wallMemberCount, samples.length)
+})
+
+// 25. A parallel curtain at +6 cm does not drag calibration or receive paint
+// when the coherent wall mode is at +3.5 cm.
+test('25. Disconnected +6 cm curtain remains excluded after calibration', () => {
+  const wallSamples = offsetWallSamples(0.035)
+  const curtainSamples = offsetWallSamples(0.06, { startX: 1.4, idStart: 300 })
+  const samples = [...wallSamples, ...curtainSamples]
+  const table = association.associateRealitySurfels(samples, [patch('wall-a', { width: 2 })])
+  const colors = association.buildRealityDesignColors(samples, table, [{ surfaceId: 'wall-a', paintColor: '#3366cc' }])
+  assert.equal(colors.size, wallSamples.length)
+  for (const sample of curtainSamples) assert.equal(colors.has(sample.id), false)
+})
+
+// 26. Dense measured support can extend slightly past a partial M7.4 patch,
+// but only through an actual local chain from an observed calibrated core.
+test('26. Connected observed Reality extends slightly beyond patch support', () => {
+  const wall = patch('wall-a', { width: 1 })
+  const inside = offsetWallSamples(0.035, { startX: 0.9 })
+  const extension = offsetWallSamples(0.035, { startX: 1.02, idStart: 400 })
+  const samples = [...inside, ...extension]
+  const table = association.associateRealitySurfels(samples, [wall])
+  const diagnostic = table.perLogicalSurface[0]
+  assert.ok(diagnostic.outsidePatchCandidateCount > 0)
+  assert.ok(diagnostic.outsidePatchExpandedCount > 0)
+  const colors = association.buildRealityDesignColors(samples, table, [{ surfaceId: 'wall-a', paintColor: '#00aa55' }])
+  assert.ok(colors.has(extension[0].id))
+})
+
+// 27. A coplanar exterior component without a connected observation chain is
+// not painted simply because it lies near the derived reference plane.
+test('27. Disconnected exterior coplanar Reality remains unpainted', () => {
+  const wall = patch('wall-a', { width: 1 })
+  const inside = offsetWallSamples(0.035, { startX: 0.9 })
+  const outside = offsetWallSamples(0.035, { startX: 1.5, idStart: 500 })
+  const samples = [...inside, ...outside]
+  const table = association.associateRealitySurfels(samples, [wall])
+  const colors = association.buildRealityDesignColors(samples, table, [{ surfaceId: 'wall-a', paintColor: '#00aa55' }])
+  for (const sample of outside) assert.equal(colors.has(sample.id), false)
+})
+
+// 28. Independently strong wall planes must not remain alternates solely
+// because a room graph/triad happened to select a different wall first.
+test('28. Strong standalone walls survive without a closed-room triad', () => {
+  const planes = [
+    structuralPlane('plane-1', {
+      normal: { x: 0, y: 0, z: 1 },
+      area: 4.65,
+      support: 1042,
+      min: { x: 0, y: 0, z: 0 }, max: { x: 3.2, y: 2.4, z: 0.02 },
+    }),
+    structuralPlane('plane-2', {
+      normal: { x: 1, y: 0, z: 0 },
+      planeConstant: 2.4,
+      area: 3.03,
+      support: 526,
+      min: { x: 2.38, y: 0, z: 0 }, max: { x: 2.42, y: 2.4, z: 2.1 },
+    }),
+    structuralPlane('plane-3', {
+      normal: { x: 0.707, y: 0, z: 0.707 },
+      planeConstant: 1.8,
+      area: 2.61,
+      support: 407,
+      min: { x: -1.1, y: 0, z: 1.4 }, max: { x: 1.1, y: 2.4, z: 3.0 },
+    }),
+    structuralPlane('cabinet-face', {
+      normal: { x: -1, y: 0, z: 0 },
+      planeConstant: -0.8,
+      area: 0.42,
+      support: 88,
+      min: { x: 0.78, y: 0.4, z: 0.5 }, max: { x: 0.82, y: 1.3, z: 1.0 },
+    }),
+  ]
+  const service = new structuralInterpretation.StructuralSurfaceInterpretationService()
+  const result = service.interpret(interpretationInput(planes), 'local-floor')
+  const selectedIds = new Set(result.selectedWalls.map((surface) => surface.planeId))
+
+  assert.deepEqual(selectedIds, new Set(['plane-1', 'plane-2', 'plane-3']))
+  assert.equal(result.stats.promotedStrongStandaloneWallCount, 2)
+  assert.equal(selectedIds.has('cabinet-face'), false)
+  assert.match(
+    result.surfaces.find((surface) => surface.planeId === 'plane-3').selectionReason,
+    /strong standalone wall/i,
+  )
 })

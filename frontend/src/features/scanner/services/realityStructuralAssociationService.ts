@@ -48,6 +48,26 @@ export interface RealityMembershipDistribution {
   readonly p95: number | null
 }
 
+export interface RealitySignedResidualDistribution {
+  readonly mean: number | null
+  readonly median: number | null
+  readonly mad: number | null
+  readonly p10: number | null
+  readonly p25: number | null
+  readonly p75: number | null
+  readonly p90: number | null
+}
+
+export type RealityMembershipTerminalReason =
+  | 'outside domain'
+  | 'disconnected'
+  | 'residual incompatible'
+  | 'foreground'
+  | 'conflicting surface'
+  | 'insufficient support'
+  | 'uncertain/no proof'
+  | 'other'
+
 export interface LogicalSurfaceMembershipDiagnostics {
   readonly logicalSurfaceId: string
   readonly role: RoomSurfacePatchRole
@@ -60,12 +80,23 @@ export interface LogicalSurfaceMembershipDiagnostics {
   readonly nonWallCount: number
   readonly rejectionCounts: Readonly<Record<RealityMembershipRejectionReason, number>>
   readonly planeResidualMeters: RealityMembershipDistribution
+  readonly membershipResidualMeters: RealityMembershipDistribution
+  readonly signedPlaneResidualMeters: RealitySignedResidualDistribution
   readonly normalAngleDegrees: RealityMembershipDistribution
   readonly neighborDepthStepMeters: RealityMembershipDistribution
   readonly expansionPlaneResidualMeters: number
   readonly expansionMinimumLocalNormalDot: number
   readonly expansionMaximumDepthStepMeters: number
   readonly expansionNeighborRadiusMeters: number
+  readonly membershipReferenceOffsetMeters: number
+  readonly membershipReferenceApplied: boolean
+  readonly membershipReferenceSampleCount: number
+  readonly insidePatchCandidateCount: number
+  readonly outsidePatchCandidateCount: number
+  readonly outsidePatchExpandedCount: number
+  readonly terminalReasonCounts: Readonly<Record<RealityMembershipTerminalReason, number>>
+  readonly terminalNonPaintableCount: number
+  readonly calibrationMs: number
   readonly seedPassMs: number
   readonly localEvidenceMs: number
   readonly regionGrowthMs: number
@@ -137,6 +168,7 @@ export interface RealityStructuralAssociationTable {
   readonly uncertainCount: number
   readonly candidateCount: number
   readonly perLogicalSurface: readonly LogicalSurfaceMembershipDiagnostics[]
+  readonly calibrationMs: number
   readonly seedPassMs: number
   readonly neighborIndexMs: number
   readonly regionGrowthMs: number
@@ -164,8 +196,16 @@ const SEED_MAX_STRUCTURAL_SUPPORT_DISTANCE_METERS = 0.12
 // measurements and are clamped to these safe, orientation-independent bounds.
 const CANDIDATE_MAX_PLANE_RESIDUAL_METERS = 0.065
 const CLEAR_FOREGROUND_PLANE_OFFSET_METERS = 0.04
+const CALIBRATION_MAX_ABSOLUTE_OFFSET_METERS = 0.045
+const CALIBRATION_BIN_METERS = 0.005
+const MINIMUM_APPLIED_CALIBRATION_OFFSET_METERS = 0.012
+const CALIBRATION_CLUSTER_HALF_WIDTH_METERS = 0.0125
+const CALIBRATION_MINIMUM_SAMPLES = 8
+const CALIBRATION_MINIMUM_DOMINANT_SHARE = 0.08
+const CALIBRATION_MINIMUM_NEIGHBORS = 3
+const MEMBERSHIP_EXTENSION_MAX_RESIDUAL_METERS = 0.042
 const EXPANSION_MIN_PLANE_RESIDUAL_METERS = 0.025
-const EXPANSION_MAX_PLANE_RESIDUAL_METERS = 0.04
+const EXPANSION_MAX_PLANE_RESIDUAL_METERS = 0.035
 const EXPANSION_MIN_LOCAL_NORMAL_DOT = 0.68
 const EXPANSION_MAX_LOCAL_NORMAL_DOT = 0.82
 const EXPANSION_MIN_DEPTH_STEP_METERS = 0.012
@@ -217,6 +257,20 @@ function distribution(values: readonly number[]): RealityMembershipDistribution 
   }
 }
 
+function signedDistribution(values: readonly number[]): RealitySignedResidualDistribution {
+  const median = percentile(values, 0.5)
+  const deviations = median === null ? [] : values.map((value) => Math.abs(value - median))
+  return {
+    mean: values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+    median,
+    mad: percentile(deviations, 0.5),
+    p10: percentile(values, 0.1),
+    p25: percentile(values, 0.25),
+    p75: percentile(values, 0.75),
+    p90: percentile(values, 0.9),
+  }
+}
+
 function normalAngleDegrees(normalDot: number): number {
   return Math.acos(clamp(normalDot, -1, 1)) * 180 / Math.PI
 }
@@ -238,6 +292,21 @@ const REJECTION_REASONS: readonly RealityMembershipRejectionReason[] = [
 
 function emptyRejectionCounts(): Record<RealityMembershipRejectionReason, number> {
   return Object.fromEntries(REJECTION_REASONS.map((reason) => [reason, 0])) as Record<RealityMembershipRejectionReason, number>
+}
+
+const TERMINAL_REASONS: readonly RealityMembershipTerminalReason[] = [
+  'outside domain',
+  'disconnected',
+  'residual incompatible',
+  'foreground',
+  'conflicting surface',
+  'insufficient support',
+  'uncertain/no proof',
+  'other',
+]
+
+function emptyTerminalReasonCounts(): Record<RealityMembershipTerminalReason, number> {
+  return Object.fromEntries(TERMINAL_REASONS.map((reason) => [reason, 0])) as Record<RealityMembershipTerminalReason, number>
 }
 
 function normalizedDot(first: SpatialPoint, second: SpatialPoint): number | null {
@@ -619,6 +688,85 @@ class SpatialGrid3D {
   }
 }
 
+interface MembershipReferenceCalibration {
+  readonly offsetMeters: number
+  readonly applied: boolean
+  readonly sampleCount: number
+  readonly madMeters: number | null
+}
+
+/**
+ * Estimates a display-only Reality membership plane offset. It never changes
+ * the M7 plane: values must be inside observed patch support, normal-compatible,
+ * locally populated, and (when present) near structural-support surfels.
+ */
+function deriveMembershipReferenceCalibration(
+  surfels: readonly FinalizedRealitySurfel[],
+  logical: LogicalStructuralSurface,
+  memberPatches: readonly RoomSurfacePatch[],
+  structuralGrid: SpatialGrid3D | undefined,
+  denseGrid: SpatialGrid3D,
+): MembershipReferenceCalibration {
+  const observations: Array<{ index: number; signedOffset: number }> = []
+  for (let index = 0; index < surfels.length; index++) {
+    const surfel = surfels[index]
+    const signedOffset = planeSignedDistance(surfel.position, logical.representativeNormal, logical.representativePlaneConstant)
+    if (Math.abs(signedOffset) > CALIBRATION_MAX_ABSOLUTE_OFFSET_METERS) continue
+    const normalDot = surfel.normal ? (normalizedDot(surfel.normal, logical.representativeNormal) ?? 0) : 0
+    if (normalDot < MIN_NORMAL_COMPATIBILITY) continue
+    let insideObservedPatch = false
+    for (const patch of memberPatches) {
+      if (polygonStatus(localPoint(surfel.position, patch), patch).inside) {
+        insideObservedPatch = true
+        break
+      }
+    }
+    if (!insideObservedPatch) continue
+    if (structuralGrid && structuralGrid.query(surfel.position, SEED_MAX_STRUCTURAL_SUPPORT_DISTANCE_METERS, 1).length === 0) continue
+    observations.push({ index, signedOffset })
+  }
+  if (observations.length < CALIBRATION_MINIMUM_SAMPLES) {
+    return { offsetMeters: 0, applied: false, sampleCount: observations.length, madMeters: null }
+  }
+
+  const bins = new Map<number, Array<{ index: number; signedOffset: number }>>()
+  for (const observation of observations) {
+    const bin = Math.round(observation.signedOffset / CALIBRATION_BIN_METERS)
+    const entries = bins.get(bin) ?? []
+    entries.push(observation)
+    bins.set(bin, entries)
+  }
+  const dominant = [...bins.entries()].sort(([leftBin, left], [rightBin, right]) =>
+    right.length - left.length || Math.abs(leftBin) - Math.abs(rightBin) || leftBin - rightBin)[0]
+  if (!dominant || dominant[1].length < Math.max(CALIBRATION_MINIMUM_SAMPLES, observations.length * CALIBRATION_MINIMUM_DOMINANT_SHARE)) {
+    return { offsetMeters: 0, applied: false, sampleCount: observations.length, madMeters: null }
+  }
+  const modeOffset = dominant[0] * CALIBRATION_BIN_METERS
+  const locallySupported = observations.filter((observation) => {
+    if (Math.abs(observation.signedOffset - modeOffset) > CALIBRATION_CLUSTER_HALF_WIDTH_METERS) return false
+    let compatibleNeighbors = 0
+    for (const neighborIndex of denseGrid.query(surfels[observation.index].position, EXPANSION_MAX_NEIGHBOR_RADIUS_METERS, MAX_LOCAL_NEIGHBORS)) {
+      const neighbor = surfels[neighborIndex]
+      const neighborOffset = planeSignedDistance(neighbor.position, logical.representativeNormal, logical.representativePlaneConstant)
+      const normalDot = neighbor.normal ? (normalizedDot(neighbor.normal, logical.representativeNormal) ?? 0) : 0
+      if (Math.abs(neighborOffset - modeOffset) <= CALIBRATION_CLUSTER_HALF_WIDTH_METERS && normalDot >= MIN_NORMAL_COMPATIBILITY) compatibleNeighbors++
+    }
+    return compatibleNeighbors >= CALIBRATION_MINIMUM_NEIGHBORS
+  })
+  if (locallySupported.length < CALIBRATION_MINIMUM_SAMPLES) {
+    return { offsetMeters: 0, applied: false, sampleCount: locallySupported.length, madMeters: null }
+  }
+  const offset = percentile(locallySupported.map((observation) => observation.signedOffset), 0.5) ?? 0
+  const mad = percentile(locallySupported.map((observation) => Math.abs(observation.signedOffset - offset)), 0.5)
+  const boundedOffset = clamp(offset, -CALIBRATION_MAX_ABSOLUTE_OFFSET_METERS, CALIBRATION_MAX_ABSOLUTE_OFFSET_METERS)
+  return {
+    offsetMeters: Math.abs(boundedOffset) >= MINIMUM_APPLIED_CALIBRATION_OFFSET_METERS ? boundedOffset : 0,
+    applied: Math.abs(boundedOffset) >= MINIMUM_APPLIED_CALIBRATION_OFFSET_METERS,
+    sampleCount: locallySupported.length,
+    madMeters: mad,
+  }
+}
+
 /**
  * M8.5.2 structural membership pass.
  *
@@ -667,6 +815,7 @@ export function associateRealitySurfels(
       uncertainCount: 0,
       candidateCount: 0,
       perLogicalSurface: [],
+      calibrationMs: 0,
       seedPassMs: 0,
       neighborIndexMs: 0,
       regionGrowthMs: 0,
@@ -703,6 +852,7 @@ export function associateRealitySurfels(
   const neighborIndexMs = timestamp() - neighborIndexStarted
 
   let candidateCount = 0
+  let calibrationMs = 0
   let seedPassMs = 0
   let regionGrowthMs = 0
   let classificationFinalizationMs = 0
@@ -716,14 +866,21 @@ export function associateRealitySurfels(
     const logical = logicalSurfaces[lIdx]
     const memberPatches = patches.filter((p) => logical.memberPatchIds.includes(p.id))
     const structuralGrid = structuralSupportGridByLogical.get(logical.id)
+    const calibrationStarted = timestamp()
+    const calibration = deriveMembershipReferenceCalibration(surfels, logical, memberPatches, structuralGrid, denseGrid)
+    const logicalCalibrationMs = timestamp() - calibrationStarted
+    calibrationMs += logicalCalibrationMs
     const seedIndices: number[] = []
     const seedMask = new Uint8Array(n)
     const candidateState = new Uint8Array(n) // 0=outside, 1=plausible, 2=clear foreground/residual
+    const outsidePatchMask = new Uint8Array(n)
     const matchingPatchForSample = new Int32Array(n).fill(-1)
     const planeResiduals = new Float32Array(n)
     const rawNormalDots = new Float32Array(n)
     const failureFlags = new Uint16Array(n)
     const residualDistributionInput: number[] = []
+    const membershipResidualDistributionInput: number[] = []
+    const signedResidualDistributionInput: number[] = []
     const normalAngleDistributionInput: number[] = []
     const coreResiduals: number[] = []
     const coreNeighborSteps: number[] = []
@@ -731,12 +888,15 @@ export function associateRealitySurfels(
     const rejectionCounts = emptyRejectionCounts()
     let candidateSampleCount = 0
     let positiveNonWallCandidateCount = 0
+    let insidePatchCandidateCount = 0
+    let outsidePatchCandidateCount = 0
 
     const seedPassStarted = timestamp()
     for (let i = 0; i < n; i++) {
       const surfel = surfels[i]
       const signedOffset = planeSignedDistance(surfel.position, logical.representativeNormal, logical.representativePlaneConstant)
       const planeDistance = Math.abs(signedOffset)
+      const membershipResidual = Math.abs(signedOffset - calibration.offsetMeters)
       const normalComp = surfel.normal ? (normalizedDot(surfel.normal, logical.representativeNormal) ?? 0) : 0
       let bestPatchIdx = -1
       let insideAny = false
@@ -757,32 +917,45 @@ export function associateRealitySurfels(
           }
         }
       }
-      if (!withinEdgeAny) {
-        if (planeDistance <= CANDIDATE_MAX_PLANE_RESIDUAL_METERS) {
-          rejectionCounts['outside member patch extent']++
-        }
+      const isObservedPatchDomain = withinEdgeAny
+      const canEnterObservedExtension = !isObservedPatchDomain &&
+        membershipResidual <= MEMBERSHIP_EXTENSION_MAX_RESIDUAL_METERS &&
+        normalComp >= 0.35
+      if (!isObservedPatchDomain && !canEnterObservedExtension) {
+        if (membershipResidual <= CANDIDATE_MAX_PLANE_RESIDUAL_METERS) rejectionCounts['outside member patch extent']++
         continue
       }
 
       // This is the logical surface's *union* domain. Individual M7.4 member
       // patches remain immutable; their observed extents are simply evaluated
       // together for propagation over a fragmented physical wall.
-      if (planeDistance > CANDIDATE_MAX_PLANE_RESIDUAL_METERS) {
+      if (membershipResidual > CANDIDATE_MAX_PLANE_RESIDUAL_METERS) {
         rejectionCounts['plane residual too high']++
         continue
       }
 
       candidateSampleCount++
       candidateCount++
+      if (isObservedPatchDomain) insidePatchCandidateCount++
+      else {
+        outsidePatchCandidateCount++
+        outsidePatchMask[i] = 1
+      }
       matchingPatchForSample[i] = bestPatchIdx
-      planeResiduals[i] = planeDistance
+      planeResiduals[i] = membershipResidual
       rawNormalDots[i] = normalComp
       residualDistributionInput.push(planeDistance)
+      membershipResidualDistributionInput.push(membershipResidual)
+      signedResidualDistributionInput.push(signedOffset)
       if (normalComp > 0) normalAngleDistributionInput.push(normalAngleDegrees(normalComp))
 
       // A substantial offset inside the patch is positive evidence of a
       // foreground/background component, not merely failed wall proof.
-      if (planeDistance > CLEAR_FOREGROUND_PLANE_OFFSET_METERS) {
+      const foregroundResidualThreshold = Math.max(
+        CLEAR_FOREGROUND_PLANE_OFFSET_METERS,
+        (calibration.applied ? Math.max(0.025, (calibration.madMeters ?? 0.005) * 2.8 + 0.012) : EXPANSION_MIN_PLANE_RESIDUAL_METERS) + 0.018,
+      )
+      if (membershipResidual > foregroundResidualThreshold) {
         candidateState[i] = 2
         foregroundEvidence[i] = 1
         positiveNonWallCandidateCount++
@@ -801,7 +974,7 @@ export function associateRealitySurfels(
       if (isStrictSeedGeometry && hasStructuralSupport) {
         seedIndices.push(i)
         seedMask[i] = 1
-        coreResiduals.push(planeDistance)
+        coreResiduals.push(membershipResidual)
       } else if (!isStrictSeedGeometry && normalComp < MIN_NORMAL_COMPATIBILITY) {
         failureFlags[i] |= 1
       }
@@ -825,7 +998,10 @@ export function associateRealitySurfels(
         ))
       }
     }
-    const expansionPlaneResidual = clamp((percentile(coreResiduals, 0.9) ?? SEED_MAX_PLANE_RESIDUAL_METERS) * 1.9, EXPANSION_MIN_PLANE_RESIDUAL_METERS, EXPANSION_MAX_PLANE_RESIDUAL_METERS)
+    const calibrationEnvelope = calibration.applied
+      ? Math.max(EXPANSION_MIN_PLANE_RESIDUAL_METERS, (calibration.madMeters ?? 0.005) * 2.8 + 0.012)
+      : (percentile(coreResiduals, 0.9) ?? SEED_MAX_PLANE_RESIDUAL_METERS) * 1.9
+    const expansionPlaneResidual = clamp(calibrationEnvelope, EXPANSION_MIN_PLANE_RESIDUAL_METERS, EXPANSION_MAX_PLANE_RESIDUAL_METERS)
     const expansionNeighborRadius = clamp((percentile(coreNeighborDistances, 0.9) ?? EXPANSION_MIN_NEIGHBOR_RADIUS_METERS) * 1.55, EXPANSION_MIN_NEIGHBOR_RADIUS_METERS, EXPANSION_MAX_NEIGHBOR_RADIUS_METERS)
     const expansionMaximumDepthStep = clamp((percentile(coreNeighborSteps, 0.9) ?? 0.015) * 1.65, EXPANSION_MIN_DEPTH_STEP_METERS, EXPANSION_MAX_DEPTH_STEP_METERS)
     const normalDistribution = normalAngleDistributionInput.map((angle) => Math.cos(angle * Math.PI / 180))
@@ -858,9 +1034,25 @@ export function associateRealitySurfels(
     }
     const thisLocalEvidenceMs = timestamp() - localEvidenceStarted
 
+    // A consistent, locally populated derived-reference mode is a second
+    // high-confidence anchor set. It does not relax original M8.5.1 seeds;
+    // it only lets a systematic dense-vs-structural plane offset start a
+    // measured connected region without changing the structural plane itself.
+    const calibrationAnchorIndices: number[] = []
+    if (calibration.applied) {
+      const anchorResidual = Math.max(0.012, expansionPlaneResidual * 0.55)
+      for (let index = 0; index < n; index++) {
+        if (candidateState[index] !== 1 || matchingPatchForSample[index] < 0) continue
+        if (planeResiduals[index] > anchorResidual || localNormalDots[index] < expansionMinimumLocalNormalDot || localSupportCounts[index] < 3) continue
+        if (structuralGrid && structuralGrid.query(surfels[index].position, SEED_MAX_STRUCTURAL_SUPPORT_DISTANCE_METERS, 1).length === 0) continue
+        calibrationAnchorIndices.push(index)
+      }
+    }
+
     // Strict core membership is set before any growth. Core and expanded are
     // separate diagnostics but both are paintable in normal Design mode.
-    for (const seedIdx of seedIndices) {
+    const coreAnchorIndices = [...seedIndices, ...calibrationAnchorIndices]
+    for (const seedIdx of coreAnchorIndices) {
       if (memberships[seedIdx] !== RealityMembershipCode.NON_WALL && logicalSurfaceIndices[seedIdx] !== lIdx) continue
       memberships[seedIdx] = RealityMembershipCode.CORE_WALL_MEMBER
       logicalSurfaceIndices[seedIdx] = lIdx
@@ -868,7 +1060,7 @@ export function associateRealitySurfels(
     }
 
     const growthStarted = timestamp()
-    const queue = [...seedIndices]
+    const queue = [...coreAnchorIndices]
     const growthAttempts = new Uint8Array(n)
     let head = 0
     while (head < queue.length) {
@@ -960,11 +1152,31 @@ export function associateRealitySurfels(
       else rejectionCounts['unreachable from seed']++
     }
 
-    let coreMemberCount = 0, expandedMemberCount = 0, uncertainCount = 0, nonWallCount = positiveNonWallCandidateCount
+    const terminalReasonCounts = emptyTerminalReasonCounts()
+    let terminalNonPaintableCount = 0
+    for (let i = 0; i < n; i++) {
+      if (candidateState[i] === 0 || (isPaintableRealityMembership(memberships[i]) && logicalSurfaceIndices[i] === lIdx)) continue
+      terminalNonPaintableCount++
+      if (candidateState[i] === 2) terminalReasonCounts.foreground++
+      else if (isPaintableRealityMembership(memberships[i]) && logicalSurfaceIndices[i] !== lIdx) terminalReasonCounts['conflicting surface']++
+      else if (failureFlags[i] & 32) terminalReasonCounts['conflicting surface']++
+      else if (failureFlags[i] & 2) terminalReasonCounts['residual incompatible']++
+      else if (failureFlags[i] & 8) terminalReasonCounts.foreground++
+      else if (failureFlags[i] & 64) terminalReasonCounts['insufficient support']++
+      else if (outsidePatchMask[i] === 1) terminalReasonCounts.disconnected++
+      else if (failureFlags[i] & 16) terminalReasonCounts.disconnected++
+      else if (failureFlags[i] & 1 || failureFlags[i] & 4) terminalReasonCounts['uncertain/no proof']++
+      else terminalReasonCounts['uncertain/no proof']++
+    }
+
+    let coreMemberCount = 0, expandedMemberCount = 0, uncertainCount = 0, nonWallCount = positiveNonWallCandidateCount, outsidePatchExpandedCount = 0
     for (let i = 0; i < n; i++) {
       if (logicalSurfaceIndices[i] !== lIdx) continue
       if (memberships[i] === RealityMembershipCode.CORE_WALL_MEMBER) coreMemberCount++
-      else if (memberships[i] === RealityMembershipCode.EXPANDED_WALL_MEMBER) expandedMemberCount++
+      else if (memberships[i] === RealityMembershipCode.EXPANDED_WALL_MEMBER) {
+        expandedMemberCount++
+        if (outsidePatchMask[i] === 1) outsidePatchExpandedCount++
+      }
       else if (memberships[i] === RealityMembershipCode.UNCERTAIN) uncertainCount++
       else nonWallCount++
     }
@@ -982,12 +1194,23 @@ export function associateRealitySurfels(
       nonWallCount,
       rejectionCounts,
       planeResidualMeters: distribution(residualDistributionInput),
+      membershipResidualMeters: distribution(membershipResidualDistributionInput),
+      signedPlaneResidualMeters: signedDistribution(signedResidualDistributionInput),
       normalAngleDegrees: distribution(normalAngleDistributionInput),
       neighborDepthStepMeters: distribution(coreNeighborSteps),
       expansionPlaneResidualMeters: expansionPlaneResidual,
       expansionMinimumLocalNormalDot,
       expansionMaximumDepthStepMeters: expansionMaximumDepthStep,
       expansionNeighborRadiusMeters: expansionNeighborRadius,
+      membershipReferenceOffsetMeters: calibration.offsetMeters,
+      membershipReferenceApplied: calibration.applied,
+      membershipReferenceSampleCount: calibration.sampleCount,
+      insidePatchCandidateCount,
+      outsidePatchCandidateCount,
+      outsidePatchExpandedCount,
+      terminalReasonCounts,
+      terminalNonPaintableCount,
+      calibrationMs: logicalCalibrationMs,
       seedPassMs: thisSeedPassMs,
       localEvidenceMs: thisLocalEvidenceMs,
       regionGrowthMs: thisRegionGrowthMs,
@@ -1034,6 +1257,7 @@ export function associateRealitySurfels(
     uncertainCount,
     candidateCount,
     perLogicalSurface,
+    calibrationMs,
     seedPassMs,
     neighborIndexMs,
     regionGrowthMs,

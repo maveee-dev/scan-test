@@ -392,6 +392,7 @@ export interface RoomStructureInterpretationResult {
     readonly likelyWallCount: number
     readonly selectedWallCount: number
     readonly alternateWallCount: number
+    readonly promotedStrongStandaloneWallCount: number
     readonly selectedFloorCount: number
     readonly alternateFloorCount: number
     readonly selectedCeilingCount: number

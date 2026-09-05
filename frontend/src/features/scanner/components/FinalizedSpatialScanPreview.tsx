@@ -1392,12 +1392,12 @@ function FinalizedSpatialScanPreview({
               </span>
               {realityAssociation.table ? (
                 <span>
-                  Reality/Structural association: {realityAssociation.table.coreWallMemberCount} strict core + {realityAssociation.table.expandedWallMemberCount} expanded = {realityAssociation.table.wallMemberCount} paintable / {realityAssociation.table.uncertainCount} uncertain / {realityAssociation.table.nonWallCount} non-wall; worker {realityAssociation.table.elapsedMs.toFixed(1)} ms (seed {realityAssociation.table.seedPassMs.toFixed(1)} / index {realityAssociation.table.neighborIndexMs.toFixed(1)} / growth {realityAssociation.table.regionGrowthMs.toFixed(1)} / finalize {realityAssociation.table.classificationFinalizationMs.toFixed(1)} ms).
+                  Reality/Structural association: {realityAssociation.table.coreWallMemberCount} strict core + {realityAssociation.table.expandedWallMemberCount} expanded = {realityAssociation.table.wallMemberCount} paintable / {realityAssociation.table.uncertainCount} uncertain / {realityAssociation.table.nonWallCount} non-wall; worker {realityAssociation.table.elapsedMs.toFixed(1)} ms (calibration {realityAssociation.table.calibrationMs.toFixed(1)} / seed {realityAssociation.table.seedPassMs.toFixed(1)} / index {realityAssociation.table.neighborIndexMs.toFixed(1)} / growth {realityAssociation.table.regionGrowthMs.toFixed(1)} / finalize {realityAssociation.table.classificationFinalizationMs.toFixed(1)} ms).
                 </span>
               ) : null}
               <div className="scanner-reality-group-diagnostics">
                 <span>
-                  <strong>Logical Surface Membership (M8.5.2):</strong> cyan = strict core, green = expanded, amber = uncertain, dark red = non-wall. {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches.
+                  <strong>Logical Surface Membership (M8.5.3):</strong> cyan = strict core, green = expanded, amber = uncertain, dark red = non-wall. {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches.
                 </span>
                 {logicalSurfaces.map((l) => (
                   <span key={l.id} style={{ display: 'block', fontSize: '0.82rem', opacity: 0.88 }}>
@@ -1407,20 +1407,28 @@ function FinalizedSpatialScanPreview({
               </div>
               {realityAssociation.table?.perLogicalSurface.map((diagnostic) => {
                 const total = Math.max(1, diagnostic.candidateSampleCount)
-                const reasons = Object.entries(diagnostic.rejectionCounts).filter(([, count]) => count > 0)
+                const eventReasons = Object.entries(diagnostic.rejectionCounts).filter(([, count]) => count > 0)
+                const terminalReasons = Object.entries(diagnostic.terminalReasonCounts).filter(([, count]) => count > 0)
+                const terminalTotal = Math.max(1, diagnostic.terminalNonPaintableCount)
                 return (
                   <div key={`${diagnostic.logicalSurfaceId}-membership`} className="scanner-reality-group-diagnostics">
                     <span>
-                      <strong>{diagnostic.logicalSurfaceId} membership:</strong> candidates {diagnostic.candidateSampleCount}; core {diagnostic.coreMemberCount} ({(diagnostic.coreMemberCount / total * 100).toFixed(1)}%) / expanded {diagnostic.expandedMemberCount} ({(diagnostic.expandedMemberCount / total * 100).toFixed(1)}%) / paintable {diagnostic.totalPaintableCount} ({(diagnostic.totalPaintableCount / total * 100).toFixed(1)}%) / uncertain {diagnostic.uncertainCount} ({(diagnostic.uncertainCount / total * 100).toFixed(1)}%).
+                      <strong>{diagnostic.logicalSurfaceId} membership:</strong> candidates {diagnostic.candidateSampleCount}; core {diagnostic.coreMemberCount} ({(diagnostic.coreMemberCount / total * 100).toFixed(1)}%) / expanded {diagnostic.expandedMemberCount} ({(diagnostic.expandedMemberCount / total * 100).toFixed(1)}%) / paintable {diagnostic.totalPaintableCount} ({(diagnostic.totalPaintableCount / total * 100).toFixed(1)}%) / uncertain {diagnostic.uncertainCount} ({(diagnostic.uncertainCount / total * 100).toFixed(1)}%) / non-wall {diagnostic.nonWallCount} ({(diagnostic.nonWallCount / total * 100).toFixed(1)}%).
                     </span>
                     <span>
-                      Residual m med/p90/p95 {diagnostic.planeResidualMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p90?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p95?.toFixed(3) ?? 'N/A'}; normal deg med/p90 {diagnostic.normalAngleDegrees.median?.toFixed(1) ?? 'N/A'} / {diagnostic.normalAngleDegrees.p90?.toFixed(1) ?? 'N/A'}; step m med/p90 {diagnostic.neighborDepthStepMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.neighborDepthStepMeters.p90?.toFixed(3) ?? 'N/A'}.
+                      M7 absolute residual m med/p90/p95 {diagnostic.planeResidualMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p90?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p95?.toFixed(3) ?? 'N/A'}; signed mean/med/MAD/p10/p90 {diagnostic.signedPlaneResidualMeters.mean?.toFixed(3) ?? 'N/A'} / {diagnostic.signedPlaneResidualMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.signedPlaneResidualMeters.mad?.toFixed(3) ?? 'N/A'} / {diagnostic.signedPlaneResidualMeters.p10?.toFixed(3) ?? 'N/A'} / {diagnostic.signedPlaneResidualMeters.p90?.toFixed(3) ?? 'N/A'}.
                     </span>
                     <span>
-                      Expansion residual &lt;= {diagnostic.expansionPlaneResidualMeters.toFixed(3)} m, local normal dot &gt;= {diagnostic.expansionMinimumLocalNormalDot.toFixed(2)}, step &lt;= {diagnostic.expansionMaximumDepthStepMeters.toFixed(3)} m, radius &lt;= {diagnostic.expansionNeighborRadiusMeters.toFixed(3)} m; seed/local/grow/final {diagnostic.seedPassMs.toFixed(1)} / {diagnostic.localEvidenceMs.toFixed(1)} / {diagnostic.regionGrowthMs.toFixed(1)} / {diagnostic.finalizationMs.toFixed(1)} ms.
+                      Derived Reality reference {diagnostic.membershipReferenceApplied ? `${(diagnostic.membershipReferenceOffsetMeters * 100).toFixed(1)} cm` : 'not applied'} from {diagnostic.membershipReferenceSampleCount} samples; calibrated residual m med/p90/p95 {diagnostic.membershipResidualMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.membershipResidualMeters.p90?.toFixed(3) ?? 'N/A'} / {diagnostic.membershipResidualMeters.p95?.toFixed(3) ?? 'N/A'}. Inside patch {diagnostic.insidePatchCandidateCount}; observed outside patch {diagnostic.outsidePatchCandidateCount}, expanded {diagnostic.outsidePatchExpandedCount}.
                     </span>
-                    {reasons.length > 0 ? (
-                      <span>Unpainted reasons: {reasons.map(([reason, count]) => `${reason} ${count} (${(count / total * 100).toFixed(1)}%)`).join(' · ')}</span>
+                    <span>
+                      Expansion residual &lt;= {diagnostic.expansionPlaneResidualMeters.toFixed(3)} m, local normal dot &gt;= {diagnostic.expansionMinimumLocalNormalDot.toFixed(2)}, step &lt;= {diagnostic.expansionMaximumDepthStepMeters.toFixed(3)} m, radius &lt;= {diagnostic.expansionNeighborRadiusMeters.toFixed(3)} m; calibration/seed/local/grow/final {diagnostic.calibrationMs.toFixed(1)} / {diagnostic.seedPassMs.toFixed(1)} / {diagnostic.localEvidenceMs.toFixed(1)} / {diagnostic.regionGrowthMs.toFixed(1)} / {diagnostic.finalizationMs.toFixed(1)} ms.
+                    </span>
+                    {terminalReasons.length > 0 ? (
+                      <span>Terminal non-paintable reasons ({diagnostic.terminalNonPaintableCount}, mutually exclusive): {terminalReasons.map(([reason, count]) => `${reason} ${count} (${(count / terminalTotal * 100).toFixed(1)}%)`).join(' / ')}</span>
+                    ) : null}
+                    {eventReasons.length > 0 ? (
+                      <span>Evidence events (may overlap): {eventReasons.map(([reason, count]) => `${reason} ${count}`).join(' / ')}</span>
                     ) : null}
                   </div>
                 )
