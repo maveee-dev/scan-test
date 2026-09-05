@@ -7,6 +7,7 @@ import type {
   RealityRgbColor,
 } from '../types'
 import type { RealityDesignCompositeMode, RealityDesignCompositorStats, RealityPaintablePatchMask } from './realityDesignCompositingService'
+import type { RealityWallTriangleAssociation } from './realityWallTriangleAssociationService'
 
 export type RealitySurfaceRenderMode = 'points' | 'splats' | 'triangles' | 'dense'
 
@@ -45,6 +46,14 @@ export interface RealitySurfaceRenderResources {
   readonly geometries: readonly THREE.BufferGeometry[]
   readonly materials: readonly THREE.Material[]
   readonly stats: RealitySurfaceRenderStats
+  readonly triangleTopology: RealityTriangleTopology | null
+  readonly triangleGeometry: THREE.BufferGeometry | null
+}
+
+/** Exact source identities for unindexed Dense Reality triangle vertices. */
+export interface RealityTriangleTopology {
+  readonly vertexSurfelIds: Uint32Array
+  readonly triangleCount: number
 }
 
 // Small enough to inspect the measured 2.5 cm lattice without splat-like overlap.
@@ -172,6 +181,7 @@ interface TriangleGeometryResult {
   readonly triangleCount: number
   readonly coveredSurfelIndices: Uint8Array
   readonly coveredSurfelCount: number
+  readonly topology: RealityTriangleTopology
 }
 
 function getTimestamp(): number {
@@ -600,6 +610,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   const surfels = index.surfels
   const positions: number[] = []
   const colors: number[] = []
+  const vertexSurfelIds: number[] = []
   const centerNormal = new THREE.Vector3()
   const edgeA = new THREE.Vector3()
   const edgeB = new THREE.Vector3()
@@ -716,6 +727,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
         for (const surfel of ordered) {
           positions.push(surfel.position.x, surfel.position.y, surfel.position.z)
           writeColor(colors, colors.length, surfel, displayColors)
+          vertexSurfelIds.push(surfel.id)
         }
         triangleCount += 1
       }
@@ -725,7 +737,8 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
   geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
-  return { geometry, triangleCount, coveredSurfelIndices, coveredSurfelCount }
+  return { geometry, triangleCount, coveredSurfelIndices, coveredSurfelCount,
+    topology: { vertexSurfelIds: new Uint32Array(vertexSurfelIds), triangleCount } }
 }
 
 function createPointMaterial(): THREE.PointsMaterial {
@@ -779,6 +792,8 @@ export interface PreparedRealitySurface {
   geometries: { attributes: { name: string; array: Float32Array; itemSize: number }[] }[]
   layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles'; opacity: number }[]
   stats: RealitySurfaceRenderStats
+  triangleTopology?: RealityTriangleTopology
+  designTriangleAssociation?: RealityWallTriangleAssociation
   designComposite?: {
     mode: RealityDesignCompositeMode
     structuralPatchIds: readonly string[]
@@ -804,7 +819,7 @@ export function packRealitySurface(resources: RealitySurfaceRenderResources): Pr
     layers.push({ geometry: resources.geometries.indexOf(object.geometry), kind,
       opacity: material instanceof THREE.ShaderMaterial ? material.uniforms.uOpacity.value : material.opacity })
   }
-  return { geometries, layers, stats: resources.stats }
+  return { geometries, layers, stats: resources.stats, triangleTopology: resources.triangleTopology ?? undefined }
 }
 
 export function restoreRealitySurface(prepared: PreparedRealitySurface): RealitySurfaceRenderResources {
@@ -823,7 +838,8 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
       ? new THREE.Points(geometries[layer.geometry], material)
       : new THREE.Mesh(geometries[layer.geometry], material))
   }
-  return { group, geometries, materials, stats: prepared.stats }
+  return { group, geometries, materials, stats: prepared.stats,
+    triangleTopology: prepared.triangleTopology ?? null, triangleGeometry: null }
 }
 
 /** Builds post-scan Reality geometry once; it never changes the measured data. */
@@ -848,6 +864,8 @@ export function createRealitySurfaceRenderResources(
   let splatGeometryMs = 0
   let triangleGenerationMs = 0
   let splatSuppressionMask: Uint8Array | undefined
+  let triangleTopology: RealityTriangleTopology | null = null
+  let triangleGeometry: THREE.BufferGeometry | null = null
 
   if (mode === 'points') {
     const geometry = createPointGeometry(coloredSurfels, displayColors)
@@ -868,6 +886,8 @@ export function createRealitySurfaceRenderResources(
       coloredTriangleVertexCount = triangleResult.triangleCount * 3
       triangleCoveredSurfelCount = triangleResult.coveredSurfelCount
       splatSuppressionMask = triangleResult.coveredSurfelIndices
+      triangleTopology = triangleResult.topology
+      triangleGeometry = triangleResult.geometry
     }
 
     if (mode !== 'triangles') {
@@ -903,6 +923,8 @@ export function createRealitySurfaceRenderResources(
     group,
     geometries,
     materials,
+    triangleTopology,
+    triangleGeometry,
     stats: {
       mode,
       sourceSurfelCount: reconstruction.surfels.length,

@@ -1542,3 +1542,31 @@ presentation data and are discarded/rebuilt with the post-scan preview.
 Development views expose the **Exposed Wall Mask**, **Preserved Object Mask**,
 full **Structural Design Only**, and the final **Design Composite**, along with
 per-patch mask area, resolution, component count, and preparation timing.
+
+### M8.5.6 — Reality-Aligned Wall Surface Painting
+
+M8.5.6 corrects the final visual primitive in Design mode. M7.4 remains the
+semantic/measurement model, but its clean patch polygon is no longer rendered
+as the normal visible paint surface:
+
+```text
+Logical structural surface ID
+  -> strict measured Reality-triangle seeds
+  -> shared-edge adjacency and bounded compatible growth
+  -> one or more connected Dense Reality wall components
+  -> derived paint colors on the original Reality triangle vertices
+```
+
+Each Dense Reality triangle retains its original world positions and source
+surfel IDs. Growth requires a calibrated plane relationship, compatible triangle
+and structural normals, shared-edge connectivity, and no existing foreground or
+attached/uncertain M8.5.5 barrier evidence. This preserves curtains, furniture,
+and separately supported wall-mounted content while permitting multiple
+disconnected observed components of one logical wall. Missing scan regions are
+not filled.
+
+**Original** remains the untouched captured Dense Reality scene. **Final
+Design** is that same geometry with derived colors only on confirmed triangle
+components; a selected M7.4 patch is available solely as a structural debug
+reference/outline. M7 area and boundaries remain authoritative for future
+measurement and costing, not noisy visible-triangle area.

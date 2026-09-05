@@ -26,6 +26,7 @@ import {
 } from '../services/surfaceCustomizationService'
 import {
   restoreRealitySurface,
+  type PreparedRealitySurface,
   type RealitySurfaceRenderMode,
   type RealitySurfaceRenderStats,
 } from '../services/realitySurfaceRenderingService'
@@ -35,9 +36,11 @@ import {
   evaluateRealityTapHit,
   type RealityDebugColorMode,
   type RealityDesignColorInput,
+  type RealityStructuralAssociationTable,
   type RealityTapHitEvaluation,
 } from '../services/realityStructuralAssociationService'
 import type { RealityDesignCompositeMode, RealityPaintablePatchMask } from '../services/realityDesignCompositingService'
+import { applyRealityTrianglePaint } from '../services/realityWallTriangleAssociationService'
 import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
@@ -525,6 +528,42 @@ function addRealityDesignStructuralSurfaces(
   return { group, geometries, materials, meshCount, surfaceMeshes }
 }
 
+/** M8.5.6 applies Design colors to exact, duplicated Dense Reality triangle
+ * vertices. It never changes positions or introduces an M7 paint polygon. */
+function applyRealityDesignTriangleAppearance(
+  resources: ReturnType<typeof restoreRealitySurface>,
+  prepared: PreparedRealitySurface,
+  source: FinalizedRealityReconstruction,
+  association: RealityStructuralAssociationTable,
+  inputs: readonly RealityDesignColorInput[],
+  compositeMode: RealityDesignCompositeMode,
+): void {
+  const topology = prepared.triangleTopology, triangleAssociation = prepared.designTriangleAssociation
+  if (!topology || !triangleAssociation) return
+  const triangleLayer = prepared.layers.find((layer) => layer.kind === 'triangles')
+  if (!triangleLayer) return
+  const color = resources.geometries[triangleLayer.geometry]?.getAttribute('color')
+  if (!color || !(color.array instanceof Float32Array)) return
+  if (compositeMode === 'reality-wall-components') {
+    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, true)
+  } else if (compositeMode === 'composite' || compositeMode === 'selected-wall-triangles') {
+    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, false, compositeMode === 'selected-wall-triangles')
+  } else if (compositeMode === 'object-non-wall-triangles') {
+    // Diagnostic isolation: dim confirmed wall components while all preserved
+    // object/non-wall triangles retain their captured source RGB.
+    for (let triangle = 0; triangle < triangleAssociation.logicalSurfaceIndices.length; triangle++) {
+      if (triangleAssociation.logicalSurfaceIndices[triangle] < 0) continue
+      for (let vertex = 0; vertex < 3; vertex++) {
+        const offset = (triangle * 3 + vertex) * 3
+        color.array[offset] *= 0.1
+        color.array[offset + 1] *= 0.1
+        color.array[offset + 2] *= 0.1
+      }
+    }
+  }
+  color.needsUpdate = true
+}
+
 function applyRoomSurfaceAppearance(
   surfaces: readonly RoomSurfacePatch[],
   meshes: ReadonlyMap<string, RoomSurfaceMesh>,
@@ -899,7 +938,7 @@ function FinalizedSpatialScanPreview({
     } else if (mode === 'reality-preview' && preparedReality) {
       const designComposite = preparedReality.designComposite
       if (designComposite &&
-        (designComposite.mode === 'composite' || designComposite.mode === 'structural-only' ||
+        (designComposite.mode === 'structural-only' ||
           designComposite.mode === 'exposed-wall-mask' || designComposite.mode === 'preserved-object-mask')) {
         const maskKind = designComposite.mode === 'structural-only'
           ? 'full'
@@ -920,6 +959,16 @@ function FinalizedSpatialScanPreview({
         )
       }
       realityResources = restoreRealitySurface(preparedReality)
+      if (designComposite && realityAssociation.table && preferredRealityReconstruction) {
+        applyRealityDesignTriangleAppearance(
+          realityResources,
+          preparedReality,
+          preferredRealityReconstruction,
+          realityAssociation.table,
+          designInputs,
+          designComposite.mode,
+        )
+      }
       realityResources.group.traverse((object) => { object.renderOrder = 1 })
       scene.add(realityResources.group)
       const memberPatches = selectedLogicalSurface
@@ -1012,6 +1061,34 @@ function FinalizedSpatialScanPreview({
           setRealityAppearanceMode('design')
           return
         }
+      }
+      // M8.5.6: exact Dense Reality triangle membership is the primary tap
+      // semantic. A non-component triangle is deliberately rejected rather
+      // than falling through to the hidden structural polygon.
+      const triangleLayer = preparedReality?.layers.find((layer) => layer.kind === 'triangles')
+      const triangleAssociation = preparedReality?.designTriangleAssociation
+      const triangleGeometry = triangleLayer ? realityResources.geometries[triangleLayer.geometry] : null
+      if (triangleAssociation && triangleGeometry && hit.object instanceof THREE.Mesh && hit.object.geometry === triangleGeometry && typeof hit.faceIndex === 'number') {
+        const logicalIndex = triangleAssociation.logicalSurfaceIndices[hit.faceIndex]
+        const hitPoint = { x: hit.point.x, y: hit.point.y, z: hit.point.z }
+        if (logicalIndex >= 0) {
+          const logical = realityAssociation.table.logicalSurfaces[logicalIndex]
+          const directHit: RealityTapHitEvaluation = {
+            hitPosition: hitPoint, vertexSampleIds: [], membershipVotes: { wallMember: 3, nonWall: 0, uncertain: 0 },
+            logicalSurfaceId: logical.id, role: logical.role, confidence: 0.9, accepted: true,
+            reason: 'confirmed connected Reality wall triangle', candidates: [],
+          }
+          setRealityTapHit(directHit)
+          selectSurface(logical.id)
+          setRealityAppearanceMode('design')
+        } else {
+          setRealityTapHit({
+            hitPosition: hitPoint, vertexSampleIds: [], membershipVotes: { wallMember: 0, nonWall: 3, uncertain: 0 },
+            logicalSurfaceId: null, role: null, confidence: 0, accepted: false,
+            reason: 'Reality triangle is not a confirmed editable wall component', candidates: [],
+          })
+        }
+        return
       }
       const hitNormal = hit.face
         ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
@@ -1169,7 +1246,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityDesignResources.group)
       }
     }
-  }, [analysisResult, denseRealityReconstruction, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations])
+  }, [analysisResult, denseRealityReconstruction, designInputs, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1482,8 +1559,11 @@ function FinalizedSpatialScanPreview({
                 <div className="scanner-reality-render-modes" role="group" aria-label="Design compositor debug modes">
                   <span>Design compositor</span>
                   {([
-                    ['composite', 'Design Composite'],
-                    ['structural-only', 'Structural Design Only'],
+                    ['composite', 'Final Design'],
+                    ['structural-only', 'Structural Patch (Debug)'],
+                    ['reality-wall-components', 'Reality Wall Components'],
+                    ['selected-wall-triangles', 'Selected Wall Triangles'],
+                    ['object-non-wall-triangles', 'Object / Non-Wall Triangles'],
                     ['foreground-only', 'Foreground Reality Only'],
                     ['classification', 'Compositor Classification'],
                     ['exposed-wall-mask', 'Exposed Wall Mask'],
@@ -1571,6 +1651,11 @@ function FinalizedSpatialScanPreview({
               {realityPreparation.prepared?.designComposite ? (
                 <span>
                   Visible paintable mask: {realityPreparation.prepared.designComposite.stats.structuralDesignPatchCount} structural patches; exposed Reality {realityPreparation.prepared.designComposite.stats.realityMaskedSampleCount}; foreground {realityPreparation.prepared.designComposite.stats.realityForegroundSampleCount}; attached {realityPreparation.prepared.designComposite.stats.realityAttachedSampleCount}; uncertain {realityPreparation.prepared.designComposite.stats.realityUncertainSampleCount}; outside {realityPreparation.prepared.designComposite.stats.realityOutsideSampleCount}; classify {realityPreparation.prepared.designComposite.stats.foregroundClassificationMs.toFixed(1)} ms / mask {realityPreparation.prepared.designComposite.stats.maskPreparationMs.toFixed(1)} ms / total {realityPreparation.prepared.designComposite.stats.preparationMs.toFixed(1)} ms / {Math.round(realityPreparation.prepared.designComposite.stats.memoryBytes / 1024)} KiB.
+                </span>
+              ) : null}
+              {realityPreparation.prepared?.designTriangleAssociation ? (
+                <span>
+                  Reality wall triangles: {realityPreparation.prepared.designTriangleAssociation.stats.assignedTriangleCount} / {realityPreparation.prepared.designTriangleAssociation.stats.triangleCount} assigned from {realityPreparation.prepared.designTriangleAssociation.stats.seedTriangleCount} trusted seeds across {realityPreparation.prepared.designTriangleAssociation.stats.componentCount} components; adjacency {realityPreparation.prepared.designTriangleAssociation.stats.adjacencyBuildMs.toFixed(1)} ms / seed {realityPreparation.prepared.designTriangleAssociation.stats.seedClassificationMs.toFixed(1)} ms / growth {realityPreparation.prepared.designTriangleAssociation.stats.componentGrowthMs.toFixed(1)} ms.
                 </span>
               ) : null}
               {realityPreparation.prepared?.designComposite?.stats.surfaces.map((surface) => (

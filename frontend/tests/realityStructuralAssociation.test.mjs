@@ -19,6 +19,7 @@ const logicalService = await import(moduleUrl(new URL('../src/features/scanner/s
 const association = await import(moduleUrl(new URL('../src/features/scanner/services/realityStructuralAssociationService.ts', import.meta.url)))
 const structuralInterpretation = await import(moduleUrl(new URL('../src/features/room-analysis/services/structuralSurfaceInterpretationService.ts', import.meta.url)))
 const compositor = await import(moduleUrl(new URL('../src/features/scanner/services/realityDesignCompositingService.ts', import.meta.url)))
+const triangleAssociation = await import(moduleUrl(new URL('../src/features/scanner/services/realityWallTriangleAssociationService.ts', import.meta.url)))
 
 function patch(id, {
   offsetX = 0,
@@ -718,4 +719,66 @@ test('42. Ceiling paintable mask uses wall-local coordinates without vertical as
   const plan = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'ceiling-a', paintColor: '#3355ee' }])
   assert.ok(plan.masks[0].paintableAreaMetersSquared > 0)
   assert.equal(plan.visibilityMask[0], 0)
+})
+
+function triangleTopology(ids) {
+  return { vertexSurfelIds: new Uint32Array(ids), triangleCount: ids.length / 3 }
+}
+
+function trianglePlan(samples, patches, topology) {
+  const table = association.associateRealitySurfels(samples, patches)
+  const mask = compositor.buildRealityDesignCompositePlan(samples, table, patches.map((item) => ({ surfaceId: item.id, paintColor: '#2468d8' })))
+  return { table, mask, result: triangleAssociation.associateRealityWallTriangles(samples, topology, table, mask.classifications) }
+}
+
+test('43. Connected planar Reality triangles form one wall component with original positions', () => {
+  const samples = clusteredWallSamples()
+  const source = JSON.stringify(samples.map((sample) => sample.position))
+  const { result } = trianglePlan(samples, [patch('wall-a')], triangleTopology([1, 2, 4, 2, 5, 4]))
+  assert.equal(result.logicalSurfaceIndices[0], 0)
+  assert.equal(result.logicalSurfaceIndices[1], 0)
+  assert.equal(result.componentIds[0], result.componentIds[1])
+  assert.equal(JSON.stringify(samples.map((sample) => sample.position)), source)
+})
+
+test('44. Offset object triangle breaks Reality wall component growth', () => {
+  const samples = [...clusteredWallSamples(), surfel(401, 1.2, 1.1, 0.08), surfel(402, 1.25, 1.1, 0.08), surfel(403, 1.2, 1.15, 0.08)]
+  const { result } = trianglePlan(samples, [patch('wall-a')], triangleTopology([1, 2, 4, 401, 402, 403]))
+  assert.equal(result.logicalSurfaceIndices[0], 0)
+  assert.equal(result.logicalSurfaceIndices[1], -1)
+})
+
+test('45. Sharp normal boundary does not become a wall triangle component', () => {
+  const samples = [...clusteredWallSamples(), surfel(411, 1.2, 1.1, 0.01, { x: 1, y: 0, z: 0 }), surfel(412, 1.25, 1.1, 0.01, { x: 1, y: 0, z: 0 }), surfel(413, 1.2, 1.15, 0.01, { x: 1, y: 0, z: 0 })]
+  const { result } = trianglePlan(samples, [patch('wall-a')], triangleTopology([1, 2, 4, 411, 412, 413]))
+  assert.equal(result.logicalSurfaceIndices[1], -1)
+})
+
+test('46. Disconnected observed pieces retain one logical wall identity without fake bridging', () => {
+  const samples = [...clusteredWallSamples(), ...clusteredWallSamples().map((sample) => ({ ...sample, id: sample.id + 100, position: { ...sample.position, x: sample.position.x + 0.7 } }))]
+  const { result } = trianglePlan(samples, [patch('wall-a')], triangleTopology([1, 2, 4, 101, 102, 104]))
+  assert.equal(result.logicalSurfaceIndices[0], 0)
+  assert.equal(result.logicalSurfaceIndices[1], 0)
+  assert.notEqual(result.componentIds[0], result.componentIds[1])
+})
+
+test('47. Ceiling triangle association has no vertical-wall assumption', () => {
+  const ceiling = ceilingPatch()
+  const samples = [
+    surfel(501, 0.9, 2.006, 0.9, { x: 0, y: 1, z: 0 }),
+    surfel(502, 1.0, 2.006, 0.9, { x: 0, y: 1, z: 0 }),
+    surfel(503, 0.9, 2.006, 1.0, { x: 0, y: 1, z: 0 }),
+  ]
+  const { result } = trianglePlan(samples, [ceiling], triangleTopology([501, 502, 503]))
+  assert.equal(result.logicalSurfaceIndices[0], 0)
+})
+
+test('48. Triangle paint changes only a derived GPU color buffer', () => {
+  const samples = clusteredWallSamples()
+  const { table, result } = trianglePlan(samples, [patch('wall-a')], triangleTopology([1, 2, 4]))
+  const original = JSON.stringify(samples)
+  const colors = new Float32Array(9).fill(0.5)
+  triangleAssociation.applyRealityTrianglePaint(colors, samples, triangleTopology([1, 2, 4]), result, table, [{ surfaceId: 'wall-a', paintColor: '#1565d8' }])
+  assert.notDeepEqual([...colors], Array(9).fill(0.5))
+  assert.equal(JSON.stringify(samples), original)
 })
