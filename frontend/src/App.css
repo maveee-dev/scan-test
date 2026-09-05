@@ -641,6 +641,34 @@
   gap: 4px;
 }
 
+.scanner-reality-appearance-modes {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.scanner-reality-appearance-mode {
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--dim);
+  background: rgba(255, 255, 255, .03);
+  font: inherit;
+  cursor: pointer;
+}
+
+.scanner-reality-appearance-mode[aria-pressed="true"] {
+  color: var(--acid);
+  border-color: var(--acid);
+  background: rgba(204, 255, 0, .08);
+}
+
+.scanner-reality-appearance-mode:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
 .scanner-reality-diagnostics {
   min-width: 0;
   max-width: 100%;

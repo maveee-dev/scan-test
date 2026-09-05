@@ -1227,3 +1227,67 @@ small/degenerate triangles, separated planes/open gaps, anisotropic data,
 empty/uncolored inputs, RGB preservation, and worker-transfer composition tests.
 This remains measured local Reality surface visualization, not photogrammetry,
 texture mapping, or M8.5.
+
+## M8.5 Reality / Design integration
+
+M8.5 connects the two already world-aligned post-scan outputs without changing
+either reconstruction:
+
+```text
+scan RGB-D
+        |
+        +--> Dense Reality Reconstruction
+        |      measured scene geometry + immutable captured RGB
+        |
+        +--> Structural Reconstruction
+               M7.4 bounded semantic wall / ceiling / floor patches
+        |
+        +--> post-analysis Reality / Structural association
+               -> Original Reality Preview
+               -> Design Reality Preview
+```
+
+The association is a separate, bounded post-analysis worker result. A Reality
+world-space hit is tested against real M7.4 patch geometry: plane distance,
+projection into the patch's stored local basis, polygon containment with a
+bounded edge tolerance, and sign-invariant normal agreement. It returns a
+strong, partial, or no match with the stable M7.4 patch ID, role, distance,
+containment, normal compatibility, and confidence. Screen position, centroids,
+mesh indices, and invented room extents are not identity evidence. A weak or
+no match is intentionally left uneditable.
+
+For Design Preview, every finalized dense Reality sample receives a derived
+association index only when it is strongly inside an actual structural patch,
+normal-compatible, and within a narrow wall-plane band. Samples projected
+inside a patch but sufficiently in front of its plane are preserved as
+foreground Reality (for example curtains, cabinets, chairs, and tables).
+Samples outside a partial M7.4 polygon remain original. This avoids a large
+wall overlay and preserves the existing Reality geometry/depth ordering: no
+painted wall is drawn over foreground objects, and no z-fighting structural
+sheet is introduced.
+
+Paint is a display-time sidecar. It reads the existing M8 stable surface-ID
+customization state, derives a linear paint color for associated samples, and
+retains bounded captured luminance variation so room lighting/shadows remain
+legible. It does not alter final Reality RGB, Dense Reality geometry, M7.4
+patches, or structural/customization IDs. Switching to **Original** supplies
+no derived colors and restores the same captured Reality source immediately;
+multiple structural walls can hold independent colors through the one shared
+customization map used by Room Surfaces and First-Person Room.
+
+Reality Original remains available immediately after Finish. Design is
+disabled until the existing Analyze Surfaces workflow has produced M7.4
+patches; analysis is never triggered implicitly. Once ready, the compact
+Original / Design control and Reality tap selection open the existing
+closeable Surface Customization panel. A selected patch gets a depth-tested
+world-aligned outline. The normal UI uses product language, while collapsed
+development diagnostics expose last hit evidence plus associated, preserved
+foreground, rejected, and preparation counts.
+
+Association and changed Design colors run after scan completion in workers;
+there is no new XR loop, RGB readback, depth sampling, live fusion, or React
+frame work. The existing renderer worker creates the immutable Original or
+derived Design display buffers once per requested state and the preview uploads
+them once. This is a paint-color integration boundary for later wallpaper,
+tile, and material display work, not texture projection, product catalog,
+quantity, or pricing.

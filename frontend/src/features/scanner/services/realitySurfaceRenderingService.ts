@@ -4,6 +4,7 @@ import type {
   FinalizedRealityReconstruction,
   FinalizedRealitySurfel,
   RealityColorStatistics,
+  RealityRgbColor,
 } from '../types'
 
 export type RealitySurfaceRenderMode = 'points' | 'splats' | 'triangles' | 'dense'
@@ -198,7 +199,15 @@ function writeColor(
   colors: number[] | Float32Array,
   offset: number,
   surfel: FinalizedRealitySurfel,
+  displayColors?: ReadonlyMap<number, RealityRgbColor>,
 ): void {
+  const linearDisplayColor = displayColors?.get(surfel.id)
+  if (linearDisplayColor) {
+    colors[offset] = linearDisplayColor.r
+    colors[offset + 1] = linearDisplayColor.g
+    colors[offset + 2] = linearDisplayColor.b
+    return
+  }
   const color = surfel.colorRgb
   if (!color) {
     return
@@ -288,7 +297,7 @@ function calculateRenderColorStatistics(
   }
 }
 
-function createPointGeometry(surfels: readonly FinalizedRealitySurfel[]): THREE.BufferGeometry {
+function createPointGeometry(surfels: readonly FinalizedRealitySurfel[], displayColors?: ReadonlyMap<number, RealityRgbColor>): THREE.BufferGeometry {
   const positions = new Float32Array(surfels.length * 3)
   const colors = new Float32Array(surfels.length * 3)
   surfels.forEach((surfel, index) => {
@@ -296,7 +305,7 @@ function createPointGeometry(surfels: readonly FinalizedRealitySurfel[]): THREE.
     positions[offset] = surfel.position.x
     positions[offset + 1] = surfel.position.y
     positions[offset + 2] = surfel.position.z
-    writeColor(colors, offset, surfel)
+    writeColor(colors, offset, surfel, displayColors)
   })
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -489,6 +498,7 @@ function createSplatGeometry(
   index: RealityNeighborIndex,
   radiusScale: number,
   splatSuppressionMask?: Uint8Array,
+  displayColors?: ReadonlyMap<number, RealityRgbColor>,
 ): SplatGeometryResult {
   const surfels = index.surfels
   const verticesPerSurfel = 6
@@ -549,7 +559,7 @@ function createSplatGeometry(
       positions[positionOffset + 2] = corner.z
       localCoordinates[localOffset] = coordinate[0]
       localCoordinates[localOffset + 1] = coordinate[1]
-      writeColor(colors, positionOffset, surfel)
+      writeColor(colors, positionOffset, surfel, displayColors)
       vertexOffset += 1
     }
   }
@@ -585,7 +595,7 @@ function getTriangleEdgeLimit(
   )
 }
 
-function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeometryResult {
+function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?: ReadonlyMap<number, RealityRgbColor>): TriangleGeometryResult {
   const surfels = index.surfels
   const positions: number[] = []
   const colors: number[] = []
@@ -704,7 +714,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
           : [center, second, first]
         for (const surfel of ordered) {
           positions.push(surfel.position.x, surfel.position.y, surfel.position.z)
-          writeColor(colors, colors.length, surfel)
+          writeColor(colors, colors.length, surfel, displayColors)
         }
         triangleCount += 1
       }
@@ -813,6 +823,7 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
 export function createRealitySurfaceRenderResources(
   reconstruction: Pick<FinalizedRealityReconstruction, 'surfels'>,
   mode: RealitySurfaceRenderMode,
+  displayColors?: ReadonlyMap<number, RealityRgbColor>,
 ): RealitySurfaceRenderResources {
   const startedAt = getTimestamp()
   const group = new THREE.Group()
@@ -832,7 +843,7 @@ export function createRealitySurfaceRenderResources(
   let splatSuppressionMask: Uint8Array | undefined
 
   if (mode === 'points') {
-    const geometry = createPointGeometry(coloredSurfels)
+    const geometry = createPointGeometry(coloredSurfels, displayColors)
     const material = createPointMaterial()
     group.add(new THREE.Points(geometry, material))
     geometries.push(geometry)
@@ -840,7 +851,7 @@ export function createRealitySurfaceRenderResources(
   } else if (neighborIndex) {
     if (mode === 'dense' || mode === 'triangles') {
       const triangleStartedAt = getTimestamp()
-      const triangleResult = createDenseTriangleGeometry(neighborIndex)
+      const triangleResult = createDenseTriangleGeometry(neighborIndex, displayColors)
       triangleGenerationMs = Math.max(0, getTimestamp() - triangleStartedAt)
       const triangleMaterial = createSurfaceMaterial(1)
       group.add(new THREE.Mesh(triangleResult.geometry, triangleMaterial))
@@ -858,6 +869,7 @@ export function createRealitySurfaceRenderResources(
         neighborIndex,
         mode === 'dense' ? DENSE_SPLAT_RADIUS_SCALE : BASE_SPLAT_RADIUS_SCALE,
         splatSuppressionMask,
+        displayColors,
       )
       splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
       const splatCoreMaterial = createSplatMaterial(1, true)

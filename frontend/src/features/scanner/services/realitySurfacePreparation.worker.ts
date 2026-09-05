@@ -1,9 +1,18 @@
 import type { FinalizedRealitySurfel } from '../types'
 import { createRealitySurfaceRenderResources, packRealitySurface, type RealitySurfaceRenderMode } from './realitySurfaceRenderingService'
+import { buildRealityDesignColors, type RealityDesignColorInput, type RealityStructuralAssociationTable } from './realityStructuralAssociationService'
 
-self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel[]; mode: RealitySurfaceRenderMode }>) => {
+self.onmessage = (event: MessageEvent<{
+  surfels: readonly FinalizedRealitySurfel[]
+  mode: RealitySurfaceRenderMode
+  association: RealityStructuralAssociationTable | null
+  designInputs: readonly RealityDesignColorInput[]
+}>) => {
   try {
-    const resources = createRealitySurfaceRenderResources({ surfels: event.data.surfels }, event.data.mode)
+    const displayColors = event.data.association && event.data.designInputs.length > 0
+      ? buildRealityDesignColors(event.data.surfels, event.data.association, event.data.designInputs)
+      : undefined
+    const resources = createRealitySurfaceRenderResources({ surfels: event.data.surfels }, event.data.mode, displayColors)
     const prepared = packRealitySurface(resources)
     const buffers = new Set<ArrayBuffer>()
     for (const geometry of prepared.geometries) for (const attribute of geometry.attributes) buffers.add(attribute.array.buffer as ArrayBuffer)
