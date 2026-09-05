@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { RoomSurfacePatch } from '../../room-analysis/types'
-import type { FinalizedRealityReconstruction } from '../types'
+import type { FinalizedRealityReconstruction, FinalizedSurfaceSurfel } from '../types'
 import type { RealityStructuralAssociationTable } from '../services/realityStructuralAssociationService'
 
 /** One post-analysis pass. It never feeds back into either immutable source model. */
 export function useRealityStructuralAssociation(
   reality: FinalizedRealityReconstruction | null | undefined,
   patches: readonly RoomSurfacePatch[],
+  structuralSurfels?: readonly FinalizedSurfaceSurfel[],
 ): { table: RealityStructuralAssociationTable | null; pending: boolean; error: string | null } {
   const [result, setResult] = useState<{ reality: FinalizedRealityReconstruction; patches: readonly RoomSurfacePatch[]; table?: RealityStructuralAssociationTable; error?: string } | null>(null)
   useEffect(() => {
@@ -21,11 +22,14 @@ export function useRealityStructuralAssociation(
         worker?.terminate()
       }
       worker.onerror = () => { fail('Reality-to-surface association failed. Original Reality remains available.'); worker?.terminate() }
-      worker.postMessage({ surfels: reality.surfels, patches })
+      worker.postMessage({ surfels: reality.surfels, patches, structuralSurfels })
     } catch (error) { fail(error instanceof Error ? error.message : 'Association worker unavailable.'); worker?.terminate() }
     return () => { cancelled = true; worker?.terminate() }
-  }, [patches, reality])
+  }, [patches, reality, structuralSurfels])
   const current = result !== null && result.reality === reality && result.patches === patches ? result : null
-  return { table: current?.table ?? null, error: current?.error ?? null,
-    pending: reality?.status === 'available' && patches.length > 0 && !current }
+  return {
+    table: current?.table ?? null,
+    error: current?.error ?? null,
+    pending: reality?.status === 'available' && patches.length > 0 && !current,
+  }
 }

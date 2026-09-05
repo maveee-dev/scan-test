@@ -1291,3 +1291,71 @@ derived Design display buffers once per requested state and the preview uploads
 them once. This is a paint-color integration boundary for later wallpaper,
 tile, and material display work, not texture projection, product catalog,
 quantity, or pricing.
+
+### M8.5.1 — Logical Wall Grouping + Reality Wall-Membership Mask
+
+Physical POCO F5 field testing revealed two critical failure modes in M8.5:
+1. **One physical wall is not one structural patch:** Due to real-world
+   obstructions (curtains, bookshelves, doorways, window gaps) and capture
+   pauses (>0.3 m), M7.0 plane consolidation does not merge separated patches
+   because they lack projected 2D IoU overlap. M7.4 produces separate patches
+   (e.g. Patches 17, 23, 31). Customizing one patch left neighboring portions
+   of the same real wall unpainted.
+2. **Foreground objects in front of walls (e.g. curtains, cabinets) were recolored:**
+   Geometric polygon containment combined with an unconstrained plane band
+   classified foreground objects near walls as wall material. Tapping a curtain
+   falsely selected the wall behind it and painted the curtain.
+
+M8.5.1 introduces a two-tier structural association architecture:
+
+#### 1. Logical Structural Surfaces (`LogicalStructuralSurface`)
+- Groups observed compatible M7.4 patches into canonical user-facing logical
+  surfaces without altering underlying clean M7.4 geometry or plane extraction.
+- **Grouping criteria:**
+  - Role match (walls group only with walls; floors with floors; ceilings with ceilings).
+  - Normal parallelism (angle ≤ 18° for walls, ≤ 12° for floor/ceiling).
+  - Plane constant offset ≤ 0.16 m.
+  - Centroid coplanarity ≤ 0.18 m.
+  - Spatial boundary proximity ≤ 1.2 m (allowing for doors, windows, and scan gaps).
+  - Disjoint-set union guarantees opposite/parallel walls (>0.5 m apart) and
+    perpendicular walls never merge.
+- **Customization synchronization:** Setting paint color on a logical wall
+  atomically synchronizes all member patch IDs in `surfaceCustomizations`. Room
+  Surfaces preview, Reality Design preview, and First-Person Room Viewer remain
+  100% synchronized. Selecting any member patch highlights all member patches
+  together.
+
+#### 2. Reality Wall-Membership Mask
+- Rather than a coarse distance band, each dense Reality sample is strictly
+  classified: `WALL_MEMBER` (1), `NON_WALL` (0), or `UNCERTAIN` (2).
+- **Trusted structural seeds:** Seeded exclusively from dense samples with low
+  plane residual (≤ 1.8 cm), high normal agreement (dot ≥ 0.85), polygon
+  containment, and proximity (≤ 0.12 m) to trusted `structuralSurfels` from the
+  finalized scan.
+- **Bounded local region growth:** Propagates outward from seeds through a 3D
+  spatial grid. Neighbors must satisfy step distance ≤ 0.045 m, out-of-plane
+  depth discontinuity step ≤ 0.015 m, plane normal dot ≥ 0.78, and neighbor
+  normal dot ≥ 0.82.
+- **Foreground object preservation:** Objects in front of the wall (residual
+  > 0.035 m or depth step > 15 mm, such as curtains, cabinets, and chairs) are
+  strictly classified as `NON_WALL`. Unreached candidate samples are marked
+  `UNCERTAIN`.
+- **Shading isolation:** Only `WALL_MEMBER` samples receive paint shading
+  with natural luminance preservation; original camera RGB remains 100% immutable.
+
+#### 3. Tap Hit Classification & Triangle Voting
+- Reality raycasting evaluates dense triangle vertices when tapping the mesh.
+- Requires majority agreement (≥ 2 of 3 vertices classified as `WALL_MEMBER`)
+  and the hit point itself to be a wall member.
+- Tapping curtains, furniture, or uncertain boundary areas rejects selection with
+  an explicit explanation (e.g. "Tap rejected: foreground object detected").
+- Tapping any member region of a logical wall resolves to the parent logical wall.
+
+#### 4. Diagnostic Color Modes & Group Diagnostics
+- Visual debugging color modes in Reality Preview:
+  - **Default Colors**: Normal Reality / Design mode.
+  - **Color by M7.4 Patch**: Pseudo-color per M7.4 structural patch to inspect fragmentation.
+  - **Color by Logical Wall**: Shared pseudo-color across all member patches of each logical wall.
+  - **Reality Wall Mask**: Green/cyan for `WALL_MEMBER`, amber for `UNCERTAIN`, dark red for `NON_WALL`.
+- Diagnostics panel displays logical wall group composition, total areas,
+  coplanar residuals, and detailed evidence for the last Reality tap.

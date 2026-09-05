@@ -7,6 +7,7 @@ import type {
   FinalizedRealityReconstruction,
   FinalizedSpatialScan,
   RealityRgbColor,
+  SpatialPoint,
 } from '../types'
 import type {
   PlaneCandidate,
@@ -31,10 +32,15 @@ import {
 import { usePreparedRealitySurface } from '../hooks/usePreparedRealitySurface'
 import { useRealityStructuralAssociation } from '../hooks/useRealityStructuralAssociation'
 import {
-  associateRealityPoint,
+  evaluateRealityTapHit,
+  type RealityDebugColorMode,
   type RealityDesignColorInput,
-  type RealityStructuralAssociation,
+  type RealityTapHitEvaluation,
 } from '../services/realityStructuralAssociationService'
+import {
+  groupPatchesIntoLogicalSurfaces,
+  type LogicalStructuralSurface,
+} from '../services/logicalSurfaceService'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -103,19 +109,37 @@ interface RealityRuntimeStats {
   readonly textureCount: number
 }
 
-function addRealitySelectionOutline(scene: THREE.Scene, patch: RoomSurfacePatch): { geometry: THREE.BufferGeometry; material: THREE.LineBasicMaterial } {
-  const positions = new Float32Array((patch.vertices3D.length + 1) * 3)
-  for (let index = 0; index <= patch.vertices3D.length; index++) {
-    const vertex = patch.vertices3D[index % patch.vertices3D.length]
-    positions[index * 3] = vertex.x
-    positions[index * 3 + 1] = vertex.y
-    positions[index * 3 + 2] = vertex.z
+function addRealitySelectionOutlines(
+  scene: THREE.Scene,
+  patches: readonly RoomSurfacePatch[],
+): { geometries: THREE.BufferGeometry[]; materials: THREE.LineBasicMaterial[]; lines: THREE.Line[] } {
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.LineBasicMaterial[] = []
+  const lines: THREE.Line[] = []
+  for (const patch of patches) {
+    const positions = new Float32Array((patch.vertices3D.length + 1) * 3)
+    for (let index = 0; index <= patch.vertices3D.length; index++) {
+      const vertex = patch.vertices3D[index % patch.vertices3D.length]
+      positions[index * 3] = vertex.x
+      positions[index * 3 + 1] = vertex.y
+      positions[index * 3 + 2] = vertex.z
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    const material = new THREE.LineBasicMaterial({
+      color: '#f8ff7a',
+      depthTest: true,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0.92,
+    })
+    const line = new THREE.Line(geometry, material)
+    scene.add(line)
+    geometries.push(geometry)
+    materials.push(material)
+    lines.push(line)
   }
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  const material = new THREE.LineBasicMaterial({ color: '#f8ff7a', depthTest: true, depthWrite: false, transparent: true, opacity: .92 })
-  scene.add(new THREE.Line(geometry, material))
-  return { geometry, material }
+  return { geometries, materials, lines }
 }
 
 function createPlaneGeometry(plane: PlaneCandidate): THREE.BufferGeometry {
@@ -412,7 +436,7 @@ function applyRoomSurfaceAppearance(
   meshes: ReadonlyMap<string, RoomSurfaceMesh>,
   outlines: ReadonlyMap<string, RoomSurfaceOutline>,
   customizations: SurfaceCustomizationMap,
-  selectedSurfaceId: string | null,
+  selectedPatchIds: ReadonlySet<string>,
 ): void {
   const patchById = new Map<string, RoomSurfacePatch>(surfaces.map((surface) => [surface.id, surface]))
   for (const [surfaceId, mesh] of meshes) {
@@ -421,7 +445,7 @@ function applyRoomSurfaceAppearance(
       continue
     }
     const color = getSurfacePaintColor(patch, customizations)
-    const isSelected = surfaceId === selectedSurfaceId
+    const isSelected = selectedPatchIds.has(surfaceId)
     mesh.material.color.set(color)
     mesh.material.opacity = isSelected ? 0.78 : 0.58
     const outline = outlines.get(surfaceId)
@@ -496,7 +520,8 @@ function FinalizedSpatialScanPreview({
   const [realityRenderMode, setRealityRenderMode] = useState<RealitySurfaceRenderMode>('dense')
   const [realityRenderSource, setRealityRenderSource] = useState<RealityRenderSource>('dense')
   const [realityAppearanceMode, setRealityAppearanceMode] = useState<RealityAppearanceMode>('original')
-  const [realityHitAssociation, setRealityHitAssociation] = useState<RealityStructuralAssociation | null>(null)
+  const [realityDebugColorMode, setRealityDebugColorMode] = useState<RealityDebugColorMode>('none')
+  const [realityTapHit, setRealityTapHit] = useState<RealityTapHitEvaluation | null>(null)
   const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
   const [realityRuntimeStats, setRealityRuntimeStats] = useState<RealityRuntimeStats | null>(null)
 
@@ -512,7 +537,11 @@ function FinalizedSpatialScanPreview({
     ? denseRealityReconstruction
     : realityReconstruction
   const roomPatches = roomSurfaceConstruction?.surfaces ?? EMPTY_ROOM_SURFACES
-  const realityAssociation = useRealityStructuralAssociation(preferredRealityReconstruction, roomPatches)
+  const logicalSurfaces = useMemo<readonly LogicalStructuralSurface[]>(
+    () => groupPatchesIntoLogicalSurfaces(roomPatches),
+    [roomPatches],
+  )
+  const realityAssociation = useRealityStructuralAssociation(preferredRealityReconstruction, roomPatches, scan.fusedSurface)
   const designInputs = useMemo<readonly RealityDesignColorInput[]>(() => Object.entries(surfaceCustomizations)
     .flatMap(([surfaceId, customization]) => customization.paintColor ? [{ surfaceId, paintColor: customization.paintColor }] : []), [surfaceCustomizations])
   const useDesignAppearance = realityAppearanceMode === 'design' && realityAssociation.table !== null
@@ -520,8 +549,9 @@ function FinalizedSpatialScanPreview({
     preferredRealityReconstruction,
     realityRenderMode,
     mode === 'reality-preview',
-    useDesignAppearance ? realityAssociation.table : null,
+    useDesignAppearance || realityDebugColorMode !== 'none' ? realityAssociation.table : null,
     useDesignAppearance ? designInputs : EMPTY_DESIGN_INPUTS,
+    realityDebugColorMode,
   )
   const preparedReality = realityPreparation.prepared
   const denseRealityFallbackActive = realityRenderSource === 'dense' &&
@@ -539,29 +569,61 @@ function FinalizedSpatialScanPreview({
     setCustomizationPanelOpen(false)
   }, [])
 
+  const selectedLogicalSurface = useMemo(() => {
+    if (!selectedSurfaceId) return null
+    return logicalSurfaces.find((l) => l.id === selectedSurfaceId || l.memberPatchIds.includes(selectedSurfaceId)) ?? null
+  }, [selectedSurfaceId, logicalSurfaces])
+
+  const selectedSurface = useMemo(() => {
+    if (!selectedSurfaceId) return null
+    const direct = roomSurfaceConstruction?.surfaces.find((surface) => surface.id === selectedSurfaceId)
+    if (direct) return direct
+    if (selectedLogicalSurface && selectedLogicalSurface.memberPatchIds.length > 0) {
+      return roomSurfaceConstruction?.surfaces.find((surface) => surface.id === selectedLogicalSurface.memberPatchIds[0]) ?? null
+    }
+    return null
+  }, [selectedSurfaceId, roomSurfaceConstruction?.surfaces, selectedLogicalSurface])
+
+  const selectedPatchIds = useMemo(() => {
+    const ids = new Set<string>()
+    if (selectedLogicalSurface) {
+      for (const id of selectedLogicalSurface.memberPatchIds) ids.add(id)
+    } else if (selectedSurfaceId) {
+      ids.add(selectedSurfaceId)
+    }
+    return ids
+  }, [selectedLogicalSurface, selectedSurfaceId])
+
   const setSurfacePaintColor = useCallback((surfaceId: string, color: string): void => {
-    setSurfaceCustomizations((current) => ({
-      ...current,
-      [surfaceId]: { ...current[surfaceId], paintColor: color },
-    }))
-  }, [])
+    const logical = logicalSurfaces.find((l) => l.id === surfaceId || l.memberPatchIds.includes(surfaceId))
+    const targetIds = logical ? [logical.id, ...logical.memberPatchIds] : [surfaceId]
+    setSurfaceCustomizations((current) => {
+      const next = { ...current }
+      for (const id of targetIds) {
+        next[id] = { ...next[id], paintColor: color }
+      }
+      return next
+    })
+  }, [logicalSurfaces])
 
   const resetSelectedSurface = useCallback((): void => {
     if (!selectedSurfaceId) {
       return
     }
+    const logical = logicalSurfaces.find((l) => l.id === selectedSurfaceId || l.memberPatchIds.includes(selectedSurfaceId))
+    const targetIds = logical ? [logical.id, ...logical.memberPatchIds] : [selectedSurfaceId]
     setSurfaceCustomizations((current) => {
       const next = { ...current }
-      delete next[selectedSurfaceId]
+      for (const id of targetIds) {
+        delete next[id]
+      }
       return next
     })
-  }, [selectedSurfaceId])
+  }, [selectedSurfaceId, logicalSurfaces])
 
   const resetAllSurfaceColors = useCallback((): void => {
     setSurfaceCustomizations({})
   }, [])
-
-  const selectedSurface = roomSurfaceConstruction?.surfaces.find((surface) => surface.id === selectedSurfaceId) ?? null
 
   useEffect(() => {
     if (!customizationPanelOpen) {
@@ -683,7 +745,7 @@ function FinalizedSpatialScanPreview({
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let realityResources: ReturnType<typeof restoreRealitySurface> | null = null
-    let realitySelectionOutline: { geometry: THREE.BufferGeometry; material: THREE.LineBasicMaterial } | null = null
+    let realitySelectionOutlines: ReturnType<typeof addRealitySelectionOutlines> | null = null
     let roomSurfaceResources: {
       geometries: THREE.BufferGeometry[]
       materials: THREE.Material[]
@@ -729,8 +791,10 @@ function FinalizedSpatialScanPreview({
     } else if (mode === 'reality-preview' && preparedReality) {
       realityResources = restoreRealitySurface(preparedReality)
       scene.add(realityResources.group)
-      const selectedPatch = roomPatches.find((patch) => patch.id === selectedSurfaceId)
-      if (selectedPatch) realitySelectionOutline = addRealitySelectionOutline(scene, selectedPatch)
+      const memberPatches = selectedLogicalSurface
+        ? roomPatches.filter((patch) => selectedLogicalSurface.memberPatchIds.includes(patch.id))
+        : selectedSurface ? [selectedSurface] : []
+      if (memberPatches.length > 0) realitySelectionOutlines = addRealitySelectionOutlines(scene, memberPatches)
     }
 
     const selectableMeshes = roomSurfaceResources?.surfaceMeshes ?? new Map<string, RoomSurfaceMesh>()
@@ -764,25 +828,77 @@ function FinalizedSpatialScanPreview({
         if (selectableMeshes.size === 0) return
         const hit = selectionRaycaster.intersectObjects([...selectableMeshes.values()], false)[0]
         const hitEntry = hit ? [...selectableMeshes.entries()].find(([, mesh]) => mesh === hit.object) : undefined
-        selectSurface(hitEntry?.[0] ?? null)
+        if (hitEntry) {
+          const patchId = hitEntry[0]
+          const logical = logicalSurfaces.find((l) => l.memberPatchIds.includes(patchId))
+          selectSurface(logical?.id ?? patchId)
+        } else {
+          selectSurface(null)
+        }
         return
       }
-      if (!realityResources || roomPatches.length === 0) {
-        setRealityHitAssociation({ strength: 'none', surfaceId: null, role: null, planeDistanceMeters: null, insidePatch: false, withinEdgeTolerance: false, normalCompatibility: null, confidence: 0, reason: 'analyze room surfaces to enable wall selection', candidates: [] })
+      if (!realityResources || roomPatches.length === 0 || !realityAssociation.table) {
+        const dummyHit: RealityTapHitEvaluation = {
+          hitPosition: { x: 0, y: 0, z: 0 },
+          vertexSampleIds: [],
+          membershipVotes: { wallMember: 0, nonWall: 0, uncertain: 0 },
+          logicalSurfaceId: null,
+          role: null,
+          confidence: 0,
+          accepted: false,
+          reason: 'analyze room surfaces to enable wall selection',
+          candidates: [],
+        }
+        setRealityTapHit(dummyHit)
         return
       }
       const hit = selectionRaycaster.intersectObject(realityResources.group, true)[0]
       if (!hit) {
-        setRealityHitAssociation({ strength: 'none', surfaceId: null, role: null, planeDistanceMeters: null, insidePatch: false, withinEdgeTolerance: false, normalCompatibility: null, confidence: 0, reason: 'no measured Reality geometry at this tap', candidates: [] })
+        const dummyHit: RealityTapHitEvaluation = {
+          hitPosition: { x: 0, y: 0, z: 0 },
+          vertexSampleIds: [],
+          membershipVotes: { wallMember: 0, nonWall: 0, uncertain: 0 },
+          logicalSurfaceId: null,
+          role: null,
+          confidence: 0,
+          accepted: false,
+          reason: 'no measured Reality geometry at this tap',
+          candidates: [],
+        }
+        setRealityTapHit(dummyHit)
         return
       }
       const hitNormal = hit.face
         ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
         : null
-      const association = associateRealityPoint(hit.point, hitNormal, roomPatches)
-      setRealityHitAssociation(association)
-      if (association.strength === 'strong' && association.surfaceId) {
-        selectSurface(association.surfaceId)
+
+      let vertexPositions: SpatialPoint[] | null = null
+      if (hit.face && hit.object instanceof THREE.Mesh) {
+        const geom = hit.object.geometry as THREE.BufferGeometry
+        const posAttr = geom.getAttribute('position')
+        if (posAttr) {
+          const a = new THREE.Vector3().fromBufferAttribute(posAttr, hit.face.a).applyMatrix4(hit.object.matrixWorld)
+          const b = new THREE.Vector3().fromBufferAttribute(posAttr, hit.face.b).applyMatrix4(hit.object.matrixWorld)
+          const c = new THREE.Vector3().fromBufferAttribute(posAttr, hit.face.c).applyMatrix4(hit.object.matrixWorld)
+          vertexPositions = [
+            { x: a.x, y: a.y, z: a.z },
+            { x: b.x, y: b.y, z: b.z },
+            { x: c.x, y: c.y, z: c.z },
+          ]
+        }
+      }
+
+      const hitPoint = { x: hit.point.x, y: hit.point.y, z: hit.point.z }
+      const tapEvaluation = evaluateRealityTapHit(
+        hitPoint,
+        hitNormal ? { x: hitNormal.x, y: hitNormal.y, z: hitNormal.z } : null,
+        vertexPositions,
+        realityAssociation.table,
+      )
+      setRealityTapHit(tapEvaluation)
+
+      if (tapEvaluation.accepted && tapEvaluation.logicalSurfaceId) {
+        selectSurface(tapEvaluation.logicalSurfaceId)
         setRealityAppearanceMode('design')
       }
     }
@@ -885,8 +1001,9 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       realityResources?.geometries.forEach((geometry) => geometry.dispose())
       realityResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
-      realitySelectionOutline?.geometry.dispose()
-      realitySelectionOutline?.material.dispose()
+      realitySelectionOutlines?.geometries.forEach((geometry) => geometry.dispose())
+      realitySelectionOutlines?.materials.forEach((outlineMaterial) => outlineMaterial.dispose())
+      realitySelectionOutlines?.lines.forEach((line) => scene.remove(line))
       renderer.dispose()
       canvas.removeEventListener('pointerdown', onSelectionPointerDown)
       canvas.removeEventListener('pointerup', onSelectionPointerUp)
@@ -902,7 +1019,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityResources.group)
       }
     }
-  }, [analysisResult, denseRealityReconstruction, mode, preferredRealityReconstruction, preparedReality, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedSurfaceId, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, denseRealityReconstruction, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -910,9 +1027,9 @@ function FinalizedSpatialScanPreview({
       roomSurfaceMeshesRef.current,
       roomSurfaceOutlinesRef.current,
       surfaceCustomizations,
-      selectedSurfaceId,
+      selectedPatchIds,
     )
-  }, [roomSurfaceConstruction, selectedSurfaceId, surfaceCustomizations])
+  }, [roomSurfaceConstruction, selectedPatchIds, surfaceCustomizations])
 
   return (
     <div className="scanner-scan-preview">
@@ -1063,8 +1180,9 @@ function FinalizedSpatialScanPreview({
       {(mode === 'room-surfaces' || mode === 'reality-preview') && customizationPanelOpen && selectedSurface ? (
         <SurfaceCustomizationPanel
           surface={selectedSurface}
+          logicalSurface={selectedLogicalSurface}
           customizations={surfaceCustomizations}
-          onPaintColorChange={(color) => setSurfacePaintColor(selectedSurface.id, color)}
+          onPaintColorChange={(color) => setSurfacePaintColor(selectedLogicalSurface?.id ?? selectedSurface.id, color)}
           onResetSelected={resetSelectedSurface}
           onResetAll={resetAllSurfaceColors}
           onClose={closeCustomizationPanel}
@@ -1101,8 +1219,8 @@ function FinalizedSpatialScanPreview({
           {roomPatches.length === 0 ? <span role="status">Analyze room surfaces to enable Design mode.</span> : null}
           {realityAssociation.pending ? <span role="status">Matching measured Reality geometry to room surfaces…</span> : null}
           {realityAssociation.error ? <span role="alert">{realityAssociation.error}</span> : null}
-          {realityHitAssociation?.strength === 'none' ? <span role="status">No editable surface detected here.</span> : null}
-          {realityHitAssociation && realityHitAssociation.strength !== 'none' ? <span role="status">Matched {realityHitAssociation.role} {realityHitAssociation.surfaceId} ({(realityHitAssociation.confidence * 100).toFixed(0)}% association confidence).</span> : null}
+          {realityTapHit && !realityTapHit.accepted ? <span role="status">{realityTapHit.reason}</span> : null}
+          {realityTapHit && realityTapHit.accepted && realityTapHit.logicalSurfaceId ? <span role="status">Matched {realityTapHit.role} {realityTapHit.logicalSurfaceId} ({(realityTapHit.confidence * 100).toFixed(0)}% association confidence).</span> : null}
           {denseRealityReconstruction?.status === 'available' && denseRealityReconstruction.surfels.length > 0 ? (
             <span>Dense Reality geometry is active; structural Reality surfels remain available as a reference.</span>
           ) : null}
@@ -1210,6 +1328,27 @@ function FinalizedSpatialScanPreview({
                   </button>
                 ))}
               </div>
+              <div className="scanner-reality-render-modes" role="group" aria-label="Reality diagnostic color modes">
+                <span>Diagnostic colors</span>
+                {(
+                  [
+                    { mode: 'none', label: 'Default Colors' },
+                    { mode: 'patch', label: 'Color by M7.4 Patch' },
+                    { mode: 'logical-wall', label: 'Color by Logical Wall' },
+                    { mode: 'wall-mask', label: 'Reality Wall Mask' },
+                  ] as const
+                ).map(({ mode: colorMode, label }) => (
+                  <button
+                    key={colorMode}
+                    type="button"
+                    className="scanner-reality-render-mode"
+                    aria-pressed={realityDebugColorMode === colorMode}
+                    onClick={() => setRealityDebugColorMode(colorMode)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
                   Rendered {realityRenderStats.renderedSurfelCount} surfels · {realityRenderStats.renderedSplatCount} splats · {realityRenderStats.renderedTriangleCount} triangles · preparation {realityRenderStats.renderPreparationMs.toFixed(1)} ms
@@ -1253,18 +1392,33 @@ function FinalizedSpatialScanPreview({
               </span>
               {realityAssociation.table ? (
                 <span>
-                  Reality/Structural association: {realityAssociation.table.associatedSampleCount} wall-band samples associated / {realityAssociation.table.preservedForegroundSampleCount} preserved in front of a structural plane / {realityAssociation.table.rejectedSampleCount} outside or incompatible; preparation {realityAssociation.table.elapsedMs.toFixed(1)} ms.
+                  Reality/Structural association: {realityAssociation.table.wallMemberCount} wall-member samples / {realityAssociation.table.nonWallCount} non-wall (preserved foreground/furniture) / {realityAssociation.table.uncertainCount} uncertain; preparation {realityAssociation.table.elapsedMs.toFixed(1)} ms.
                 </span>
               ) : null}
-              {realityHitAssociation ? (
+              <div className="scanner-reality-group-diagnostics">
                 <span>
-                  Last Reality hit: {realityHitAssociation.surfaceId ?? 'none'} / {realityHitAssociation.role ?? 'N/A'} / plane {realityHitAssociation.planeDistanceMeters?.toFixed(3) ?? 'N/A'} m / inside {realityHitAssociation.insidePatch ? 'yes' : 'no'} / edge tolerance {realityHitAssociation.withinEdgeTolerance ? 'yes' : 'no'} / normal {realityHitAssociation.normalCompatibility?.toFixed(2) ?? 'N/A'} / {realityHitAssociation.reason}.
+                  <strong>Logical Surface Groups (M8.5.1):</strong> {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches
                 </span>
-              ) : null}
-              {realityHitAssociation?.candidates.length ? (
-                <span>
-                  Candidate structural surfaces: {realityHitAssociation.candidates.map((candidate) => `${candidate.surfaceId} ${candidate.role}: plane ${candidate.planeDistanceMeters?.toFixed(3) ?? 'N/A'} m, inside ${candidate.insidePatch ? 'yes' : 'no'}, normal ${candidate.normalCompatibility?.toFixed(2) ?? 'N/A'}, ${candidate.accepted ? 'accepted' : 'rejected'}`).join(' | ')}
-                </span>
+                {logicalSurfaces.map((l) => (
+                  <span key={l.id} style={{ display: 'block', fontSize: '0.82rem', opacity: 0.88 }}>
+                    • {l.id} ({l.role}): {l.memberPatchIds.length} {l.memberPatchIds.length === 1 ? 'patch' : 'patches'} ({l.memberPatchIds.join(', ')}), {l.totalAreaMetersSquared.toFixed(2)} m², conf {(l.confidence * 100).toFixed(0)}%, {l.memberPatchIds.length > 1 ? `normal spread ${l.normalSpreadDegrees.toFixed(1)}°, offset ${l.planeOffsetSpreadMeters.toFixed(3)} m (${l.adjacencyEvidence})` : 'single patch'}
+                  </span>
+                ))}
+              </div>
+              {realityTapHit ? (
+                <div className="scanner-reality-tap-diagnostics">
+                  <span>
+                    <strong>Last Reality Tap:</strong> {realityTapHit.accepted ? `ACCEPTED → ${realityTapHit.logicalSurfaceId ?? 'unknown'} (${realityTapHit.role ?? 'surface'})` : 'REJECTED'} · conf {(realityTapHit.confidence * 100).toFixed(0)}% · {realityTapHit.reason}
+                  </span>
+                  <span>
+                    Hit point: ({realityTapHit.hitPosition.x.toFixed(3)}, {realityTapHit.hitPosition.y.toFixed(3)}, {realityTapHit.hitPosition.z.toFixed(3)}) · Triangle votes: {realityTapHit.membershipVotes.wallMember} wall-member / {realityTapHit.membershipVotes.nonWall} non-wall / {realityTapHit.membershipVotes.uncertain} uncertain
+                  </span>
+                  {realityTapHit.candidates.length > 0 ? (
+                    <span>
+                      Tested candidates: {realityTapHit.candidates.map((c) => `${c.surfaceId} (${c.role}): plane ${c.planeDistanceMeters?.toFixed(3) ?? 'N/A'} m, inside ${c.insidePatch ? 'yes' : 'no'}, norm ${c.normalCompatibility?.toFixed(2) ?? 'N/A'}, ${c.accepted ? 'match' : 'no-match'}`).join(' | ')}
+                    </span>
+                  ) : null}
+                </div>
               ) : null}
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>

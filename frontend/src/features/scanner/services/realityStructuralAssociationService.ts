@@ -1,11 +1,21 @@
-import type { RoomSurfacePatch } from '../../room-analysis/types'
-import type { FinalizedRealitySurfel, RealityRgbColor, SpatialPoint } from '../types'
+import type { RoomSurfacePatch, RoomSurfacePatchRole } from '../../room-analysis/types'
+import type { FinalizedRealitySurfel, FinalizedSurfaceSurfel, RealityRgbColor, SpatialPoint } from '../types'
+import {
+  groupPatchesIntoLogicalSurfaces,
+  type LogicalStructuralSurface,
+} from './logicalSurfaceService'
+
+export { groupPatchesIntoLogicalSurfaces, type LogicalStructuralSurface }
 
 export type RealityStructuralAssociationStrength = 'strong' | 'partial' | 'none'
 
+export type RealityWallMembership = 'wall-member' | 'non-wall' | 'uncertain'
+
+export type RealityDebugColorMode = 'none' | 'patch' | 'logical-wall' | 'wall-mask'
+
 export interface RealityStructuralAssociationCandidate {
   readonly surfaceId: string
-  readonly role: RoomSurfacePatch['role']
+  readonly role: RoomSurfacePatchRole
   readonly planeDistanceMeters: number | null
   readonly insidePatch: boolean
   readonly withinEdgeTolerance: boolean
@@ -16,7 +26,7 @@ export interface RealityStructuralAssociationCandidate {
 export interface RealityStructuralAssociation {
   readonly strength: RealityStructuralAssociationStrength
   readonly surfaceId: string | null
-  readonly role: RoomSurfacePatch['role'] | null
+  readonly role: RoomSurfacePatchRole | null
   readonly planeDistanceMeters: number | null
   readonly insidePatch: boolean
   readonly withinEdgeTolerance: boolean
@@ -26,13 +36,41 @@ export interface RealityStructuralAssociation {
   readonly candidates: readonly RealityStructuralAssociationCandidate[]
 }
 
+export interface RealityTapHitEvaluation {
+  readonly hitPosition: SpatialPoint
+  readonly vertexSampleIds: readonly number[]
+  readonly membershipVotes: {
+    readonly wallMember: number
+    readonly nonWall: number
+    readonly uncertain: number
+  }
+  readonly logicalSurfaceId: string | null
+  readonly role: RoomSurfacePatchRole | null
+  readonly confidence: number
+  readonly accepted: boolean
+  readonly reason: string
+  readonly candidates: readonly RealityStructuralAssociationCandidate[]
+}
+
 export interface RealityStructuralAssociationTable {
-  /** Matches the supplied Reality surfel array by index; -1 is intentionally unassociated. */
+  /** 0 = non-wall, 1 = wall-member, 2 = uncertain */
+  readonly memberships: Uint8Array
+  /** Index into logicalSurfaces array; -1 is unassigned/non-wall */
+  readonly logicalSurfaceIndices: Int32Array
+  readonly logicalSurfaces: readonly LogicalStructuralSurface[]
+  /** Index into patches array; -1 is unassigned */
+  readonly patchIndices: Int32Array
+  readonly patches: readonly RoomSurfacePatch[]
+  /** Backward compatibility aliases matching previous M8.5 interface */
   readonly surfaceIndices: Int32Array
   readonly surfaceIds: readonly string[]
   readonly associatedSampleCount: number
   readonly preservedForegroundSampleCount: number
   readonly rejectedSampleCount: number
+  readonly wallMemberCount: number
+  readonly nonWallCount: number
+  readonly uncertainCount: number
+  readonly candidateCount: number
   readonly elapsedMs: number
 }
 
@@ -46,6 +84,18 @@ const HIT_PLANE_TOLERANCE_METERS = 0.05
 const PATCH_EDGE_TOLERANCE_METERS = 0.025
 const MIN_NORMAL_COMPATIBILITY = 0.65
 const EPSILON = 1e-8
+
+// Conservative wall membership constants
+const SEED_MAX_PLANE_RESIDUAL_METERS = 0.018
+const SEED_MIN_NORMAL_DOT = 0.85
+const SEED_MAX_STRUCTURAL_SUPPORT_DISTANCE_METERS = 0.12
+
+const GROW_MAX_PLANE_RESIDUAL_METERS = 0.025
+const GROW_MIN_PLANE_NORMAL_DOT = 0.78
+const GROW_MIN_NEIGHBOR_NORMAL_DOT = 0.82
+const GROW_MAX_DEPTH_STEP_METERS = 0.015
+const GROW_MAX_NEIGHBOR_DISTANCE_METERS = 0.045
+const CANDIDATE_MAX_PLANE_RESIDUAL_METERS = 0.035
 
 function timestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
@@ -76,7 +126,7 @@ function distanceToSegment(point: { u: number; v: number }, start: { u: number; 
   return Math.hypot(point.u - (start.u + du * t), point.v - (start.v + dv * t))
 }
 
-function polygonStatus(point: { u: number; v: number }, patch: RoomSurfacePatch): { inside: boolean; edgeDistance: number } {
+export function polygonStatus(point: { u: number; v: number }, patch: RoomSurfacePatch): { inside: boolean; edgeDistance: number } {
   const vertices = patch.vertices2DLocal
   let inside = false
   let edgeDistance = Infinity
@@ -107,10 +157,10 @@ function candidateAssociation(point: SpatialPoint, normal: SpatialPoint | null, 
   }
   const confidence = Math.max(0, Math.min(1,
     0.55 * (1 - planeDistance / planeTolerance) +
-    0.25 * (polygon.inside ? 1 : .6) +
-    0.20 * (normalCompatibility ?? .8),
+    0.25 * (polygon.inside ? 1 : 0.6) +
+    0.20 * (normalCompatibility ?? 0.8),
   ))
-  return { strength: confidence >= .72 && polygon.inside ? 'strong' : 'partial', surfaceId: patch.id, role: patch.role, planeDistanceMeters: planeDistance, insidePatch: polygon.inside, withinEdgeTolerance, normalCompatibility, confidence, reason: polygon.inside ? 'plane, polygon, and normal compatible' : 'within bounded patch edge tolerance' }
+  return { strength: confidence >= 0.72 && polygon.inside ? 'strong' : 'partial', surfaceId: patch.id, role: patch.role, planeDistanceMeters: planeDistance, insidePatch: polygon.inside, withinEdgeTolerance, normalCompatibility, confidence, reason: polygon.inside ? 'plane, polygon, and normal compatible' : 'within bounded patch edge tolerance' }
 }
 
 /** Resolves a measured world point against real M7.4 patch planes and polygons. */
@@ -133,37 +183,511 @@ export function associateRealityPoint(
   return best ? { ...best, candidates } : { strength: 'none', surfaceId: null, role: null, planeDistanceMeters: null, insidePatch: false, withinEdgeTolerance: false, normalCompatibility: null, confidence: 0, reason: 'no structural patch is sufficiently compatible', candidates }
 }
 
-/** Conservative post-analysis map. It is derived data, never Reality snapshot state. */
+/**
+ * Robust evaluation of a Reality raycast hit against the precomputed wall-membership table.
+ * When hitting a triangle mesh, uses majority/agreement voting across the triangle's 3 vertices.
+ * Avoids cross-boundary triangles and foreground objects (e.g. curtains) becoming selectable walls.
+ */
+function classifyPointMembership(
+  point: SpatialPoint,
+  normal: SpatialPoint | null,
+  logicalSurfaces: readonly LogicalStructuralSurface[],
+  patches: readonly RoomSurfacePatch[],
+): { logicalSurface: LogicalStructuralSurface | null; role: RoomSurfacePatchRole | null; status: 'wall-member' | 'uncertain' | 'non-wall'; planeDistance: number; confidence: number } {
+  let bestLogical: LogicalStructuralSurface | null = null
+  let bestRole: RoomSurfacePatchRole | null = null
+  let bestDist = Infinity
+  let isInside = false
+  let isNearEdge = false
+  let bestConfidence = 0
+
+  for (const logical of logicalSurfaces) {
+    const repNormal = logical.representativeNormal
+    const planeDistance = Math.abs(
+      repNormal.x * point.x +
+      repNormal.y * point.y +
+      repNormal.z * point.z -
+      logical.representativePlaneConstant,
+    )
+    if (planeDistance > 0.045) continue
+
+    const normalComp = normal ? normalizedDot(normal, repNormal) : null
+    if (normalComp !== null && normalComp < MIN_NORMAL_COMPATIBILITY) continue
+
+    for (const patchId of logical.memberPatchIds) {
+      const patch = patches.find((p) => p.id === patchId)
+      if (!patch) continue
+      const polygon = polygonStatus(localPoint(point, patch), patch)
+      if (polygon.inside) {
+        if (planeDistance < bestDist) {
+          bestDist = planeDistance
+          bestLogical = logical
+          bestRole = logical.role
+          isInside = true
+          isNearEdge = true
+          bestConfidence = Math.max(0, Math.min(1,
+            0.55 * (1 - planeDistance / 0.04) +
+            0.25 * 1.0 +
+            0.20 * (normalComp ?? 0.8),
+          ))
+        }
+      } else if (polygon.edgeDistance <= PATCH_EDGE_TOLERANCE_METERS && planeDistance < bestDist) {
+        bestDist = planeDistance
+        bestLogical = logical
+        bestRole = logical.role
+        isNearEdge = true
+        bestConfidence = Math.max(0, Math.min(1,
+          0.55 * (1 - planeDistance / 0.04) +
+          0.25 * 0.6 +
+          0.20 * (normalComp ?? 0.8),
+        ))
+      }
+    }
+  }
+
+  if (bestLogical && isInside && bestDist <= 0.03) {
+    return { logicalSurface: bestLogical, role: bestRole, status: 'wall-member', planeDistance: bestDist, confidence: bestConfidence }
+  }
+  if (bestLogical && (isNearEdge || bestDist <= 0.04)) {
+    return { logicalSurface: bestLogical, role: bestRole, status: 'uncertain', planeDistance: bestDist, confidence: bestConfidence }
+  }
+  return { logicalSurface: null, role: null, status: 'non-wall', planeDistance: bestDist, confidence: 0 }
+}
+
+/**
+ * Robust evaluation of a Reality raycast hit against the precomputed wall-membership table.
+ * When hitting a triangle mesh, uses majority/agreement voting across the triangle's 3 vertices.
+ * Avoids cross-boundary triangles and foreground objects (e.g. curtains) becoming selectable walls.
+ */
+export function evaluateRealityTapHit(
+  hitPoint: SpatialPoint,
+  hitNormal: SpatialPoint | null,
+  vertexPositions: readonly SpatialPoint[] | null,
+  table: RealityStructuralAssociationTable,
+): RealityTapHitEvaluation {
+  const candidates: RealityStructuralAssociationCandidate[] = []
+
+  // Evaluate candidate logical surfaces for diagnostic reporting
+  for (const logicalSurface of table.logicalSurfaces) {
+    const repNormal = logicalSurface.representativeNormal
+    const planeDistance = Math.abs(repNormal.x * hitPoint.x + repNormal.y * hitPoint.y + repNormal.z * hitPoint.z - logicalSurface.representativePlaneConstant)
+    const normalComp = hitNormal ? normalizedDot(hitNormal, repNormal) : null
+
+    let insideMemberPatch = false
+    let withinEdgeTolerance = false
+    for (const patchId of logicalSurface.memberPatchIds) {
+      const patch = table.patches.find((p) => p.id === patchId)
+      if (!patch) continue
+      const polygon = polygonStatus(localPoint(hitPoint, patch), patch)
+      if (polygon.inside) {
+        insideMemberPatch = true
+        withinEdgeTolerance = true
+        break
+      }
+      if (polygon.edgeDistance <= PATCH_EDGE_TOLERANCE_METERS) {
+        withinEdgeTolerance = true
+      }
+    }
+
+    candidates.push({
+      surfaceId: logicalSurface.id,
+      role: logicalSurface.role,
+      planeDistanceMeters: planeDistance,
+      insidePatch: insideMemberPatch,
+      withinEdgeTolerance,
+      normalCompatibility: normalComp,
+      accepted: planeDistance <= HIT_PLANE_TOLERANCE_METERS && (insideMemberPatch || withinEdgeTolerance) && (normalComp === null || normalComp >= MIN_NORMAL_COMPATIBILITY),
+    })
+  }
+
+  // Classify hit point itself
+  const hitClassification = classifyPointMembership(hitPoint, hitNormal, table.logicalSurfaces, table.patches)
+
+  let wallMemberVotes = 0
+  let nonWallVotes = 0
+  let uncertainVotes = 0
+
+  if (vertexPositions && vertexPositions.length === 3) {
+    // Classify all 3 triangle vertices
+    const vertexClassifications = vertexPositions.map((v) =>
+      classifyPointMembership(v, hitNormal, table.logicalSurfaces, table.patches),
+    )
+    for (const vc of vertexClassifications) {
+      if (vc.status === 'wall-member') wallMemberVotes++
+      else if (vc.status === 'uncertain') uncertainVotes++
+      else nonWallVotes++
+    }
+  } else {
+    // Single-point fallback
+    if (hitClassification.status === 'wall-member') {
+      wallMemberVotes = 3
+    } else if (hitClassification.status === 'uncertain') {
+      wallMemberVotes = 1
+      uncertainVotes = 2
+    } else {
+      nonWallVotes = 3
+    }
+  }
+
+  let accepted = false
+  let reason = 'no structural surface detected at tap'
+  let targetLogicalId: string | null = null
+  let targetRole: RoomSurfacePatchRole | null = null
+  let confidence = 0
+
+  // Decision logic based on majority voting and conservative object rejection
+  if (wallMemberVotes < 2) {
+    accepted = false
+    reason = `Tap rejected: foreground object detected (${nonWallVotes} of 3 triangle vertices classified non-wall)`
+  } else if (hitClassification.status === 'non-wall') {
+    accepted = false
+    reason = 'Tap rejected: tap hit is foreground object in front of wall'
+  } else if (hitClassification.status === 'uncertain') {
+    accepted = false
+    reason = 'Tap rejected: tap hit is in an uncertain boundary region'
+  } else {
+    // Wall-member accepted with high confidence
+    accepted = true
+    targetLogicalId = hitClassification.logicalSurface?.id ?? null
+    targetRole = hitClassification.role
+    confidence = hitClassification.confidence
+    reason = `Hit matched ${targetLogicalId} with ${(confidence * 100).toFixed(0)}% confidence`
+  }
+
+  return {
+    hitPosition: hitPoint,
+    vertexSampleIds: [],
+    membershipVotes: {
+      wallMember: wallMemberVotes,
+      nonWall: nonWallVotes,
+      uncertain: uncertainVotes,
+    },
+    logicalSurfaceId: targetLogicalId,
+    role: targetRole,
+    confidence,
+    accepted,
+    reason,
+    candidates,
+  }
+}
+
+/**
+ * 3D spatial grid helper for fast neighbor queries during region growth.
+ */
+class SpatialGrid3D {
+  private readonly cellSize: number
+  private readonly cells = new Map<string, number[]>()
+
+  constructor(cellSize: number) {
+    this.cellSize = cellSize
+  }
+
+  private key(x: number, y: number, z: number): string {
+    const ix = Math.floor(x / this.cellSize)
+    const iy = Math.floor(y / this.cellSize)
+    const iz = Math.floor(z / this.cellSize)
+    return `${ix},${iy},${iz}`
+  }
+
+  public insert(index: number, position: SpatialPoint): void {
+    const k = this.key(position.x, position.y, position.z)
+    const list = this.cells.get(k)
+    if (list) {
+      list.push(index)
+    } else {
+      this.cells.set(k, [index])
+    }
+  }
+
+  public query(position: SpatialPoint, radius: number): number[] {
+    const result: number[] = []
+    const minX = Math.floor((position.x - radius) / this.cellSize)
+    const maxX = Math.floor((position.x + radius) / this.cellSize)
+    const minY = Math.floor((position.y - radius) / this.cellSize)
+    const maxY = Math.floor((position.y + radius) / this.cellSize)
+    const minZ = Math.floor((position.z - radius) / this.cellSize)
+    const maxZ = Math.floor((position.z + radius) / this.cellSize)
+
+    for (let x = minX; x <= maxX; x++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let z = minZ; z <= maxZ; z++) {
+          const list = this.cells.get(`${x},${y},${z}`)
+          if (!list) continue
+          for (const idx of list) {
+            result.push(idx)
+          }
+        }
+      }
+    }
+    return result
+  }
+}
+
+/**
+ * M8.5.1 Conservative Wall-Membership Classification & Logical Grouping.
+ *
+ * Implements:
+ * 1. Safe M7.4 patch grouping into LogicalStructuralSurfaces.
+ * 2. Conservative wall seed discovery from trusted structural support.
+ * 3. Bounded local region growth enforcing plane residual, normal agreement,
+ *    and strict depth continuity (preventing curtains and foreground objects
+ *    from inheriting wall paint).
+ * 4. Derived classification: WALL_MEMBER (1), NON_WALL (0), UNCERTAIN (2).
+ */
 export function associateRealitySurfels(
   surfels: readonly FinalizedRealitySurfel[],
   patches: readonly RoomSurfacePatch[],
+  structuralSurfels?: readonly FinalizedSurfaceSurfel[],
 ): RealityStructuralAssociationTable {
   const started = timestamp()
-  const surfaceIds = patches.map((patch) => patch.id)
-  const surfaceIndices = new Int32Array(surfels.length).fill(-1)
-  let associatedSampleCount = 0, preservedForegroundSampleCount = 0, rejectedSampleCount = 0
-  for (let index = 0; index < surfels.length; index++) {
-    const surfel = surfels[index]
-    // The narrower band is deliberately more conservative than tap matching:
-    // a curtain/furniture surface offset from the wall stays original Reality RGB.
-    const association = associateRealityPoint(surfel.position, surfel.normal, patches, WALL_SAMPLE_PLANE_BAND_METERS)
-    if (association.strength === 'strong' && association.surfaceId) {
-      surfaceIndices[index] = surfaceIds.indexOf(association.surfaceId)
-      associatedSampleCount++
-    } else if (patches.some((patch) => {
-      const polygon = polygonStatus(localPoint(surfel.position, patch), patch)
-      return polygon.inside || polygon.edgeDistance <= PATCH_EDGE_TOLERANCE_METERS
-    })) {
-      preservedForegroundSampleCount++
-    } else {
-      rejectedSampleCount++
+
+  // 1. Group M7.4 patches into logical structural surfaces
+  const logicalSurfaces = groupPatchesIntoLogicalSurfaces(patches)
+  const patchIds = patches.map((p) => p.id)
+
+  const n = surfels.length
+  const memberships = new Uint8Array(n) // 0 = non-wall, 1 = wall-member, 2 = uncertain
+  const logicalSurfaceIndices = new Int32Array(n).fill(-1)
+  const patchIndices = new Int32Array(n).fill(-1)
+
+  if (patches.length === 0 || surfels.length === 0) {
+    return {
+      memberships,
+      logicalSurfaceIndices,
+      logicalSurfaces,
+      patchIndices,
+      patches,
+      surfaceIndices: patchIndices,
+      surfaceIds: patchIds,
+      associatedSampleCount: 0,
+      preservedForegroundSampleCount: 0,
+      rejectedSampleCount: n,
+      wallMemberCount: 0,
+      nonWallCount: n,
+      uncertainCount: 0,
+      candidateCount: 0,
+      elapsedMs: timestamp() - started,
     }
   }
-  return { surfaceIndices, surfaceIds, associatedSampleCount, preservedForegroundSampleCount, rejectedSampleCount, elapsedMs: timestamp() - started }
+
+  // 2. Index structural support points per logical surface if available
+  const structuralSupportGridByLogical = new Map<string, SpatialGrid3D>()
+  if (structuralSurfels && structuralSurfels.length > 0) {
+    for (const logicalSurface of logicalSurfaces) {
+      const grid = new SpatialGrid3D(0.1)
+      let count = 0
+      for (let sIdx = 0; sIdx < structuralSurfels.length; sIdx++) {
+        const s = structuralSurfels[sIdx]
+        const dist = Math.abs(
+          logicalSurface.representativeNormal.x * s.position.x +
+          logicalSurface.representativeNormal.y * s.position.y +
+          logicalSurface.representativeNormal.z * s.position.z -
+          logicalSurface.representativePlaneConstant,
+        )
+        const nDot = normalizedDot(s.normal, logicalSurface.representativeNormal) ?? 0
+        if (dist <= 0.08 && nDot >= 0.65) {
+          grid.insert(sIdx, s.position)
+          count++
+        }
+      }
+      if (count > 0) {
+        structuralSupportGridByLogical.set(logicalSurface.id, grid)
+      }
+    }
+  }
+
+  // 3. Build spatial neighbor grid over all dense Reality surfels
+  const denseGrid = new SpatialGrid3D(GROW_MAX_NEIGHBOR_DISTANCE_METERS)
+  for (let i = 0; i < n; i++) {
+    denseGrid.insert(i, surfels[i].position)
+  }
+
+  let candidateCount = 0
+  let preservedForegroundCount = 0
+
+  // 4. Process each logical surface independently
+  for (let lIdx = 0; lIdx < logicalSurfaces.length; lIdx++) {
+    const logical = logicalSurfaces[lIdx]
+    const memberPatches = patches.filter((p) => logical.memberPatchIds.includes(p.id))
+    const structuralGrid = structuralSupportGridByLogical.get(logical.id)
+
+    const seedIndices: number[] = []
+    const isCandidate = new Uint8Array(n)
+    const matchingPatchForSample = new Int32Array(n).fill(-1)
+
+    // Evaluate candidates and seeds
+    for (let i = 0; i < n; i++) {
+      const surfel = surfels[i]
+      const planeDistance = Math.abs(
+        logical.representativeNormal.x * surfel.position.x +
+        logical.representativeNormal.y * surfel.position.y +
+        logical.representativeNormal.z * surfel.position.z -
+        logical.representativePlaneConstant,
+      )
+      const normalComp = surfel.normal ? (normalizedDot(surfel.normal, logical.representativeNormal) ?? 0) : 0
+
+      // Find if projected point lies inside any member patch polygon
+      let bestPatchIdx = -1
+      let insideAny = false
+      let withinEdgeAny = false
+
+      for (let pIdx = 0; pIdx < memberPatches.length; pIdx++) {
+        const patch = memberPatches[pIdx]
+        const polygon = polygonStatus(localPoint(surfel.position, patch), patch)
+        if (polygon.inside) {
+          insideAny = true
+          withinEdgeAny = true
+          bestPatchIdx = patches.indexOf(patch)
+          break
+        }
+        if (polygon.edgeDistance <= PATCH_EDGE_TOLERANCE_METERS) {
+          withinEdgeAny = true
+          if (bestPatchIdx === -1) {
+            bestPatchIdx = patches.indexOf(patch)
+          }
+        }
+      }
+
+      // Check foreground: sample in front of wall plane inside polygon
+      const signedOffset = (logical.representativeNormal.x * surfel.position.x +
+        logical.representativeNormal.y * surfel.position.y +
+        logical.representativeNormal.z * surfel.position.z) - logical.representativePlaneConstant
+      if (signedOffset > WALL_SAMPLE_PLANE_BAND_METERS && withinEdgeAny) {
+        preservedForegroundCount++
+      }
+
+      if (planeDistance <= CANDIDATE_MAX_PLANE_RESIDUAL_METERS && withinEdgeAny && normalComp >= MIN_NORMAL_COMPATIBILITY) {
+        isCandidate[i] = 1
+        matchingPatchForSample[i] = bestPatchIdx
+        candidateCount++
+
+        // Seed qualification:
+        // Must have very small plane residual, high normal agreement, and strictly inside polygon
+        const isStrictSeedGeometry = planeDistance <= SEED_MAX_PLANE_RESIDUAL_METERS &&
+          normalComp >= SEED_MIN_NORMAL_DOT &&
+          insideAny
+
+        let hasStructuralSupport = true
+        if (structuralGrid) {
+          const nearbyStructural = structuralGrid.query(surfel.position, SEED_MAX_STRUCTURAL_SUPPORT_DISTANCE_METERS)
+          hasStructuralSupport = nearbyStructural.length > 0
+        }
+
+        if (isStrictSeedGeometry && hasStructuralSupport) {
+          seedIndices.push(i)
+        }
+      }
+    }
+
+    // 5. Region growth from trusted seeds
+    const queue = [...seedIndices]
+    const visited = new Uint8Array(n)
+    for (const seedIdx of seedIndices) {
+      visited[seedIdx] = 1
+      memberships[seedIdx] = 1 // WALL_MEMBER
+      logicalSurfaceIndices[seedIdx] = lIdx
+      patchIndices[seedIdx] = matchingPatchForSample[seedIdx]
+    }
+
+    let head = 0
+    while (head < queue.length) {
+      const currIdx = queue[head++]
+      const curr = surfels[currIdx]
+      const nbrCandidates = denseGrid.query(curr.position, GROW_MAX_NEIGHBOR_DISTANCE_METERS)
+
+      for (const nbrIdx of nbrCandidates) {
+        if (visited[nbrIdx] === 1 || isCandidate[nbrIdx] === 0) continue
+
+        const nbr = surfels[nbrIdx]
+        const distSq = (nbr.position.x - curr.position.x) ** 2 +
+          (nbr.position.y - curr.position.y) ** 2 +
+          (nbr.position.z - curr.position.z) ** 2
+
+        if (distSq > GROW_MAX_NEIGHBOR_DISTANCE_METERS ** 2) continue
+
+        // Plane residual check
+        const nbrPlaneDist = Math.abs(
+          logical.representativeNormal.x * nbr.position.x +
+          logical.representativeNormal.y * nbr.position.y +
+          logical.representativeNormal.z * nbr.position.z -
+          logical.representativePlaneConstant,
+        )
+        if (nbrPlaneDist > GROW_MAX_PLANE_RESIDUAL_METERS) continue
+
+        // Normal alignment with wall plane
+        const nbrPlaneNormalDot = nbr.normal ? (normalizedDot(nbr.normal, logical.representativeNormal) ?? 0) : 0
+        if (nbrPlaneNormalDot < GROW_MIN_PLANE_NORMAL_DOT) continue
+
+        // Neighbor-to-neighbor normal agreement (surface smoothness)
+        if (curr.normal && nbr.normal) {
+          const neighborNormalDot = normalizedDot(curr.normal, nbr.normal) ?? 0
+          if (neighborNormalDot < GROW_MIN_NEIGHBOR_NORMAL_DOT) continue
+        }
+
+        // Out-of-plane step residual (depth discontinuity detection)
+        // A curtain hanging in front of the wall has a depth step > 1.5 cm
+        const stepResidual = Math.abs(
+          logical.representativeNormal.x * (nbr.position.x - curr.position.x) +
+          logical.representativeNormal.y * (nbr.position.y - curr.position.y) +
+          logical.representativeNormal.z * (nbr.position.z - curr.position.z),
+        )
+        if (stepResidual > GROW_MAX_DEPTH_STEP_METERS) continue
+
+        // Admitted to wall membership
+        visited[nbrIdx] = 1
+        memberships[nbrIdx] = 1 // WALL_MEMBER
+        logicalSurfaceIndices[nbrIdx] = lIdx
+        patchIndices[nbrIdx] = matchingPatchForSample[nbrIdx]
+        queue.push(nbrIdx)
+      }
+    }
+
+    // Mark candidates that were not reached as uncertain
+    for (let i = 0; i < n; i++) {
+      if (isCandidate[i] === 1 && memberships[i] === 0) {
+        memberships[i] = 2 // UNCERTAIN
+      }
+    }
+  }
+
+  let wallMemberCount = 0
+  let uncertainCount = 0
+  let nonWallCount = 0
+
+  for (let i = 0; i < n; i++) {
+    if (memberships[i] === 1) {
+      wallMemberCount++
+    } else if (memberships[i] === 2) {
+      uncertainCount++
+    } else {
+      nonWallCount++
+    }
+  }
+
+  const elapsedMs = timestamp() - started
+
+  return {
+    memberships,
+    logicalSurfaceIndices,
+    logicalSurfaces,
+    patchIndices,
+    patches,
+    // Backward compatibility aliases
+    surfaceIndices: patchIndices,
+    surfaceIds: patchIds,
+    associatedSampleCount: wallMemberCount,
+    preservedForegroundSampleCount: preservedForegroundCount,
+    rejectedSampleCount: nonWallCount + uncertainCount,
+    wallMemberCount,
+    nonWallCount,
+    uncertainCount,
+    candidateCount,
+    elapsedMs,
+  }
 }
 
 function srgbToLinear(value: number): number {
-  return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
 }
 
 function hexToLinearRgb(hex: string): RealityRgbColor | null {
@@ -173,24 +697,125 @@ function hexToLinearRgb(hex: string): RealityRgbColor | null {
   return { r: srgbToLinear(((value >> 16) & 255) / 255), g: srgbToLinear(((value >> 8) & 255) / 255), b: srgbToLinear((value & 255) / 255) }
 }
 
-/** Returns linear display colors; original fused RGB is never modified. */
+// Distinct deterministic color palette for diagnostic visualization modes
+const DIAGNOSTIC_PALETTE: readonly RealityRgbColor[] = [
+  { r: 0.15, g: 0.55, b: 0.95 }, // Blue
+  { r: 0.95, g: 0.45, b: 0.15 }, // Orange
+  { r: 0.25, g: 0.85, b: 0.35 }, // Green
+  { r: 0.85, g: 0.25, b: 0.85 }, // Magenta
+  { r: 0.95, g: 0.85, b: 0.15 }, // Yellow
+  { r: 0.25, g: 0.85, b: 0.85 }, // Cyan
+  { r: 0.85, g: 0.35, b: 0.45 }, // Red-Pink
+  { r: 0.55, g: 0.35, b: 0.95 }, // Purple
+]
+
+function getDiagnosticColor(index: number): RealityRgbColor {
+  return DIAGNOSTIC_PALETTE[Math.abs(index) % DIAGNOSTIC_PALETTE.length]
+}
+
+/**
+ * Returns linear display colors for Reality Preview.
+ * Original fused camera RGB is NEVER modified.
+ *
+ * Supports:
+ * - Normal Design mode: Only WALL_MEMBER samples associated with customized
+ *   surfaces receive paint with natural luminance preservation.
+ * - Diagnostic modes (Part U):
+ *   - 'patch': Color by M7.4 patch
+ *   - 'logical-wall': Color by logical wall group
+ *   - 'wall-mask': Reality wall mask (wall-member = cyan/green, uncertain = yellow, non-wall = dark red)
+ */
 export function buildRealityDesignColors(
   surfels: readonly FinalizedRealitySurfel[],
   table: RealityStructuralAssociationTable,
   paintInputs: readonly RealityDesignColorInput[],
+  debugColorMode: RealityDebugColorMode = 'none',
 ): Map<number, RealityRgbColor> {
-  const paints = new Map(paintInputs.map((input) => [input.surfaceId, hexToLinearRgb(input.paintColor)]))
   const output = new Map<number, RealityRgbColor>()
+
+  // Diagnostic mode: Wall-Membership Mask (Part U.3)
+  if (debugColorMode === 'wall-mask') {
+    const wallMemberColor: RealityRgbColor = { r: 0.15, g: 0.88, b: 0.45 } // Green / Cyan
+    const uncertainColor: RealityRgbColor = { r: 0.95, g: 0.75, b: 0.1 }   // Amber / Yellow
+    const nonWallColor: RealityRgbColor = { r: 0.65, g: 0.18, b: 0.18 }    // Dark Red
+    for (let i = 0; i < surfels.length; i++) {
+      const membership = table.memberships[i]
+      output.set(surfels[i].id, membership === 1 ? wallMemberColor : membership === 2 ? uncertainColor : nonWallColor)
+    }
+    return output
+  }
+
+  // Diagnostic mode: Color by Logical Wall (Part U.2)
+  if (debugColorMode === 'logical-wall') {
+    for (let i = 0; i < surfels.length; i++) {
+      const lIdx = table.logicalSurfaceIndices[i]
+      if (table.memberships[i] === 1 && lIdx >= 0) {
+        output.set(surfels[i].id, getDiagnosticColor(lIdx))
+      }
+    }
+    return output
+  }
+
+  // Diagnostic mode: Color by M7.4 Patch (Part U.1)
+  if (debugColorMode === 'patch') {
+    for (let i = 0; i < surfels.length; i++) {
+      const pIdx = table.patchIndices[i]
+      if (pIdx >= 0) {
+        output.set(surfels[i].id, getDiagnosticColor(pIdx))
+      }
+    }
+    return output
+  }
+
+  // Normal Design mode (Part S, T)
+  const paintsBySurfaceId = new Map(paintInputs.map((input) => [input.surfaceId, hexToLinearRgb(input.paintColor)]))
+
   for (let index = 0; index < surfels.length; index++) {
-    const surfaceIndex = table.surfaceIndices[index]
-    const paint = surfaceIndex >= 0 ? paints.get(table.surfaceIds[surfaceIndex]) : null
+    // ONLY WALL_MEMBER samples are eligible for paint recoloring!
+    // Non-wall and uncertain samples preserve their original captured RGB.
+    if (table.memberships[index] !== 1) {
+      continue
+    }
+
+    const logicalIdx = table.logicalSurfaceIndices[index]
+    const patchIdx = table.patchIndices[index]
+    if (logicalIdx < 0 && patchIdx < 0) {
+      continue
+    }
+
+    // Resolve paint color from logical surface ID or member patch ID
+    let paint: RealityRgbColor | null = null
+    if (logicalIdx >= 0 && logicalIdx < table.logicalSurfaces.length) {
+      const logicalSurface = table.logicalSurfaces[logicalIdx]
+      paint = paintsBySurfaceId.get(logicalSurface.id) ?? null
+      if (!paint) {
+        for (const memberId of logicalSurface.memberPatchIds) {
+          const memberPaint = paintsBySurfaceId.get(memberId)
+          if (memberPaint) {
+            paint = memberPaint
+            break
+          }
+        }
+      }
+    }
+    if (!paint && patchIdx >= 0 && patchIdx < table.patches.length) {
+      paint = paintsBySurfaceId.get(table.patches[patchIdx].id) ?? null
+    }
+
     const original = surfels[index].colorRgb
     if (!paint || !original) continue
+
+    // Natural luminance preservation
     const originalLinear = { r: srgbToLinear(original.r), g: srgbToLinear(original.g), b: srgbToLinear(original.b) }
-    const sourceLuminance = originalLinear.r * .2126 + originalLinear.g * .7152 + originalLinear.b * .0722
-    const paintLuminance = Math.max(.04, paint.r * .2126 + paint.g * .7152 + paint.b * .0722)
-    const shading = Math.max(.38, Math.min(1.55, sourceLuminance / paintLuminance))
-    output.set(surfels[index].id, { r: Math.min(1, paint.r * shading), g: Math.min(1, paint.g * shading), b: Math.min(1, paint.b * shading) })
+    const sourceLuminance = originalLinear.r * 0.2126 + originalLinear.g * 0.7152 + originalLinear.b * 0.0722
+    const paintLuminance = Math.max(0.04, paint.r * 0.2126 + paint.g * 0.7152 + paint.b * 0.0722)
+    const shading = Math.max(0.38, Math.min(1.55, sourceLuminance / paintLuminance))
+    output.set(surfels[index].id, {
+      r: Math.min(1, paint.r * shading),
+      g: Math.min(1, paint.g * shading),
+      b: Math.min(1, paint.b * shading),
+    })
   }
+
   return output
 }
