@@ -3,7 +3,7 @@ import type { FinalizedRealitySurfel, RealityRgbColor, SpatialPoint } from '../t
 import { RealityMembershipCode, polygonStatus, type RealityDesignColorInput, type RealityStructuralAssociationTable } from './realityStructuralAssociationService'
 
 /** Development views. Normal Design uses `composite`. */
-export type RealityDesignCompositeMode = 'composite' | 'structural-only' | 'foreground-only' | 'classification' | 'exposed-wall-mask' | 'preserved-object-mask' | 'reality-wall-components' | 'selected-wall-triangles' | 'object-non-wall-triangles'
+export type RealityDesignCompositeMode = 'composite' | 'structural-only' | 'foreground-only' | 'classification' | 'exposed-wall-mask' | 'preserved-object-mask' | 'reality-wall-components' | 'selected-wall-triangles' | 'object-non-wall-triangles' | 'all-reality-components' | 'hit-component' | 'logical-wall-owned-components' | 'rejected-nearby-components'
 
 /** Render-time only: original Dense Reality data is never modified. */
 export const RealityDesignCompositeClassification = {

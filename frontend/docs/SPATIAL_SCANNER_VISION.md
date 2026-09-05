@@ -1570,3 +1570,44 @@ Design** is that same geometry with derived colors only on confirmed triangle
 components; a selected M7.4 patch is available solely as a structural debug
 reference/outline. M7 area and boundaries remain authoritative for future
 measurement and costing, not noisy visible-triangle area.
+
+### M8.5.7 — Hit-Seeded Visible Reality Surface Ownership
+
+M8.5.7 keeps M8.5.6's Reality-triangle Design renderer, but corrects the
+ownership direction when automatic structural seeds cannot reach the frontmost
+surface that a person is actually viewing. The selection path is now:
+
+```text
+USER TAP
+  -> frontmost raycast Dense Reality triangle
+  -> shared-edge connected visible Reality component
+  -> broad M7 logical-surface validation
+  -> retained user-hit ownership for this finalized scan
+  -> derived Design color on those original Reality triangles
+```
+
+The raycast triangle is authoritative for **which visible layer** was selected.
+M7.4 and its logical surface IDs remain the semantic validator: they check role,
+calibrated plane relationship, normal agreement, and bounded observed patch
+extent, but they cannot replace the hit component with a different hidden layer
+that happens to be closer to the clean M7 plane. Component growth uses only
+shared edges, local triangle-normal continuity, a bounded structural envelope,
+and the existing foreground/attached-object barriers. It stops at real corners,
+objects, unsupported gaps, and incompatible geometry.
+
+The accepted `VisibleRealitySurfaceOwnership` is derived, scan-local UI state.
+It records the hit triangle, component triangles, measured area, representative
+normal, offset, confidence, and logical ID. It is retained through Original /
+Design switching and paint swatch changes, then discarded with the finalized
+scan. A user-hit component overrides automatic ownership only for that same
+logical surface, preventing a hidden automatic component from being painted
+instead. Dense Reality geometry, captured RGB, M7 geometry, collision, and
+measurements remain immutable.
+
+Development views distinguish automatic components from **All Reality
+Components**, **Hit Component**, **Logical Wall Owned Components**, and
+**Rejected Nearby Components**. Tap diagnostics report hit/component identity,
+triangle count, area, calibrated offset, structural candidates, confidence, and
+post-scan adjacency/growth timing. This is still measured triangle recoloring,
+not an opaque M7 paint polygon, image texture projection, semantic object
+recognition, or fabricated wall filling.

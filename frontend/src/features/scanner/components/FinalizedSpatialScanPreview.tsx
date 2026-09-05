@@ -40,7 +40,12 @@ import {
   type RealityTapHitEvaluation,
 } from '../services/realityStructuralAssociationService'
 import type { RealityDesignCompositeMode, RealityPaintablePatchMask } from '../services/realityDesignCompositingService'
-import { applyRealityTrianglePaint } from '../services/realityWallTriangleAssociationService'
+import {
+  applyRealityTrianglePaint,
+  createHitSeededVisibleRealityOwnership,
+  type HitSeededOwnershipResult,
+  type VisibleRealitySurfaceOwnership,
+} from '../services/realityWallTriangleAssociationService'
 import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
@@ -90,6 +95,7 @@ type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
+const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
 
 const FINALIZED_SURFEL_PREVIEW_RADIUS_METERS = 0.025
 const FINALIZED_SURFEL_PREVIEW_OFFSET_METERS = 0.0005
@@ -537,6 +543,7 @@ function applyRealityDesignTriangleAppearance(
   association: RealityStructuralAssociationTable,
   inputs: readonly RealityDesignColorInput[],
   compositeMode: RealityDesignCompositeMode,
+  visibleOwnerships: readonly VisibleRealitySurfaceOwnership[],
 ): void {
   const topology = prepared.triangleTopology, triangleAssociation = prepared.designTriangleAssociation
   if (!topology || !triangleAssociation) return
@@ -544,15 +551,23 @@ function applyRealityDesignTriangleAppearance(
   if (!triangleLayer) return
   const color = resources.geometries[triangleLayer.geometry]?.getAttribute('color')
   if (!color || !(color.array instanceof Float32Array)) return
-  if (compositeMode === 'reality-wall-components') {
-    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, true)
-  } else if (compositeMode === 'composite' || compositeMode === 'selected-wall-triangles') {
-    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, false, compositeMode === 'selected-wall-triangles')
-  } else if (compositeMode === 'object-non-wall-triangles') {
+  if (compositeMode === 'reality-wall-components' || compositeMode === 'all-reality-components' || compositeMode === 'logical-wall-owned-components') {
+    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, true, false, visibleOwnerships)
+  } else if (compositeMode === 'composite' || compositeMode === 'selected-wall-triangles' || compositeMode === 'hit-component') {
+    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, false, compositeMode === 'selected-wall-triangles', visibleOwnerships)
+  } else if (compositeMode === 'object-non-wall-triangles' || compositeMode === 'rejected-nearby-components') {
     // Diagnostic isolation: dim confirmed wall components while all preserved
     // object/non-wall triangles retain their captured source RGB.
+    const manualLogicalByTriangle = new Map<number, number>()
+    const manualLogicalIndices = new Set<number>()
+    for (const ownership of visibleOwnerships) {
+      manualLogicalIndices.add(ownership.logicalSurfaceIndex)
+      for (const triangle of ownership.triangleIndices) manualLogicalByTriangle.set(triangle, ownership.logicalSurfaceIndex)
+    }
     for (let triangle = 0; triangle < triangleAssociation.logicalSurfaceIndices.length; triangle++) {
-      if (triangleAssociation.logicalSurfaceIndices[triangle] < 0) continue
+      const automatic = triangleAssociation.logicalSurfaceIndices[triangle]
+      const owned = manualLogicalByTriangle.get(triangle) ?? (manualLogicalIndices.has(automatic) ? -1 : automatic)
+      if (owned < 0) continue
       for (let vertex = 0; vertex < 3; vertex++) {
         const offset = (triangle * 3 + vertex) * 3
         color.array[offset] *= 0.1
@@ -656,6 +671,8 @@ function FinalizedSpatialScanPreview({
   const [realityDesignCompositeMode, setRealityDesignCompositeMode] = useState<RealityDesignCompositeMode>('composite')
   const [realityDebugColorMode, setRealityDebugColorMode] = useState<RealityDebugColorMode>('none')
   const [realityTapHit, setRealityTapHit] = useState<RealityTapHitEvaluation | null>(null)
+  const [visibleRealityOwnershipState, setVisibleRealityOwnershipState] = useState<{ scanId: string | null; ownerships: readonly VisibleRealitySurfaceOwnership[] }>({ scanId: null, ownerships: EMPTY_VISIBLE_REALITY_OWNERSHIPS })
+  const [lastHitOwnershipState, setLastHitOwnershipState] = useState<{ scanId: string | null; result: HitSeededOwnershipResult } | null>(null)
   const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
   const [realityRuntimeStats, setRealityRuntimeStats] = useState<RealityRuntimeStats | null>(null)
 
@@ -694,7 +711,9 @@ function FinalizedSpatialScanPreview({
     preferredRealityReconstruction,
     realityRenderMode,
     mode === 'reality-preview',
-    useDesignAppearance || realityDebugColorMode !== 'none' ? realityAssociation.table : null,
+    // Triangle topology and hit-safe ownership must be available before a
+    // swatch is chosen. This stays post-scan and does not affect Original RGB.
+    realityAssociation.table,
     useDesignAppearance ? designMaskInputs : EMPTY_DESIGN_INPUTS,
     realityDebugColorMode,
     realityDesignCompositeMode,
@@ -705,6 +724,14 @@ function FinalizedSpatialScanPreview({
     !denseRealityColorIsRenderable &&
     realityReconstruction !== null &&
     realityReconstruction !== undefined
+
+  const activeRealityScanId = preferredRealityReconstruction?.scanId ?? null
+  const visibleRealityOwnerships = visibleRealityOwnershipState.scanId === activeRealityScanId
+    ? visibleRealityOwnershipState.ownerships
+    : EMPTY_VISIBLE_REALITY_OWNERSHIPS
+  const lastHitOwnershipResult = lastHitOwnershipState?.scanId === activeRealityScanId
+    ? lastHitOwnershipState.result
+    : null
 
   const selectSurface = useCallback((surfaceId: string | null): void => {
     setSelectedSurfaceId(surfaceId)
@@ -967,6 +994,7 @@ function FinalizedSpatialScanPreview({
           realityAssociation.table,
           designInputs,
           designComposite.mode,
+          visibleRealityOwnerships,
         )
       }
       realityResources.group.traverse((object) => { object.renderOrder = 1 })
@@ -1062,22 +1090,39 @@ function FinalizedSpatialScanPreview({
           return
         }
       }
-      // M8.5.6: exact Dense Reality triangle membership is the primary tap
-      // semantic. A non-component triangle is deliberately rejected rather
-      // than falling through to the hidden structural polygon.
+      // M8.5.7: the exact frontmost Reality triangle remains the primary tap
+      // semantic. It seeds a connected visible component before M7 validates
+      // which logical wall that *visible* surface belongs to.
       const triangleLayer = preparedReality?.layers.find((layer) => layer.kind === 'triangles')
       const triangleAssociation = preparedReality?.designTriangleAssociation
+      const triangleTopology = preparedReality?.triangleTopology
       const triangleGeometry = triangleLayer ? realityResources.geometries[triangleLayer.geometry] : null
-      if (triangleAssociation && triangleGeometry && hit.object instanceof THREE.Mesh && hit.object.geometry === triangleGeometry && typeof hit.faceIndex === 'number') {
-        const logicalIndex = triangleAssociation.logicalSurfaceIndices[hit.faceIndex]
+      if (triangleAssociation && triangleTopology && triangleGeometry && hit.object instanceof THREE.Mesh && hit.object.geometry === triangleGeometry && typeof hit.faceIndex === 'number') {
         const hitPoint = { x: hit.point.x, y: hit.point.y, z: hit.point.z }
-        if (logicalIndex >= 0) {
-          const logical = realityAssociation.table.logicalSurfaces[logicalIndex]
+        const hitOwnership = createHitSeededVisibleRealityOwnership(
+          preferredRealityReconstruction?.surfels ?? [],
+          triangleTopology,
+          realityAssociation.table,
+          hit.faceIndex,
+          preparedReality?.ownershipClassifications,
+          triangleAssociation,
+        )
+        setLastHitOwnershipState({ scanId: activeRealityScanId, result: hitOwnership })
+        if (hitOwnership.ownership) {
+          const ownership = hitOwnership.ownership
+          const logical = realityAssociation.table.logicalSurfaces[ownership.logicalSurfaceIndex]
           const directHit: RealityTapHitEvaluation = {
             hitPosition: hitPoint, vertexSampleIds: [], membershipVotes: { wallMember: 3, nonWall: 0, uncertain: 0 },
-            logicalSurfaceId: logical.id, role: logical.role, confidence: 0.9, accepted: true,
-            reason: 'confirmed connected Reality wall triangle', candidates: [],
+            logicalSurfaceId: logical.id, role: logical.role, confidence: ownership.confidence, accepted: true,
+            reason: hitOwnership.reason, candidates: [],
           }
+          setVisibleRealityOwnershipState((current) => ({
+            scanId: activeRealityScanId,
+            ownerships: [
+              ...(current.scanId === activeRealityScanId ? current.ownerships : []).filter((existing) => existing.logicalSurfaceId !== ownership.logicalSurfaceId),
+              ownership,
+            ],
+          }))
           setRealityTapHit(directHit)
           selectSurface(logical.id)
           setRealityAppearanceMode('design')
@@ -1085,7 +1130,7 @@ function FinalizedSpatialScanPreview({
           setRealityTapHit({
             hitPosition: hitPoint, vertexSampleIds: [], membershipVotes: { wallMember: 0, nonWall: 3, uncertain: 0 },
             logicalSurfaceId: null, role: null, confidence: 0, accepted: false,
-            reason: 'Reality triangle is not a confirmed editable wall component', candidates: [],
+            reason: hitOwnership.reason, candidates: [],
           })
         }
         return
@@ -1246,7 +1291,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityDesignResources.group)
       }
     }
-  }, [analysisResult, denseRealityReconstruction, designInputs, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations])
+  }, [activeRealityScanId, analysisResult, denseRealityReconstruction, designInputs, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations, visibleRealityOwnerships])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1561,9 +1606,13 @@ function FinalizedSpatialScanPreview({
                   {([
                     ['composite', 'Final Design'],
                     ['structural-only', 'Structural Patch (Debug)'],
-                    ['reality-wall-components', 'Reality Wall Components'],
-                    ['selected-wall-triangles', 'Selected Wall Triangles'],
-                    ['object-non-wall-triangles', 'Object / Non-Wall Triangles'],
+                    ['all-reality-components', 'All Reality Components'],
+                    ['hit-component', 'Hit Component'],
+                    ['logical-wall-owned-components', 'Logical Wall Owned Components'],
+                    ['rejected-nearby-components', 'Rejected Nearby Components'],
+                    ['reality-wall-components', 'Reality Wall Components (Auto)'],
+                    ['selected-wall-triangles', 'Selected Wall Triangles (Auto)'],
+                    ['object-non-wall-triangles', 'Object / Non-Wall Triangles (Auto)'],
                     ['foreground-only', 'Foreground Reality Only'],
                     ['classification', 'Compositor Classification'],
                     ['exposed-wall-mask', 'Exposed Wall Mask'],
@@ -1656,6 +1705,16 @@ function FinalizedSpatialScanPreview({
               {realityPreparation.prepared?.designTriangleAssociation ? (
                 <span>
                   Reality wall triangles: {realityPreparation.prepared.designTriangleAssociation.stats.assignedTriangleCount} / {realityPreparation.prepared.designTriangleAssociation.stats.triangleCount} assigned from {realityPreparation.prepared.designTriangleAssociation.stats.seedTriangleCount} trusted seeds across {realityPreparation.prepared.designTriangleAssociation.stats.componentCount} components; adjacency {realityPreparation.prepared.designTriangleAssociation.stats.adjacencyBuildMs.toFixed(1)} ms / seed {realityPreparation.prepared.designTriangleAssociation.stats.seedClassificationMs.toFixed(1)} ms / growth {realityPreparation.prepared.designTriangleAssociation.stats.componentGrowthMs.toFixed(1)} ms.
+                </span>
+              ) : null}
+              {visibleRealityOwnerships.length > 0 ? (
+                <span>
+                  Visible hit ownership: {visibleRealityOwnerships.map((ownership) => `${ownership.logicalSurfaceId}: hit T${ownership.seedTriangleId}, ${ownership.triangleIndices.length} triangles, ${ownership.areaMetersSquared.toFixed(2)} m², offset ${(ownership.componentPlaneOffsetMeters * 100).toFixed(1)} cm, conf ${(ownership.confidence * 100).toFixed(0)}%`).join(' | ')}. User-hit components override automatic components only for their own logical surface.
+                </span>
+              ) : null}
+              {lastHitOwnershipResult ? (
+                <span>
+                  Last visible-component validation: candidates {lastHitOwnershipResult.candidateLogicalSurfaceIds.join(', ') || 'none'}; adjacency {lastHitOwnershipResult.adjacencyBuildMs.toFixed(1)} ms; growth {lastHitOwnershipResult.growthMs.toFixed(1)} ms; rejected nearby {lastHitOwnershipResult.rejectedNearbyComponentCount}; {lastHitOwnershipResult.reason}.
                 </span>
               ) : null}
               {realityPreparation.prepared?.designComposite?.stats.surfaces.map((surface) => (

@@ -22,6 +22,13 @@ self.onmessage = (event: MessageEvent<{
 }>) => {
   try {
     const debugMode = event.data.debugColorMode ?? 'none'
+    // Build one stable, all-logical-surface barrier map after analysis. It is
+    // reused by automatic association and later frontmost user-hit ownership;
+    // paint swatches never rebuild it.
+    const ownershipInputs = event.data.association?.logicalSurfaces.map((surface) => ({ surfaceId: surface.id, paintColor: '#000000' })) ?? []
+    const ownershipComposite = event.data.association
+      ? buildRealityDesignCompositePlan(event.data.surfels, event.data.association, ownershipInputs)
+      : null
     const composite = event.data.association && event.data.designInputs.length > 0 && debugMode === 'none'
       ? buildRealityDesignCompositePlan(
         event.data.surfels,
@@ -52,14 +59,18 @@ self.onmessage = (event: MessageEvent<{
         masks: composite.masks,
         stats: composite.stats,
       }
+    }
+    if (event.data.association && ownershipComposite) {
+      prepared.ownershipClassifications = ownershipComposite.classifications
       if (resources.triangleTopology) {
-        // Reuse M8.5.5's conservative attached/foreground/uncertain evidence
-        // as a barrier while associating exact emitted Dense Reality triangles.
+        // Keep automatic M8.5.6 components as a fallback/reference, but use
+        // one all-surface M8.5.5 barrier map. M8.5.7 can then grow from the
+        // actual frontmost raycast triangle without rerunning this work.
         prepared.designTriangleAssociation = associateRealityWallTriangles(
           event.data.surfels,
           resources.triangleTopology,
           event.data.association,
-          composite.classifications,
+          ownershipComposite.classifications,
         )
       }
     }
@@ -70,6 +81,7 @@ self.onmessage = (event: MessageEvent<{
       buffers.add(mask.preservedCells.buffer as ArrayBuffer)
     }
     if (prepared.triangleTopology) buffers.add(prepared.triangleTopology.vertexSurfelIds.buffer as ArrayBuffer)
+    if (prepared.ownershipClassifications) buffers.add(prepared.ownershipClassifications.buffer as ArrayBuffer)
     if (prepared.designTriangleAssociation) {
       buffers.add(prepared.designTriangleAssociation.logicalSurfaceIndices.buffer as ArrayBuffer)
       buffers.add(prepared.designTriangleAssociation.componentIds.buffer as ArrayBuffer)

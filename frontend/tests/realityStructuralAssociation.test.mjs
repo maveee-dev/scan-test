@@ -782,3 +782,89 @@ test('48. Triangle paint changes only a derived GPU color buffer', () => {
   assert.notDeepEqual([...colors], Array(9).fill(0.5))
   assert.equal(JSON.stringify(samples), original)
 })
+
+function hitOwnershipPlan(samples, patches, topology, hitTriangle = 0, barrierMask = undefined) {
+  const table = association.associateRealitySurfels(samples, patches)
+  return triangleAssociation.createHitSeededVisibleRealityOwnership(samples, topology, table, hitTriangle, barrierMask)
+}
+
+test('49. Frontmost user hit becomes the visible wall component seed even when offset from the M7 plane', () => {
+  const samples = [
+    surfel(601, 0.5, 0.5, 0.075), surfel(602, 0.8, 0.5, 0.075), surfel(603, 0.5, 0.8, 0.075),
+    // A hidden/other layer is closer to the structural plane but is not hit.
+    surfel(611, 0.5, 0.5, 0.006), surfel(612, 0.8, 0.5, 0.006), surfel(613, 0.5, 0.8, 0.006),
+  ]
+  const result = hitOwnershipPlan(samples, [patch('wall-a')], triangleTopology([601, 602, 603, 611, 612, 613]))
+  assert.ok(result.ownership)
+  assert.equal(result.ownership.seedTriangleId, 0)
+  assert.deepEqual([...result.ownership.triangleIndices], [0])
+  assert.equal(result.ownership.logicalSurfaceId, 'logical-wall-1')
+})
+
+test('50. Hit-seeded ownership grows across shared-edge locally coherent Reality wall triangles', () => {
+  const samples = [
+    surfel(621, 0.5, 0.5, 0.02), surfel(622, 0.8, 0.5, 0.02), surfel(623, 0.5, 0.8, 0.02), surfel(624, 0.8, 0.8, 0.02),
+  ]
+  const result = hitOwnershipPlan(samples, [patch('wall-a')], triangleTopology([621, 622, 623, 622, 624, 623]))
+  assert.ok(result.ownership)
+  assert.deepEqual([...result.ownership.triangleIndices], [0, 1])
+  assert.ok(result.ownership.areaMetersSquared > 0.08)
+})
+
+test('51. Hit-seeded wall growth stops at a sharp normal corner and another logical wall', () => {
+  const samples = [
+    surfel(631, 0.5, 0.5, 0.02), surfel(632, 0.8, 0.5, 0.02), surfel(633, 0.5, 0.8, 0.02),
+    surfel(634, 0.8, 0.5, 0.02, { x: 1, y: 0, z: 0 }), surfel(635, 0.8, 0.8, 0.25, { x: 1, y: 0, z: 0 }), surfel(636, 0.8, 0.5, 0.45, { x: 1, y: 0, z: 0 }),
+  ]
+  const result = hitOwnershipPlan(samples, [patch('wall-a')], triangleTopology([631, 632, 633, 632, 635, 634]))
+  assert.ok(result.ownership)
+  assert.deepEqual([...result.ownership.triangleIndices], [0])
+})
+
+test('52. Foreground, curtain, and picture-barrier hit triangles are rejected rather than reassigned', () => {
+  const samples = [surfel(641, 0.5, 0.5, 0.02), surfel(642, 0.8, 0.5, 0.02), surfel(643, 0.5, 0.8, 0.02)]
+  const barrier = new Uint8Array(samples.length).fill(3)
+  const result = hitOwnershipPlan(samples, [patch('wall-a')], triangleTopology([641, 642, 643]), 0, barrier)
+  assert.equal(result.ownership, null)
+  assert.match(result.reason, /foreground or attached-object/)
+})
+
+test('53. Ceiling hit ownership has no vertical-wall assumption', () => {
+  const ceiling = ceilingPatch()
+  const samples = [
+    surfel(651, 0.5, 2.04, 0.5, { x: 0, y: 1, z: 0 }), surfel(652, 0.8, 2.04, 0.5, { x: 0, y: 1, z: 0 }), surfel(653, 0.5, 2.04, 0.8, { x: 0, y: 1, z: 0 }),
+  ]
+  const result = hitOwnershipPlan(samples, [ceiling], triangleTopology([651, 652, 653]))
+  assert.ok(result.ownership)
+  assert.equal(result.ownership.logicalSurfaceId, 'logical-ceiling-1')
+})
+
+test('54. Hit-owned triangle paint overrides a hidden automatic component for the same logical wall', () => {
+  const samples = [
+    surfel(661, 0.5, 0.5, 0.04), surfel(662, 0.8, 0.5, 0.04), surfel(663, 0.5, 0.8, 0.04),
+    surfel(671, 0.5, 0.5, 0.006), surfel(672, 0.8, 0.5, 0.006), surfel(673, 0.5, 0.8, 0.006),
+  ]
+  const topology = triangleTopology([661, 662, 663, 671, 672, 673])
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const automatic = triangleAssociation.associateRealityWallTriangles(samples, topology, table, new Uint8Array(samples.length))
+  const hit = triangleAssociation.createHitSeededVisibleRealityOwnership(samples, topology, table, 0)
+  assert.ok(hit.ownership)
+  const colors = new Float32Array(18).fill(0.5)
+  triangleAssociation.applyRealityTrianglePaint(colors, samples, topology, automatic, table, [{ surfaceId: 'wall-a', paintColor: '#1565d8' }], false, false, [hit.ownership])
+  assert.notDeepEqual([...colors.slice(0, 9)], Array(9).fill(0.5))
+  assert.deepEqual([...colors.slice(9)], Array(9).fill(0.5))
+})
+
+test('55. Separate compatible observed wall component may join a user-hit logical wall without filling its gap', () => {
+  const samples = [
+    surfel(681, 0.5, 0.5, 0.006), surfel(682, 0.8, 0.5, 0.006), surfel(683, 0.5, 0.8, 0.006),
+    surfel(691, 1.2, 0.5, 0.006), surfel(692, 1.5, 0.5, 0.006), surfel(693, 1.2, 0.8, 0.006),
+  ]
+  const topology = triangleTopology([681, 682, 683, 691, 692, 693])
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const automatic = triangleAssociation.associateRealityWallTriangles(samples, topology, table, new Uint8Array(samples.length))
+  const hit = triangleAssociation.createHitSeededVisibleRealityOwnership(samples, topology, table, 0, undefined, automatic)
+  assert.ok(hit.ownership)
+  assert.ok(hit.ownership.additionalComponentCount >= 1)
+  assert.deepEqual([...hit.ownership.triangleIndices], [0, 1])
+})

@@ -794,6 +794,8 @@ export interface PreparedRealitySurface {
   stats: RealitySurfaceRenderStats
   triangleTopology?: RealityTriangleTopology
   designTriangleAssociation?: RealityWallTriangleAssociation
+  /** M8.5.5 foreground/attached barriers for M8.5.7 hit-seeded ownership. */
+  ownershipClassifications?: Uint8Array
   designComposite?: {
     mode: RealityDesignCompositeMode
     structuralPatchIds: readonly string[]
