@@ -37,6 +37,7 @@ import {
   type RealityDesignColorInput,
   type RealityTapHitEvaluation,
 } from '../services/realityStructuralAssociationService'
+import type { RealityDesignCompositeMode } from '../services/realityDesignCompositingService'
 import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
@@ -431,6 +432,61 @@ function addRoomSurfaces(
   return { geometries, materials, surfaceMeshes, surfaceOutlines }
 }
 
+/**
+ * M8.5.4 Design background: exact observed M7.4 polygons, rendered only for
+ * customized patches. Dense Reality is filtered separately to foreground so
+ * original wall samples cannot cover this material surface.
+ */
+function addRealityDesignStructuralSurfaces(
+  scene: THREE.Scene,
+  patches: readonly RoomSurfacePatch[],
+  structuralPatchIds: readonly string[],
+  customizations: SurfaceCustomizationMap,
+): {
+  group: THREE.Group
+  geometries: THREE.BufferGeometry[]
+  materials: THREE.Material[]
+  meshCount: number
+  surfaceMeshes: Map<string, THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>
+} {
+  const selectedIds = new Set(structuralPatchIds)
+  const group = new THREE.Group()
+  group.renderOrder = 0
+  const geometries: THREE.BufferGeometry[] = []
+  const materials: THREE.Material[] = []
+  const surfaceMeshes = new Map<string, THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>>()
+  let meshCount = 0
+  for (const patch of patches) {
+    if (!selectedIds.has(patch.id)) continue
+    const positions = new Float32Array(patch.vertices3D.length * 3)
+    for (let index = 0; index < patch.vertices3D.length; index++) {
+      const vertex = patch.vertices3D[index]
+      positions[index * 3] = vertex.x
+      positions[index * 3 + 1] = vertex.y
+      positions[index * 3 + 2] = vertex.z
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geometry.setIndex([...patch.triangleIndices])
+    const material = new THREE.MeshBasicMaterial({
+      color: getSurfacePaintColor(patch, customizations),
+      depthTest: true,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.renderOrder = 0
+    group.add(mesh)
+    surfaceMeshes.set(patch.id, mesh)
+    geometries.push(geometry)
+    materials.push(material)
+    meshCount++
+  }
+  scene.add(group)
+  return { group, geometries, materials, meshCount, surfaceMeshes }
+}
+
 function applyRoomSurfaceAppearance(
   surfaces: readonly RoomSurfacePatch[],
   meshes: ReadonlyMap<string, RoomSurfaceMesh>,
@@ -520,6 +576,7 @@ function FinalizedSpatialScanPreview({
   const [realityRenderMode, setRealityRenderMode] = useState<RealitySurfaceRenderMode>('dense')
   const [realityRenderSource, setRealityRenderSource] = useState<RealityRenderSource>('dense')
   const [realityAppearanceMode, setRealityAppearanceMode] = useState<RealityAppearanceMode>('original')
+  const [realityDesignCompositeMode, setRealityDesignCompositeMode] = useState<RealityDesignCompositeMode>('composite')
   const [realityDebugColorMode, setRealityDebugColorMode] = useState<RealityDebugColorMode>('none')
   const [realityTapHit, setRealityTapHit] = useState<RealityTapHitEvaluation | null>(null)
   const [realityRenderStats, setRealityRenderStats] = useState<RealitySurfaceRenderStats | null>(null)
@@ -552,6 +609,7 @@ function FinalizedSpatialScanPreview({
     useDesignAppearance || realityDebugColorMode !== 'none' ? realityAssociation.table : null,
     useDesignAppearance ? designInputs : EMPTY_DESIGN_INPUTS,
     realityDebugColorMode,
+    realityDesignCompositeMode,
   )
   const preparedReality = realityPreparation.prepared
   const denseRealityFallbackActive = realityRenderSource === 'dense' &&
@@ -745,6 +803,7 @@ function FinalizedSpatialScanPreview({
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let realityResources: ReturnType<typeof restoreRealitySurface> | null = null
+    let realityDesignResources: ReturnType<typeof addRealityDesignStructuralSurfaces> | null = null
     let realitySelectionOutlines: ReturnType<typeof addRealitySelectionOutlines> | null = null
     let roomSurfaceResources: {
       geometries: THREE.BufferGeometry[]
@@ -789,7 +848,18 @@ function FinalizedSpatialScanPreview({
       roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
       roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
     } else if (mode === 'reality-preview' && preparedReality) {
+      const designComposite = preparedReality.designComposite
+      if (designComposite &&
+        (designComposite.mode === 'composite' || designComposite.mode === 'structural-only')) {
+        realityDesignResources = addRealityDesignStructuralSurfaces(
+          scene,
+          roomPatches,
+          designComposite.structuralPatchIds,
+          surfaceCustomizations,
+        )
+      }
       realityResources = restoreRealitySurface(preparedReality)
+      realityResources.group.traverse((object) => { object.renderOrder = 1 })
       scene.add(realityResources.group)
       const memberPatches = selectedLogicalSurface
         ? roomPatches.filter((patch) => selectedLogicalSurface.memberPatchIds.includes(patch.id))
@@ -852,7 +922,11 @@ function FinalizedSpatialScanPreview({
         setRealityTapHit(dummyHit)
         return
       }
-      const hit = selectionRaycaster.intersectObject(realityResources.group, true)[0]
+      const realityHit = selectionRaycaster.intersectObject(realityResources.group, true)[0]
+      const designHit = !realityHit && realityDesignResources
+        ? selectionRaycaster.intersectObjects([...realityDesignResources.surfaceMeshes.values()], false)[0]
+        : undefined
+      const hit = realityHit ?? designHit
       if (!hit) {
         const dummyHit: RealityTapHitEvaluation = {
           hitPosition: { x: 0, y: 0, z: 0 },
@@ -867,6 +941,16 @@ function FinalizedSpatialScanPreview({
         }
         setRealityTapHit(dummyHit)
         return
+      }
+      if (designHit) {
+        const patchId = [...(realityDesignResources?.surfaceMeshes.entries() ?? [])]
+          .find(([, mesh]) => mesh === designHit.object)?.[0]
+        const logical = patchId ? logicalSurfaces.find((surface) => surface.memberPatchIds.includes(patchId)) : null
+        if (logical) {
+          selectSurface(logical.id)
+          setRealityAppearanceMode('design')
+          return
+        }
       }
       const hitNormal = hit.face
         ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld)
@@ -1001,6 +1085,8 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       realityResources?.geometries.forEach((geometry) => geometry.dispose())
       realityResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
+      realityDesignResources?.geometries.forEach((geometry) => geometry.dispose())
+      realityDesignResources?.materials.forEach((surfaceMaterial) => surfaceMaterial.dispose())
       realitySelectionOutlines?.geometries.forEach((geometry) => geometry.dispose())
       realitySelectionOutlines?.materials.forEach((outlineMaterial) => outlineMaterial.dispose())
       realitySelectionOutlines?.lines.forEach((line) => scene.remove(line))
@@ -1018,8 +1104,11 @@ function FinalizedSpatialScanPreview({
       if (realityResources) {
         scene.remove(realityResources.group)
       }
+      if (realityDesignResources) {
+        scene.remove(realityDesignResources.group)
+      }
     }
-  }, [analysisResult, denseRealityReconstruction, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, denseRealityReconstruction, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1215,7 +1304,7 @@ function FinalizedSpatialScanPreview({
             <button type="button" className="scanner-reality-appearance-mode" aria-pressed={realityAppearanceMode === 'original'} onClick={() => setRealityAppearanceMode('original')}>Original</button>
             <button type="button" className="scanner-reality-appearance-mode" aria-pressed={realityAppearanceMode === 'design'} disabled={roomPatches.length === 0 || realityAssociation.pending || realityAssociation.error !== null} onClick={() => setRealityAppearanceMode('design')}>Design</button>
           </div>
-          <span>{realityAppearanceMode === 'original' ? 'Original scanned room appearance.' : 'Design appearance: paint is applied only to associated structural surfaces.'}</span>
+          <span>{realityAppearanceMode === 'original' ? 'Original scanned room appearance.' : 'Design appearance: clean structural paint surfaces with depth-aware preserved Reality foreground.'}</span>
           {roomPatches.length === 0 ? <span role="status">Analyze room surfaces to enable Design mode.</span> : null}
           {realityAssociation.pending ? <span role="status">Matching measured Reality geometry to room surfaces…</span> : null}
           {realityAssociation.error ? <span role="alert">{realityAssociation.error}</span> : null}
@@ -1328,6 +1417,27 @@ function FinalizedSpatialScanPreview({
                   </button>
                 ))}
               </div>
+              {realityAppearanceMode === 'design' && designInputs.length > 0 ? (
+                <div className="scanner-reality-render-modes" role="group" aria-label="Design compositor debug modes">
+                  <span>Design compositor</span>
+                  {([
+                    ['composite', 'Design Composite'],
+                    ['structural-only', 'Structural Design Only'],
+                    ['foreground-only', 'Foreground Reality Only'],
+                    ['classification', 'Compositor Classification'],
+                  ] as const).map(([compositeMode, label]) => (
+                    <button
+                      key={compositeMode}
+                      type="button"
+                      className="scanner-reality-render-mode"
+                      aria-pressed={realityDesignCompositeMode === compositeMode}
+                      onClick={() => setRealityDesignCompositeMode(compositeMode)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <div className="scanner-reality-render-modes" role="group" aria-label="Reality diagnostic color modes">
                 <span>Diagnostic colors</span>
                 {(
@@ -1395,6 +1505,16 @@ function FinalizedSpatialScanPreview({
                   Reality/Structural association: {realityAssociation.table.coreWallMemberCount} strict core + {realityAssociation.table.expandedWallMemberCount} expanded = {realityAssociation.table.wallMemberCount} paintable / {realityAssociation.table.uncertainCount} uncertain / {realityAssociation.table.nonWallCount} non-wall; worker {realityAssociation.table.elapsedMs.toFixed(1)} ms (calibration {realityAssociation.table.calibrationMs.toFixed(1)} / seed {realityAssociation.table.seedPassMs.toFixed(1)} / index {realityAssociation.table.neighborIndexMs.toFixed(1)} / growth {realityAssociation.table.regionGrowthMs.toFixed(1)} / finalize {realityAssociation.table.classificationFinalizationMs.toFixed(1)} ms).
                 </span>
               ) : null}
+              {realityPreparation.prepared?.designComposite ? (
+                <span>
+                  Design compositor: {realityPreparation.prepared.designComposite.stats.structuralDesignPatchCount} structural patches; suppressed same-wall Reality {realityPreparation.prepared.designComposite.stats.realityMaskedSampleCount}; foreground Reality {realityPreparation.prepared.designComposite.stats.realityForegroundSampleCount}; ambiguous {realityPreparation.prepared.designComposite.stats.realityAmbiguousSampleCount}; outside {realityPreparation.prepared.designComposite.stats.realityOutsideSampleCount}; classify {realityPreparation.prepared.designComposite.stats.foregroundClassificationMs.toFixed(1)} ms / total {realityPreparation.prepared.designComposite.stats.preparationMs.toFixed(1)} ms / {Math.round(realityPreparation.prepared.designComposite.stats.memoryBytes / 1024)} KiB.
+                </span>
+              ) : null}
+              {realityPreparation.prepared?.designComposite?.stats.surfaces.map((surface) => (
+                <span key={`${surface.logicalSurfaceId}-compositor`}>
+                  {surface.logicalSurfaceId}: structural {surface.structuralAreaMetersSquared.toFixed(2)} m²; domain {surface.domainSampleCount}; foreground {surface.foregroundSampleCount}; suppressed wall-Reality {surface.suppressedWallSampleCount}; ambiguous {surface.ambiguousSampleCount}.
+                </span>
+              ))}
               <div className="scanner-reality-group-diagnostics">
                 <span>
                   <strong>Logical Surface Membership (M8.5.3):</strong> cyan = strict core, green = expanded, amber = uncertain, dark red = non-wall. {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches.

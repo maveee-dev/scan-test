@@ -18,6 +18,7 @@ function moduleUrl(url) {
 const logicalService = await import(moduleUrl(new URL('../src/features/scanner/services/logicalSurfaceService.ts', import.meta.url)))
 const association = await import(moduleUrl(new URL('../src/features/scanner/services/realityStructuralAssociationService.ts', import.meta.url)))
 const structuralInterpretation = await import(moduleUrl(new URL('../src/features/room-analysis/services/structuralSurfaceInterpretationService.ts', import.meta.url)))
+const compositor = await import(moduleUrl(new URL('../src/features/scanner/services/realityDesignCompositingService.ts', import.meta.url)))
 
 function patch(id, {
   offsetX = 0,
@@ -559,4 +560,105 @@ test('28. Strong standalone walls survive without a closed-room triad', () => {
     result.surfaces.find((surface) => surface.planeId === 'plane-3').selectionReason,
     /strong standalone wall/i,
   )
+})
+
+function compositedWallPlan(samples, patches, inputs = [{ surfaceId: 'wall-a', paintColor: '#2266dd' }], mode = 'composite') {
+  const table = association.associateRealitySurfels(samples, patches)
+  return {
+    table,
+    plan: compositor.buildRealityDesignCompositePlan(samples, table, inputs, mode),
+  }
+}
+
+// 29. Design uses the bounded structural patch even when the old member mask
+// is sparse: same-wall Reality is hidden instead of deciding paint coverage.
+test('29. Structural Design stays continuous when Reality wall membership is sparse', () => {
+  const samples = [
+    surfel(1, 0.9, 0.9, 0.006),
+    surfel(2, 1.2, 1.2, 0.02, { x: 0.3, y: 0, z: 0.95 }),
+  ]
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  assert.deepEqual(plan.structuralPatchIds, ['wall-a'])
+  assert.equal(plan.visibilityMask[0], 0)
+  assert.equal(plan.visibilityMask[1], 0)
+  assert.ok(plan.stats.realityMaskedSampleCount >= 1)
+})
+
+// 30. Original wall measurements never draw their captured RGB over the
+// structural paint layer in the final composite.
+test('30. Same-wall Reality samples are suppressed beneath structural paint', () => {
+  const samples = clusteredWallSamples()
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  assert.equal([...plan.visibilityMask].every((visible) => visible === 0), true)
+  assert.equal(plan.stats.realityMaskedSampleCount, samples.length)
+})
+
+// 31. A curtain five centimetres in front is positive foreground evidence and
+// remains visible above the structural wall rather than being painted over.
+test('31. Close curtain foreground remains visible over structural paint', () => {
+  const samples = [...clusteredWallSamples(), surfel(90, 0.92, 0.92, 0.05)]
+  const { table, plan } = compositedWallPlan(samples, [patch('wall-a')])
+  assert.equal(table.foregroundMask[samples.length - 1], 1)
+  assert.equal(plan.visibilityMask[samples.length - 1], 1)
+  assert.equal(plan.classifications[samples.length - 1], compositor.RealityDesignCompositeClassification.FOREGROUND)
+})
+
+// 32. A clearly offset cabinet face is also retained as foreground Reality.
+test('32. Cabinet foreground remains visible over structural paint', () => {
+  const samples = [...clusteredWallSamples(), surfel(91, 1.1, 1.0, 0.08, { x: 0, y: 0, z: 1 })]
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  assert.equal(plan.visibilityMask[samples.length - 1], 1)
+})
+
+// 33. Independent walls receive independent structural Design patches; Wall B
+// remains original Reality when only Wall A has a paint input.
+test('33. Adjacent uncustomized wall stays outside Wall A composite domain', () => {
+  const wallA = patch('wall-a', { offsetX: 0, width: 2 })
+  const wallB = patch('wall-b', { offsetZ: 3, planeConstant: 3, width: 2 })
+  const samples = [surfel(1, 1, 1, 0.006), surfel(2, 1, 1, 3.006)]
+  const { plan } = compositedWallPlan(samples, [wallA, wallB], [{ surfaceId: 'wall-a', paintColor: '#2266dd' }])
+  assert.equal(plan.visibilityMask[0], 0)
+  assert.equal(plan.visibilityMask[1], 1)
+  assert.deepEqual(plan.structuralPatchIds, ['wall-a'])
+})
+
+// 34. The same structural-depth compositor works for horizontal surfaces.
+test('34. Ceiling structural Design suppresses same-surface Reality', () => {
+  const ceiling = ceilingPatch()
+  const samples = [surfel(1, 0.9, 2.006, 0.9, { x: 0, y: 1, z: 0 })]
+  const table = association.associateRealitySurfels(samples, [ceiling])
+  const plan = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'ceiling-a', paintColor: '#3355ee' }])
+  assert.equal(plan.visibilityMask[0], 0)
+  assert.deepEqual(plan.structuralPatchIds, ['ceiling-a'])
+})
+
+// 35. Debug views are derived only: Original data remains immutable and the
+// foreground-only view never includes the structural wall samples.
+test('35. Original Reality data is unchanged across compositing modes', () => {
+  const samples = [...clusteredWallSamples(), surfel(99, 0.92, 0.92, 0.08)]
+  const original = JSON.stringify(samples)
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const foreground = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'wall-a', paintColor: '#2266dd' }], 'foreground-only')
+  const classification = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'wall-a', paintColor: '#2266dd' }], 'classification')
+  assert.equal(foreground.visibilityMask[samples.length - 1], 1)
+  assert.equal(foreground.visibilityMask[0], 0)
+  assert.equal(classification.visibilityMask.every((visible) => visible === 1), true)
+  assert.equal(JSON.stringify(samples), original)
+})
+
+// 36. Multiple customized logical walls produce separate bounded structural
+// layers, while their own same-wall Reality samples are independently hidden.
+test('36. Multiple differently painted walls keep independent compositor domains', () => {
+  const wallA = patch('wall-a', { offsetX: 0, width: 2 })
+  const wallB = patch('wall-b', { offsetZ: 3, planeConstant: 3, width: 2 })
+  const samples = [surfel(1, 1, 1, 0.006), surfel(2, 1, 1, 3.006)]
+  const table = association.associateRealitySurfels(samples, [wallA, wallB])
+  const plan = compositor.buildRealityDesignCompositePlan(samples, table, [
+    { surfaceId: 'wall-a', paintColor: '#2266dd' },
+    { surfaceId: 'wall-b', paintColor: '#d7a35c' },
+  ])
+  assert.deepEqual(new Set(plan.structuralPatchIds), new Set(['wall-a', 'wall-b']))
+  assert.equal(plan.visibilityMask[0], 0)
+  assert.equal(plan.visibilityMask[1], 0)
+  assert.equal(plan.stats.surfaces.length, 2)
 })

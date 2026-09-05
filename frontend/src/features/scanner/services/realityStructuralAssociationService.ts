@@ -154,6 +154,8 @@ export interface RealityStructuralAssociationTable {
   readonly logicalSurfaces: readonly LogicalStructuralSurface[]
   /** Index into patches array; -1 is unassigned */
   readonly patchIndices: Int32Array
+  /** Positive foreground evidence only; it is not a generic non-wall mask. */
+  readonly foregroundMask: Uint8Array
   readonly patches: readonly RoomSurfacePatch[]
   /** Backward compatibility aliases matching previous M8.5 interface */
   readonly surfaceIndices: Int32Array
@@ -802,6 +804,7 @@ export function associateRealitySurfels(
       logicalSurfaceIndices,
       logicalSurfaces,
       patchIndices,
+      foregroundMask: new Uint8Array(n),
       patches,
       surfaceIndices: patchIndices,
       surfaceIds: patchIds,
@@ -1243,6 +1246,7 @@ export function associateRealitySurfels(
     logicalSurfaceIndices,
     logicalSurfaces,
     patchIndices,
+    foregroundMask: foregroundEvidence,
     patches,
     // Backward compatibility aliases
     surfaceIndices: patchIndices,

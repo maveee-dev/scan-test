@@ -6,6 +6,7 @@ import type {
   RealityColorStatistics,
   RealityRgbColor,
 } from '../types'
+import type { RealityDesignCompositeMode, RealityDesignCompositorStats } from './realityDesignCompositingService'
 
 export type RealitySurfaceRenderMode = 'points' | 'splats' | 'triangles' | 'dense'
 
@@ -778,6 +779,11 @@ export interface PreparedRealitySurface {
   geometries: { attributes: { name: string; array: Float32Array; itemSize: number }[] }[]
   layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles'; opacity: number }[]
   stats: RealitySurfaceRenderStats
+  designComposite?: {
+    mode: RealityDesignCompositeMode
+    structuralPatchIds: readonly string[]
+    stats: RealityDesignCompositorStats
+  }
 }
 
 export function packRealitySurface(resources: RealitySurfaceRenderResources): PreparedRealitySurface {

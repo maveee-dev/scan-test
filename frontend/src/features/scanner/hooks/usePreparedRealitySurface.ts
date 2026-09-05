@@ -6,6 +6,7 @@ import type {
   RealityDesignColorInput,
   RealityStructuralAssociationTable,
 } from '../services/realityStructuralAssociationService'
+import type { RealityDesignCompositeMode } from '../services/realityDesignCompositingService'
 
 /** One cancellable post-scan job; no live/XR work or per-frame React updates. */
 export function usePreparedRealitySurface(
@@ -15,6 +16,7 @@ export function usePreparedRealitySurface(
   association: RealityStructuralAssociationTable | null = null,
   designInputs: readonly RealityDesignColorInput[] = [],
   debugColorMode: RealityDebugColorMode = 'none',
+  designCompositeMode: RealityDesignCompositeMode = 'composite',
 ): {
   prepared: PreparedRealitySurface | null
   error: string | null
@@ -26,6 +28,7 @@ export function usePreparedRealitySurface(
     association: RealityStructuralAssociationTable | null
     designKey: string
     debugColorMode: RealityDebugColorMode
+    designCompositeMode: RealityDesignCompositeMode
     prepared?: PreparedRealitySurface
     error?: string
   } | null>(null)
@@ -36,19 +39,19 @@ export function usePreparedRealitySurface(
     let cancelled = false
     const designKey = designInputs.map((input) => `${input.surfaceId}:${input.paintColor}`).sort().join('|')
     const fail = (error: string) => {
-      if (!cancelled) setResult({ source, mode, association, designKey, debugColorMode, error })
+      if (!cancelled) setResult({ source, mode, association, designKey, debugColorMode, designCompositeMode, error })
     }
     try {
       worker = new Worker(new URL('../services/realitySurfacePreparation.worker.ts', import.meta.url), { type: 'module' })
       worker.onmessage = (event: MessageEvent<{ prepared?: PreparedRealitySurface; error?: string }>) => {
-        if (!cancelled) setResult({ source, mode, association, designKey, debugColorMode, ...event.data })
+        if (!cancelled) setResult({ source, mode, association, designKey, debugColorMode, designCompositeMode, ...event.data })
         worker?.terminate()
       }
       worker.onerror = () => {
         fail('Reality preparation failed. Select another comparison or return to review.')
         worker?.terminate()
       }
-      worker.postMessage({ surfels: source.surfels, mode, association, designInputs, debugColorMode })
+      worker.postMessage({ surfels: source.surfels, mode, association, designInputs, debugColorMode, designCompositeMode })
     } catch (error) {
       fail(error instanceof Error ? error.message : 'Reality worker unavailable.')
       worker?.terminate()
@@ -57,11 +60,11 @@ export function usePreparedRealitySurface(
       cancelled = true
       worker?.terminate()
     }
-  }, [association, debugColorMode, designInputs, enabled, mode, source])
+  }, [association, debugColorMode, designCompositeMode, designInputs, enabled, mode, source])
 
   const designKey = designInputs.map((input) => `${input.surfaceId}:${input.paintColor}`).sort().join('|')
   const current = enabled && result?.source === source && result?.mode === mode && result.association === association &&
-    result.designKey === designKey && result.debugColorMode === debugColorMode ? result : null
+    result.designKey === designKey && result.debugColorMode === debugColorMode && result.designCompositeMode === designCompositeMode ? result : null
 
   return {
     prepared: current?.prepared ?? null,

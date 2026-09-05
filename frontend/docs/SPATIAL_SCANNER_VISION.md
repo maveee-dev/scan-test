@@ -1460,3 +1460,50 @@ patch candidates; connected observed extension; core/expanded coverage; and
 mutually exclusive terminal non-paintable reasons. These are post-analysis
 worker measurements only: no new XR work, camera reads, or scan-time fusion is
 introduced.
+
+### M8.5.4 — Depth-Aware Structural Design Compositing
+
+M8.5.4 keeps the two post-scan representations separate and uses each for the
+job it can support reliably:
+
+```text
+REALITY ORIGINAL
+  = complete Dense Reality geometry with immutable captured RGB
+
+DESIGN
+  = clean observed M7.4 structural paint surfaces
+    + depth-tested preserved Reality foreground
+```
+
+The prior Design display recolored only dense samples proven to be wall members.
+That made paint coverage dependent on near-perfect Reality wall-mask recall:
+uncertain samples and a second Reality layer could retain original wall RGB and
+visually cover the intended paint. M8.5.4 reverses the render-time question.
+Inside a customized observed structural patch, the compositor asks whether a
+Reality sample has **positive foreground evidence**, rather than requiring it
+to prove wall membership. Samples with existing foreground evidence, a bounded
+offset from the calibrated structural reference, or a depth/discontinuity
+barrier remain visible as captured Reality. Same-wall and ambiguous Reality
+samples are suppressed from the derived Design render, allowing the continuous
+M7.4 polygon to show through.
+
+Structural Design polygons stay at their measured M7.4 world positions with
+normal depth testing/writing. The filtered Reality foreground then draws over
+them, so a curtain, cabinet, chair, or other observed foreground geometry can
+occlude the selected paint naturally. Reality behind the structural patch fails
+depth testing; same-wall Reality no longer z-fights because it is not rendered
+in the Design pass. No structural geometry is added to **Original**, and no
+Reality sample or camera color is mutated.
+
+Each customized logical surface independently contributes its member M7.4
+patches, so multiple walls and ceilings can carry different paint colors while
+their real foreground geometry remains visible. The paint domain is still only
+the bounded observed structural geometry: no missing wall, room closure, or
+unobserved extension is invented.
+
+Development comparison modes provide **Structural Design Only**, **Foreground
+Reality Only**, **Design Composite**, and **Compositor Classification**. The
+worker reports structural patch count, selected-domain samples, foreground
+samples preserved, same-wall samples suppressed, ambiguous samples, preparation
+time, and bounded memory. This remains entirely post-scan; it adds no XR work,
+camera capture, RGB-D processing, or live scanning cost.

@@ -6,6 +6,10 @@ import {
   type RealityDesignColorInput,
   type RealityStructuralAssociationTable,
 } from './realityStructuralAssociationService'
+import {
+  buildRealityDesignCompositePlan,
+  type RealityDesignCompositeMode,
+} from './realityDesignCompositingService'
 
 self.onmessage = (event: MessageEvent<{
   surfels: readonly FinalizedRealitySurfel[]
@@ -13,14 +17,33 @@ self.onmessage = (event: MessageEvent<{
   association: RealityStructuralAssociationTable | null
   designInputs: readonly RealityDesignColorInput[]
   debugColorMode?: RealityDebugColorMode
+  designCompositeMode?: RealityDesignCompositeMode
 }>) => {
   try {
     const debugMode = event.data.debugColorMode ?? 'none'
-    const displayColors = event.data.association && (event.data.designInputs.length > 0 || debugMode !== 'none')
+    const composite = event.data.association && event.data.designInputs.length > 0 && debugMode === 'none'
+      ? buildRealityDesignCompositePlan(
+        event.data.surfels,
+        event.data.association,
+        event.data.designInputs,
+        event.data.designCompositeMode ?? 'composite',
+      )
+      : null
+    const renderSurfels = composite
+      ? event.data.surfels.filter((_surfel, index) => composite.visibilityMask[index] === 1)
+      : event.data.surfels
+    const displayColors = composite?.diagnosticColors ?? (event.data.association && (event.data.designInputs.length > 0 || debugMode !== 'none')
       ? buildRealityDesignColors(event.data.surfels, event.data.association, event.data.designInputs, debugMode)
-      : undefined
-    const resources = createRealitySurfaceRenderResources({ surfels: event.data.surfels }, event.data.mode, displayColors)
+      : undefined)
+    const resources = createRealitySurfaceRenderResources({ surfels: renderSurfels }, event.data.mode, displayColors)
     const prepared = packRealitySurface(resources)
+    if (composite) {
+      prepared.designComposite = {
+        mode: composite.mode,
+        structuralPatchIds: composite.structuralPatchIds,
+        stats: composite.stats,
+      }
+    }
     const buffers = new Set<ArrayBuffer>()
     for (const geometry of prepared.geometries) for (const attribute of geometry.attributes) buffers.add(attribute.array.buffer as ArrayBuffer)
     self.postMessage({ prepared }, { transfer: [...buffers] })
