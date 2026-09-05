@@ -41,11 +41,16 @@ self.onmessage = (event: MessageEvent<{
       prepared.designComposite = {
         mode: composite.mode,
         structuralPatchIds: composite.structuralPatchIds,
+        masks: composite.masks,
         stats: composite.stats,
       }
     }
     const buffers = new Set<ArrayBuffer>()
     for (const geometry of prepared.geometries) for (const attribute of geometry.attributes) buffers.add(attribute.array.buffer as ArrayBuffer)
+    for (const mask of prepared.designComposite?.masks ?? []) {
+      buffers.add(mask.paintableCells.buffer as ArrayBuffer)
+      buffers.add(mask.preservedCells.buffer as ArrayBuffer)
+    }
     self.postMessage({ prepared }, { transfer: [...buffers] })
     for (const geometry of resources.geometries) geometry.dispose()
     for (const material of resources.materials) material.dispose()

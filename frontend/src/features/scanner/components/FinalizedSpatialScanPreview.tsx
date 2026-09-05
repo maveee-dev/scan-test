@@ -37,7 +37,7 @@ import {
   type RealityDesignColorInput,
   type RealityTapHitEvaluation,
 } from '../services/realityStructuralAssociationService'
-import type { RealityDesignCompositeMode } from '../services/realityDesignCompositingService'
+import type { RealityDesignCompositeMode, RealityPaintablePatchMask } from '../services/realityDesignCompositingService'
 import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
@@ -433,15 +433,18 @@ function addRoomSurfaces(
 }
 
 /**
- * M8.5.4 Design background: exact observed M7.4 polygons, rendered only for
- * customized patches. Dense Reality is filtered separately to foreground so
- * original wall samples cannot cover this material surface.
+ * M8.5.5 Design background: M7.4 remains authoritative, but the derived
+ * wall-local mask cuts out preserved/uncertain measured content. This keeps
+ * paint continuous where exposed while allowing attached objects to remain.
  */
 function addRealityDesignStructuralSurfaces(
   scene: THREE.Scene,
   patches: readonly RoomSurfacePatch[],
   structuralPatchIds: readonly string[],
   customizations: SurfaceCustomizationMap,
+  masks: readonly RealityPaintablePatchMask[] = [],
+  maskKind: 'full' | 'paintable' | 'preserved' = 'full',
+  debugColor: string | null = null,
 ): {
   group: THREE.Group
   geometries: THREE.BufferGeometry[]
@@ -458,22 +461,57 @@ function addRealityDesignStructuralSurfaces(
   let meshCount = 0
   for (const patch of patches) {
     if (!selectedIds.has(patch.id)) continue
-    const positions = new Float32Array(patch.vertices3D.length * 3)
-    for (let index = 0; index < patch.vertices3D.length; index++) {
-      const vertex = patch.vertices3D[index]
-      positions[index * 3] = vertex.x
-      positions[index * 3 + 1] = vertex.y
-      positions[index * 3 + 2] = vertex.z
+    const mask = masks.find((item) => item.patchId === patch.id)
+    const cellMask = maskKind === 'paintable' ? mask?.paintableCells : maskKind === 'preserved' ? mask?.preservedCells : null
+    let positions: Float32Array
+    if (!cellMask || !mask) {
+      positions = new Float32Array(patch.vertices3D.length * 3)
+      for (let index = 0; index < patch.vertices3D.length; index++) {
+        const vertex = patch.vertices3D[index]
+        positions[index * 3] = vertex.x
+        positions[index * 3 + 1] = vertex.y
+        positions[index * 3 + 2] = vertex.z
+      }
+    } else {
+      const vertices: number[] = []
+      const pointAt = (u: number, v: number): void => {
+        vertices.push(
+          patch.basis.origin.x + patch.basis.axisU.x * u + patch.basis.axisV.x * v,
+          patch.basis.origin.y + patch.basis.axisU.y * u + patch.basis.axisV.y * v,
+          patch.basis.origin.z + patch.basis.axisU.z * u + patch.basis.axisV.z * v,
+        )
+      }
+      for (let y = 0; y < mask.height; y++) for (let x = 0; x < mask.width; x++) {
+        if (!cellMask[y * mask.width + x]) continue
+        const minU = mask.minU + x * mask.cellSizeMeters, minV = mask.minV + y * mask.cellSizeMeters
+        const maxU = minU + mask.cellSizeMeters, maxV = minV + mask.cellSizeMeters
+        // Mask cells are only set from patch-local measured support; retaining
+        // this centre test prevents grid cells outside irregular M7.4 polygons.
+        const centreU = (minU + maxU) / 2, centreV = (minV + maxV) / 2
+        const polygon = patch.vertices2DLocal
+        let inside = false
+        for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index++) {
+          const current = polygon[index], prior = polygon[previous]
+          if ((current.v > centreV) !== (prior.v > centreV) && centreU < (prior.u - current.u) * (centreV - current.v) / (prior.v - current.v) + current.u) inside = !inside
+        }
+        if (!inside) continue
+        pointAt(minU, minV); pointAt(maxU, minV); pointAt(minU, maxV)
+        pointAt(maxU, minV); pointAt(maxU, maxV); pointAt(minU, maxV)
+      }
+      if (vertices.length === 0) continue
+      positions = new Float32Array(vertices)
     }
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    geometry.setIndex([...patch.triangleIndices])
+    if (!cellMask || !mask) geometry.setIndex([...patch.triangleIndices])
     const material = new THREE.MeshBasicMaterial({
-      color: getSurfacePaintColor(patch, customizations),
+      color: debugColor ?? getSurfacePaintColor(patch, customizations),
       depthTest: true,
       depthWrite: true,
       side: THREE.DoubleSide,
       toneMapped: false,
+      transparent: Boolean(debugColor),
+      opacity: debugColor ? 0.82 : 1,
     })
     const mesh = new THREE.Mesh(geometry, material)
     mesh.renderOrder = 0
@@ -601,13 +639,24 @@ function FinalizedSpatialScanPreview({
   const realityAssociation = useRealityStructuralAssociation(preferredRealityReconstruction, roomPatches, scan.fusedSurface)
   const designInputs = useMemo<readonly RealityDesignColorInput[]>(() => Object.entries(surfaceCustomizations)
     .flatMap(([surfaceId, customization]) => customization.paintColor ? [{ surfaceId, paintColor: customization.paintColor }] : []), [surfaceCustomizations])
+  // The visible-wall mask depends on selected structural surfaces, never on a
+  // swatch value. Keeping this identity stable lets paint changes reuse the
+  // completed worker mask rather than reclassifying Dense Reality.
+  const designMaskSurfaceKey = Object.entries(surfaceCustomizations)
+    .filter(([, customization]) => Boolean(customization.paintColor))
+    .map(([surfaceId]) => surfaceId)
+    .sort()
+    .join('|')
+  const designMaskInputs = useMemo<readonly RealityDesignColorInput[]>(() => designMaskSurfaceKey
+    ? designMaskSurfaceKey.split('|').map((surfaceId) => ({ surfaceId, paintColor: '#000000' }))
+    : EMPTY_DESIGN_INPUTS, [designMaskSurfaceKey])
   const useDesignAppearance = realityAppearanceMode === 'design' && realityAssociation.table !== null
   const realityPreparation = usePreparedRealitySurface(
     preferredRealityReconstruction,
     realityRenderMode,
     mode === 'reality-preview',
     useDesignAppearance || realityDebugColorMode !== 'none' ? realityAssociation.table : null,
-    useDesignAppearance ? designInputs : EMPTY_DESIGN_INPUTS,
+    useDesignAppearance ? designMaskInputs : EMPTY_DESIGN_INPUTS,
     realityDebugColorMode,
     realityDesignCompositeMode,
   )
@@ -850,12 +899,24 @@ function FinalizedSpatialScanPreview({
     } else if (mode === 'reality-preview' && preparedReality) {
       const designComposite = preparedReality.designComposite
       if (designComposite &&
-        (designComposite.mode === 'composite' || designComposite.mode === 'structural-only')) {
+        (designComposite.mode === 'composite' || designComposite.mode === 'structural-only' ||
+          designComposite.mode === 'exposed-wall-mask' || designComposite.mode === 'preserved-object-mask')) {
+        const maskKind = designComposite.mode === 'structural-only'
+          ? 'full'
+          : designComposite.mode === 'preserved-object-mask'
+            ? 'preserved'
+            : 'paintable'
+        const debugColor = designComposite.mode === 'exposed-wall-mask'
+          ? '#22b8ff'
+          : designComposite.mode === 'preserved-object-mask' ? '#e843b5' : null
         realityDesignResources = addRealityDesignStructuralSurfaces(
           scene,
           roomPatches,
           designComposite.structuralPatchIds,
           surfaceCustomizations,
+          designComposite.masks,
+          maskKind,
+          debugColor,
         )
       }
       realityResources = restoreRealitySurface(preparedReality)
@@ -1425,6 +1486,8 @@ function FinalizedSpatialScanPreview({
                     ['structural-only', 'Structural Design Only'],
                     ['foreground-only', 'Foreground Reality Only'],
                     ['classification', 'Compositor Classification'],
+                    ['exposed-wall-mask', 'Exposed Wall Mask'],
+                    ['preserved-object-mask', 'Preserved Object Mask'],
                   ] as const).map(([compositeMode, label]) => (
                     <button
                       key={compositeMode}
@@ -1507,12 +1570,12 @@ function FinalizedSpatialScanPreview({
               ) : null}
               {realityPreparation.prepared?.designComposite ? (
                 <span>
-                  Design compositor: {realityPreparation.prepared.designComposite.stats.structuralDesignPatchCount} structural patches; suppressed same-wall Reality {realityPreparation.prepared.designComposite.stats.realityMaskedSampleCount}; foreground Reality {realityPreparation.prepared.designComposite.stats.realityForegroundSampleCount}; ambiguous {realityPreparation.prepared.designComposite.stats.realityAmbiguousSampleCount}; outside {realityPreparation.prepared.designComposite.stats.realityOutsideSampleCount}; classify {realityPreparation.prepared.designComposite.stats.foregroundClassificationMs.toFixed(1)} ms / total {realityPreparation.prepared.designComposite.stats.preparationMs.toFixed(1)} ms / {Math.round(realityPreparation.prepared.designComposite.stats.memoryBytes / 1024)} KiB.
+                  Visible paintable mask: {realityPreparation.prepared.designComposite.stats.structuralDesignPatchCount} structural patches; exposed Reality {realityPreparation.prepared.designComposite.stats.realityMaskedSampleCount}; foreground {realityPreparation.prepared.designComposite.stats.realityForegroundSampleCount}; attached {realityPreparation.prepared.designComposite.stats.realityAttachedSampleCount}; uncertain {realityPreparation.prepared.designComposite.stats.realityUncertainSampleCount}; outside {realityPreparation.prepared.designComposite.stats.realityOutsideSampleCount}; classify {realityPreparation.prepared.designComposite.stats.foregroundClassificationMs.toFixed(1)} ms / mask {realityPreparation.prepared.designComposite.stats.maskPreparationMs.toFixed(1)} ms / total {realityPreparation.prepared.designComposite.stats.preparationMs.toFixed(1)} ms / {Math.round(realityPreparation.prepared.designComposite.stats.memoryBytes / 1024)} KiB.
                 </span>
               ) : null}
               {realityPreparation.prepared?.designComposite?.stats.surfaces.map((surface) => (
                 <span key={`${surface.logicalSurfaceId}-compositor`}>
-                  {surface.logicalSurfaceId}: structural {surface.structuralAreaMetersSquared.toFixed(2)} m²; domain {surface.domainSampleCount}; foreground {surface.foregroundSampleCount}; suppressed wall-Reality {surface.suppressedWallSampleCount}; ambiguous {surface.ambiguousSampleCount}.
+                  {surface.logicalSurfaceId}: structural {surface.structuralAreaMetersSquared.toFixed(2)} m²; domain {surface.domainSampleCount}; exposed {surface.exposedSampleCount}; foreground {surface.foregroundSampleCount}; attached {surface.attachedSampleCount}; uncertain {surface.uncertainSampleCount}; paintable/preserved/unsupported {surface.paintableMaskAreaMetersSquared.toFixed(2)} / {surface.preservedMaskAreaMetersSquared.toFixed(2)} / {surface.unsupportedMaskAreaMetersSquared.toFixed(2)} m²; mask {surface.maskWidth} × {surface.maskHeight}; components {surface.preservedComponentCount}/{surface.componentCount}, largest {surface.largestPreservedComponentAreaMetersSquared.toFixed(3)} m².
                 </span>
               ))}
               <div className="scanner-reality-group-diagnostics">

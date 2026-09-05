@@ -6,7 +6,7 @@ import type {
   RealityColorStatistics,
   RealityRgbColor,
 } from '../types'
-import type { RealityDesignCompositeMode, RealityDesignCompositorStats } from './realityDesignCompositingService'
+import type { RealityDesignCompositeMode, RealityDesignCompositorStats, RealityPaintablePatchMask } from './realityDesignCompositingService'
 
 export type RealitySurfaceRenderMode = 'points' | 'splats' | 'triangles' | 'dense'
 
@@ -782,6 +782,7 @@ export interface PreparedRealitySurface {
   designComposite?: {
     mode: RealityDesignCompositeMode
     structuralPatchIds: readonly string[]
+    masks: readonly RealityPaintablePatchMask[]
     stats: RealityDesignCompositorStats
   }
 }

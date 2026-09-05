@@ -1507,3 +1507,38 @@ worker reports structural patch count, selected-domain samples, foreground
 samples preserved, same-wall samples suppressed, ambiguous samples, preparation
 time, and bounded memory. This remains entirely post-scan; it adds no XR work,
 camera capture, RGB-D processing, or live scanning cost.
+
+### M8.5.5 — Visible Paintable Surface Mask
+
+M8.5.5 keeps the continuous M8.5.4 structural Design background, but no longer
+treats an entire M7.4 polygon as automatically visible wall material. For every
+customized patch, a post-scan wall-local grid is derived from its measured U/V
+basis at approximately 3 cm cells (bounded to 160 cells on either axis):
+
+```text
+M7.4 structural patch
+  + Dense Reality samples in patch-local (u, v, signed offset)
+  + existing foreground evidence / local normal and depth evidence
+  + connected-component support (RGB only secondary)
+      -> exposed paintable cells | preserved Reality cells | unsupported cells
+```
+
+The structural patch remains the editable Design surface, but only its
+**exposed paintable** cells render the selected paint. Confirmed foreground,
+connected shallow attached/near-wall content, and uncertain geometry retain
+their original dense-Reality RGB and depth. This lets a painted wall read as a
+continuous material surface while a picture, mirror, frame, thin shelf,
+curtain, or furniture with sufficient measured evidence remains visible over
+it. Empty/unsupported cells remain empty; the mask never invents wall coverage.
+
+RGB discontinuity can strengthen a connected geometric component, but it never
+by itself classifies a differently coloured wall region as an object. Extremely
+thin, fully coplanar content (for example a poster flush against a wall) may not
+be distinguishable reliably using browser RGB-D geometry alone, and is an
+explicit limitation rather than fabricated semantic certainty. Original Reality
+remains an immutable unmasked capture; all mask and Design geometry are derived
+presentation data and are discarded/rebuilt with the post-scan preview.
+
+Development views expose the **Exposed Wall Mask**, **Preserved Object Mask**,
+full **Structural Design Only**, and the final **Design Composite**, along with
+per-patch mask area, resolution, component count, and preparation timing.

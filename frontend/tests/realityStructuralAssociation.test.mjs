@@ -572,7 +572,7 @@ function compositedWallPlan(samples, patches, inputs = [{ surfaceId: 'wall-a', p
 
 // 29. Design uses the bounded structural patch even when the old member mask
 // is sparse: same-wall Reality is hidden instead of deciding paint coverage.
-test('29. Structural Design stays continuous when Reality wall membership is sparse', () => {
+test('29. Structural Design paints trusted samples while unresolved sparse samples stay preserved', () => {
   const samples = [
     surfel(1, 0.9, 0.9, 0.006),
     surfel(2, 1.2, 1.2, 0.02, { x: 0.3, y: 0, z: 0.95 }),
@@ -580,7 +580,7 @@ test('29. Structural Design stays continuous when Reality wall membership is spa
   const { plan } = compositedWallPlan(samples, [patch('wall-a')])
   assert.deepEqual(plan.structuralPatchIds, ['wall-a'])
   assert.equal(plan.visibilityMask[0], 0)
-  assert.equal(plan.visibilityMask[1], 0)
+  assert.equal(plan.visibilityMask[1], 1)
   assert.ok(plan.stats.realityMaskedSampleCount >= 1)
 })
 
@@ -600,7 +600,7 @@ test('31. Close curtain foreground remains visible over structural paint', () =>
   const { table, plan } = compositedWallPlan(samples, [patch('wall-a')])
   assert.equal(table.foregroundMask[samples.length - 1], 1)
   assert.equal(plan.visibilityMask[samples.length - 1], 1)
-  assert.equal(plan.classifications[samples.length - 1], compositor.RealityDesignCompositeClassification.FOREGROUND)
+  assert.equal(plan.classifications[samples.length - 1], compositor.RealityDesignCompositeClassification.FOREGROUND_OBJECT)
 })
 
 // 32. A clearly offset cabinet face is also retained as foreground Reality.
@@ -661,4 +661,61 @@ test('36. Multiple differently painted walls keep independent compositor domains
   assert.equal(plan.visibilityMask[0], 0)
   assert.equal(plan.visibilityMask[1], 0)
   assert.equal(plan.stats.surfaces.length, 2)
+})
+
+// M8.5.5: structural material is continuous where measured wall support is
+// exposed, while a locally coherent shallow component is retained as Reality.
+test('37. Visible paintable mask keeps broad exposed wall paintable', () => {
+  const samples = clusteredWallSamples()
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  const mask = plan.masks[0]
+  assert.ok(mask.paintableAreaMetersSquared > 0)
+  assert.equal(mask.preservedAreaMetersSquared, 0)
+  assert.equal([...plan.visibilityMask].every((visible) => visible === 0), true)
+})
+
+test('38. Shallow attached component with geometric and RGB support remains preserved', () => {
+  const attachedColor = { r: 0.06, g: 0.12, b: 0.86 }
+  const samples = [
+    ...clusteredWallSamples(),
+    surfel(201, 1.15, 1.10, 0.025, { x: 0, y: 0, z: 1 }, attachedColor),
+    surfel(202, 1.18, 1.10, 0.025, { x: 0, y: 0, z: 1 }, attachedColor),
+    surfel(203, 1.15, 1.13, 0.025, { x: 0, y: 0, z: 1 }, attachedColor),
+  ]
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  for (let index = samples.length - 3; index < samples.length; index++) {
+    assert.equal(plan.classifications[index], compositor.RealityDesignCompositeClassification.ATTACHED_OR_NEAR_WALL_OBJECT)
+    assert.equal(plan.visibilityMask[index], 1)
+  }
+  assert.ok(plan.masks[0].preservedAreaMetersSquared > 0)
+})
+
+test('39. RGB difference alone does not erase an otherwise exposed wall', () => {
+  const samples = [...clusteredWallSamples(), surfel(210, 1.2, 1.2, 0.006, { x: 0, y: 0, z: 1 }, { r: 0.95, g: 0.08, b: 0.12 })]
+  const { plan } = compositedWallPlan(samples, [patch('wall-a')])
+  assert.notEqual(plan.classifications[samples.length - 1], compositor.RealityDesignCompositeClassification.ATTACHED_OR_NEAR_WALL_OBJECT)
+  assert.notEqual(plan.classifications[samples.length - 1], compositor.RealityDesignCompositeClassification.FOREGROUND_OBJECT)
+})
+
+test('40. Unsupported wall-local regions remain unpainted rather than fabricated', () => {
+  const { plan } = compositedWallPlan(clusteredWallSamples(), [patch('wall-a')])
+  assert.ok(plan.masks[0].unsupportedAreaMetersSquared > 0)
+})
+
+test('41. Mask topology is deterministic and independent of paint color', () => {
+  const samples = [...clusteredWallSamples(), surfel(220, 1.1, 1.1, 0.05)]
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const blue = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'wall-a', paintColor: '#1565d8' }])
+  const beige = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'wall-a', paintColor: '#e2c18c' }])
+  assert.deepEqual([...blue.masks[0].paintableCells], [...beige.masks[0].paintableCells])
+  assert.deepEqual([...blue.masks[0].preservedCells], [...beige.masks[0].preservedCells])
+})
+
+test('42. Ceiling paintable mask uses wall-local coordinates without vertical assumptions', () => {
+  const ceiling = ceilingPatch()
+  const samples = [surfel(301, 0.9, 2.006, 0.9, { x: 0, y: 1, z: 0 })]
+  const table = association.associateRealitySurfels(samples, [ceiling])
+  const plan = compositor.buildRealityDesignCompositePlan(samples, table, [{ surfaceId: 'ceiling-a', paintColor: '#3355ee' }])
+  assert.ok(plan.masks[0].paintableAreaMetersSquared > 0)
+  assert.equal(plan.visibilityMask[0], 0)
 })
