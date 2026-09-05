@@ -1,11 +1,12 @@
 import * as THREE from 'three'
+import { findRealityNeighbors } from './realityNeighborSearchService'
 import type {
   FinalizedRealityReconstruction,
   FinalizedRealitySurfel,
   RealityColorStatistics,
 } from '../types'
 
-export type RealitySurfaceRenderMode = 'points' | 'splats' | 'dense'
+export type RealitySurfaceRenderMode = 'points' | 'splats' | 'triangles' | 'dense'
 
 export interface RealitySurfaceRenderStats {
   readonly mode: RealitySurfaceRenderMode
@@ -22,6 +23,11 @@ export interface RealitySurfaceRenderStats {
   readonly visualRadiusScale: number
   readonly renderPreparationMs: number
   readonly neighborIndexBuildMs: number
+  readonly neighborAnalysisMs: number
+  readonly distribution: RealityDistributionDiagnostics | null
+  readonly triangleParticipantCount: number
+  readonly triangleParticipationPercentage: number
+  readonly fallbackPercentage: number
   readonly splatGeometryMs: number
   readonly triangleGenerationMs: number
   readonly medianNearestNeighborSpacingMeters: number | null
@@ -39,7 +45,8 @@ export interface RealitySurfaceRenderResources {
   readonly stats: RealitySurfaceRenderStats
 }
 
-const RAW_POINT_SIZE_METERS = 0.045
+// Small enough to inspect the measured 2.5 cm lattice without splat-like overlap.
+const RAW_POINT_SIZE_METERS = 0.008
 const BASE_SPLAT_RADIUS_SCALE = 1.05
 const DENSE_SPLAT_RADIUS_SCALE = 1.02
 const SPLAT_MINOR_AXIS_SCALE = 0.95
@@ -50,11 +57,11 @@ const MAX_TRIANGLE_EDGE_DISTANCE_METERS = 0.1
 const MAX_LOCAL_PLANE_RESIDUAL_METERS = 0.028
 const MIN_NORMAL_DOT = Math.cos((42 * Math.PI) / 180)
 const MAX_NEIGHBORS_PER_SURFEL = 8
-const MAX_NEIGHBOR_CANDIDATES_PER_SURFEL = 96
-const MAX_TRIANGLES_PER_SURFEL = 4
 const MAX_TRIANGLE_EDGE_MULTIPLIER = 2.5
 const MIN_TRIANGLE_EDGE_DISTANCE_METERS = 0.05
-const MIN_TRIANGLE_AREA_SQUARED = 1e-6
+// Scale-relative degeneracy, not a structural-scale area gate: the former
+// 1e-6 cross-length-squared gate rejected valid 2.5 cm right triangles (3.9e-7).
+const MIN_TRIANGLE_SINE_SQUARED = 0.01
 const SMALL_GAP_LIMIT_METERS = 0.055
 const LARGE_GAP_LIMIT_METERS = 0.16
 const POSITION_EPSILON = 1e-6
@@ -94,17 +101,18 @@ void main() {
       discard;
     }
     gl_FragColor = vec4(vColor, 1.0);
-    return;
+  } else {
+    if (distanceFromCenter < ${SPLAT_CORE_RADIUS.toFixed(3)}) {
+      discard;
+    }
+    float edgeAlpha = 1.0 - smoothstep(${SPLAT_FEATHER_START.toFixed(3)}, ${SPLAT_FEATHER_END.toFixed(3)}, distanceFromCenter);
+    if (edgeAlpha < ${SPLAT_ALPHA_THRESHOLD.toFixed(3)}) {
+      discard;
+    }
+    gl_FragColor = vec4(vColor, edgeAlpha * uOpacity);
   }
-
-  if (distanceFromCenter < ${SPLAT_CORE_RADIUS.toFixed(3)}) {
-    discard;
-  }
-  float edgeAlpha = 1.0 - smoothstep(${SPLAT_FEATHER_START.toFixed(3)}, ${SPLAT_FEATHER_END.toFixed(3)}, distanceFromCenter);
-  if (edgeAlpha < ${SPLAT_ALPHA_THRESHOLD.toFixed(3)}) {
-    discard;
-  }
-  gl_FragColor = vec4(vColor, edgeAlpha * uOpacity);
+  // Match MeshBasicMaterial: vertex RGB is linear, display output is sRGB.
+  #include <colorspace_fragment>
 }
 `
 
@@ -130,6 +138,24 @@ interface RealityNeighborIndex {
   readonly estimatedSmallGapRegions: number
   readonly estimatedLargeUnsupportedGaps: number
   readonly buildMs: number
+  readonly spatialIndexMs: number
+  readonly neighborAnalysisMs: number
+  readonly distribution: RealityDistributionDiagnostics
+}
+
+export interface RealityDistributionDiagnostics {
+  /** Folded tangent angles [0, pi), 12 bins. Not a reconstruction quality score. */
+  readonly directionBins: readonly number[]
+  /** Nearest compatible spacing in 5 mm bins, clamped at 12 cm. */
+  readonly spacingBins: readonly number[]
+  readonly dominantSpacingMeters: number | null
+  readonly medianTangentUSpacing: number | null
+  readonly medianTangentVSpacing: number | null
+  readonly anisotropyRatio: number | null
+  readonly missingTangentU: number
+  readonly missingTangentV: number
+  readonly truncatedQueries: number
+  readonly darkRgbSamples: number
 }
 
 interface SplatGeometryResult {
@@ -161,7 +187,7 @@ function srgbToLinear(value: number): number {
 }
 
 function getColoredSurfels(
-  reconstruction: FinalizedRealityReconstruction,
+  reconstruction: Pick<FinalizedRealityReconstruction, 'surfels'>,
 ): FinalizedRealitySurfel[] {
   return reconstruction.surfels
     .filter((surfel) => surfel.colorRgb !== null)
@@ -290,10 +316,6 @@ function getStableTangent(normal: THREE.Vector3, target: THREE.Vector3): void {
   target.normalize()
 }
 
-function getCellKey(x: number, y: number, z: number): string {
-  return `${Math.floor(x / MAX_LOCAL_EDGE_DISTANCE_METERS)}:${Math.floor(y / MAX_LOCAL_EDGE_DISTANCE_METERS)}:${Math.floor(z / MAX_LOCAL_EDGE_DISTANCE_METERS)}`
-}
-
 function getDistanceSquared(first: FinalizedRealitySurfel, second: FinalizedRealitySurfel): number {
   const dx = first.position.x - second.position.x
   const dy = first.position.y - second.position.y
@@ -341,27 +363,6 @@ function areLocallyCompatible(
   }
 }
 
-function compareNeighbors(first: NeighborCandidate, second: NeighborCandidate): number {
-  return first.distanceSquared - second.distanceSquared || first.index - second.index
-}
-
-function insertBoundedNeighbor(
-  neighbors: NeighborCandidate[],
-  candidate: NeighborCandidate,
-): void {
-  if (neighbors.length >= MAX_NEIGHBORS_PER_SURFEL) {
-    const last = neighbors[neighbors.length - 1]
-    if (last && compareNeighbors(candidate, last) >= 0) {
-      return
-    }
-  }
-  neighbors.push(candidate)
-  neighbors.sort(compareNeighbors)
-  if (neighbors.length > MAX_NEIGHBORS_PER_SURFEL) {
-    neighbors.pop()
-  }
-}
-
 function calculatePercentile(values: number[], percentile: number): number | null {
   if (values.length === 0) {
     return null
@@ -380,58 +381,15 @@ function buildRealityNeighborIndex(
 ): RealityNeighborIndex {
   const startedAt = getTimestamp()
   const sortedSurfels = [...surfels].sort((first, second) => first.id - second.id)
-  const cells = new Map<string, number[]>()
-  const neighbors = Array.from({ length: sortedSurfels.length }, () => []) as NeighborCandidate[][]
-  for (let index = 0; index < sortedSurfels.length; index += 1) {
-    const surfel = sortedSurfels[index]
-    const key = getCellKey(surfel.position.x, surfel.position.y, surfel.position.z)
-    const cell = cells.get(key)
-    if (cell) {
-      cell.push(index)
-    } else {
-      cells.set(key, [index])
-    }
-  }
-
-  for (let index = 0; index < sortedSurfels.length; index += 1) {
-    const center = sortedSurfels[index]
-    const cellX = Math.floor(center.position.x / MAX_LOCAL_EDGE_DISTANCE_METERS)
-    const cellY = Math.floor(center.position.y / MAX_LOCAL_EDGE_DISTANCE_METERS)
-    const cellZ = Math.floor(center.position.z / MAX_LOCAL_EDGE_DISTANCE_METERS)
-    let candidateChecks = 0
-    neighborCells:
-    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-        for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
-          const cell = cells.get(`${cellX + offsetX}:${cellY + offsetY}:${cellZ + offsetZ}`)
-          if (!cell) {
-            continue
-          }
-          for (const neighborIndex of cell) {
-            if (candidateChecks >= MAX_NEIGHBOR_CANDIDATES_PER_SURFEL) {
-              break neighborCells
-            }
-            candidateChecks += 1
-            if (neighborIndex <= index) {
-              continue
-            }
-            const relation = areLocallyCompatible(center, sortedSurfels[neighborIndex])
-            if (!relation.compatible) {
-              continue
-            }
-            insertBoundedNeighbor(neighbors[index], {
-              index: neighborIndex,
-              distanceSquared: relation.distanceSquared,
-            })
-            insertBoundedNeighbor(neighbors[neighborIndex], {
-              index,
-              distanceSquared: relation.distanceSquared,
-            })
-          }
-        }
-      }
-    }
-  }
+  const search = findRealityNeighbors(sortedSurfels, MAX_LOCAL_EDGE_DISTANCE_METERS,
+    MAX_NEIGHBORS_PER_SURFEL, (a, b) => areLocallyCompatible(a, b).compatible)
+  const neighbors = search.neighbors
+  const distributionStarted = getTimestamp()
+  const directionBins = Array<number>(12).fill(0)
+  const spacingBins = Array<number>(25).fill(0)
+  const uSpacing: number[] = [], vSpacing: number[] = []
+  const normal = new THREE.Vector3(), tangent = new THREE.Vector3(), bitangent = new THREE.Vector3()
+  let missingTangentU = 0, missingTangentV = 0, darkRgbSamples = 0
 
   const nearestSpacingMeters = new Float32Array(sortedSurfels.length)
   nearestSpacingMeters.fill(Infinity)
@@ -440,6 +398,25 @@ function buildRealityNeighborIndex(
   let estimatedLargeUnsupportedGaps = 0
   for (let index = 0; index < sortedSurfels.length; index += 1) {
     const nearest = neighbors[index][0]
+    const surfel = sortedSurfels[index]
+    if (surfel.colorRgb && Math.max(surfel.colorRgb.r, surfel.colorRgb.g, surfel.colorRgb.b) < 0.08) darkRgbSamples++
+    normal.set(surfel.normal.x, surfel.normal.y, surfel.normal.z).normalize()
+    getStableTangent(normal, tangent)
+    bitangent.crossVectors(normal, tangent)
+    let nearestU = Infinity, nearestV = Infinity
+    for (const neighbor of neighbors[index]) {
+      const point = sortedSurfels[neighbor.index].position
+      const dx = point.x - surfel.position.x, dy = point.y - surfel.position.y, dz = point.z - surfel.position.z
+      const u = dx * tangent.x + dy * tangent.y + dz * tangent.z
+      const v = dx * bitangent.x + dy * bitangent.y + dz * bitangent.z
+      const angle = (Math.atan2(v, u) + Math.PI) % Math.PI
+      directionBins[Math.min(11, Math.floor(angle / Math.PI * 12))]++
+      // Nearest link inside each +/-22.5 degree tangent-axis cone.
+      if (Math.abs(v) <= Math.abs(u) * Math.tan(Math.PI / 8)) nearestU = Math.min(nearestU, Math.abs(u))
+      if (Math.abs(u) <= Math.abs(v) * Math.tan(Math.PI / 8)) nearestV = Math.min(nearestV, Math.abs(v))
+    }
+    if (Number.isFinite(nearestU)) uSpacing.push(nearestU); else missingTangentU++
+    if (Number.isFinite(nearestV)) vSpacing.push(nearestV); else missingTangentV++
     if (!nearest) {
       estimatedLargeUnsupportedGaps += 1
       continue
@@ -447,6 +424,7 @@ function buildRealityNeighborIndex(
     const nearestDistance = Math.sqrt(nearest.distanceSquared)
     nearestSpacingMeters[index] = nearestDistance
     nearestDistances.push(nearestDistance)
+    spacingBins[Math.min(24, Math.floor((nearestDistance + 1e-9) / .005))]++
     const gap = nearestDistance - sortedSurfels[index].radius * 2
     if (gap > 0 && gap <= SMALL_GAP_LIMIT_METERS) {
       estimatedSmallGapRegions += 1
@@ -455,6 +433,8 @@ function buildRealityNeighborIndex(
     }
   }
 
+  const medianU = calculatePercentile(uSpacing, .5), medianV = calculatePercentile(vSpacing, .5)
+  const peak = spacingBins.indexOf(Math.max(...spacingBins))
   return {
     surfels: sortedSurfels,
     neighbors,
@@ -464,6 +444,14 @@ function buildRealityNeighborIndex(
     estimatedSmallGapRegions,
     estimatedLargeUnsupportedGaps,
     buildMs: Math.max(0, getTimestamp() - startedAt),
+    spatialIndexMs: search.spatialIndexMs,
+    neighborAnalysisMs: search.neighborAnalysisMs + getTimestamp() - distributionStarted,
+    distribution: {
+      directionBins, spacingBins, dominantSpacingMeters: nearestDistances.length ? peak * .005 : null,
+      medianTangentUSpacing: medianU, medianTangentVSpacing: medianV,
+      anisotropyRatio: medianU && medianV ? Math.max(medianU, medianV) / Math.min(medianU, medianV) : null,
+      missingTangentU, missingTangentV, truncatedQueries: search.truncatedQueries, darkRgbSamples,
+    },
   }
 }
 
@@ -504,9 +492,14 @@ function createSplatGeometry(
 ): SplatGeometryResult {
   const surfels = index.surfels
   const verticesPerSurfel = 6
-  const positions = new Float32Array(surfels.length * verticesPerSurfel * 3)
-  const colors = new Float32Array(surfels.length * verticesPerSurfel * 3)
-  const localCoordinates = new Float32Array(surfels.length * verticesPerSurfel * 2)
+  let splatCapacity = surfels.length
+  if (splatSuppressionMask) {
+    splatCapacity = 0
+    for (const suppressed of splatSuppressionMask) if (!suppressed) splatCapacity++
+  }
+  const positions = new Float32Array(splatCapacity * verticesPerSurfel * 3)
+  const colors = new Float32Array(splatCapacity * verticesPerSurfel * 3)
+  const localCoordinates = new Float32Array(splatCapacity * verticesPerSurfel * 2)
   const normal = new THREE.Vector3()
   const tangent = new THREE.Vector3()
   const bitangent = new THREE.Vector3()
@@ -601,6 +594,8 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
   const edgeB = new THREE.Vector3()
   const cross = new THREE.Vector3()
   const coveredSurfelIndices = new Uint8Array(surfels.length)
+  const emitted = new Set<string>()
+  const tangent = new THREE.Vector3(), bitangent = new THREE.Vector3()
   let triangleCount = 0
   let coveredSurfelCount = 0
 
@@ -615,20 +610,60 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
       center,
       index.nearestSpacingMeters[centerIndex],
     )
-    const boundedNeighbors = index.neighbors[centerIndex].filter(
-      (neighbor) => neighbor.distanceSquared <= edgeLimit ** 2,
-    )
-    let trianglesForCenter = 0
+    getStableTangent(centerNormal, tangent)
+    bitangent.crossVectors(centerNormal, tangent)
+    const boundedNeighbors = index.neighbors[centerIndex]
+      .filter((neighbor) => neighbor.distanceSquared <= edgeLimit ** 2)
+      .map((neighbor) => {
+        const p = surfels[neighbor.index].position
+        const dx = p.x - center.position.x, dy = p.y - center.position.y, dz = p.z - center.position.z
+        const u = dx * tangent.x + dy * tangent.y + dz * tangent.z
+        const v = dx * bitangent.x + dy * bitangent.y + dz * bitangent.z
+        return { ...neighbor, u, v, angle: Math.atan2(v, u) }
+      }).sort((a, b) => a.angle - b.angle || a.distanceSquared - b.distanceSquared)
+    // Local empty-circle triangles: balanced in the tangent plane, not the
+    // first four distance/ID-ordered pairs. Only measured vertices are emitted.
     for (let firstNeighborIndex = 0; firstNeighborIndex < boundedNeighbors.length; firstNeighborIndex += 1) {
-      if (trianglesForCenter >= MAX_TRIANGLES_PER_SURFEL) {
-        break
-      }
       for (let secondNeighborIndex = firstNeighborIndex + 1; secondNeighborIndex < boundedNeighbors.length; secondNeighborIndex += 1) {
-        if (trianglesForCenter >= MAX_TRIANGLES_PER_SURFEL) {
-          break
-        }
         const firstNeighbor = boundedNeighbors[firstNeighborIndex]
         const secondNeighbor = boundedNeighbors[secondNeighborIndex]
+        const { u: au, v: av } = firstNeighbor, { u: bu, v: bv } = secondNeighbor
+        const determinant = au * bv - av * bu
+        const a2 = au * au + av * av, b2 = bu * bu + bv * bv
+        if (determinant * determinant <= a2 * b2 * MIN_TRIANGLE_SINE_SQUARED || a2 * b2 <= 1e-16) continue
+        // Do not form a fan across an unsupported half-plane / large angular hole.
+        if (au * bu + av * bv < -0.5 * Math.sqrt(a2 * b2)) continue
+        const circleU = (a2 * bv - b2 * av) / (2 * determinant)
+        const circleV = (au * b2 - bu * a2) / (2 * determinant)
+        const radiusSquared = circleU * circleU + circleV * circleV
+        let occupied = false
+        for (const other of boundedNeighbors) {
+          if (other.index === firstNeighbor.index || other.index === secondNeighbor.index) continue
+          const difference = (other.u - circleU) ** 2 + (other.v - circleV) ** 2 - radiusSquared
+          const tolerance = Math.max(1e-14, radiusSquared * 1e-8)
+          if (difference < -tolerance) { occupied = true; break }
+          if (Math.abs(difference) <= tolerance) {
+            // Cocircular tie: choose the lexicographically shorter endpoint pair,
+            // independent of sample IDs / capture insertion order.
+            const vertices = [
+              { index: centerIndex, u: 0, v: 0 }, firstNeighbor, secondNeighbor,
+            ]
+            for (let edge = 0; edge < 3; edge++) {
+              const a = vertices[edge], b = vertices[(edge + 1) % 3], c = vertices[(edge + 2) % 3]
+              const sideC = (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u)
+              const sideOther = (b.u - a.u) * (other.v - a.v) - (b.v - a.v) * (other.u - a.u)
+              if (sideC * sideOther >= 0) continue
+              const compare = (i: number, j: number) => {
+                const p = surfels[i].position, q = surfels[j].position
+                return p.x - q.x || p.y - q.y || p.z - q.z
+              }
+              const current = [a.index, b.index].sort(compare), alternate = [c.index, other.index].sort(compare)
+              if ((compare(current[0], alternate[0]) || compare(current[1], alternate[1])) > 0) occupied = true
+            }
+            if (occupied) break
+          }
+        }
+        if (occupied) continue
         const first = surfels[firstNeighbor.index]
         const second = surfels[secondNeighbor.index]
         const pairRelation = areLocallyCompatible(first, second)
@@ -646,9 +681,12 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
           second.position.z - center.position.z,
         )
         cross.crossVectors(edgeA, edgeB)
-        if (cross.lengthSq() <= MIN_TRIANGLE_AREA_SQUARED) {
+        if (cross.lengthSq() <= edgeA.lengthSq() * edgeB.lengthSq() * MIN_TRIANGLE_SINE_SQUARED) {
           continue
         }
+        const key = [centerIndex, firstNeighbor.index, secondNeighbor.index].sort((a, b) => a - b).join(':')
+        if (emitted.has(key)) continue
+        emitted.add(key)
         if (coveredSurfelIndices[centerIndex] === 0) {
           coveredSurfelIndices[centerIndex] = 1
           coveredSurfelCount += 1
@@ -669,7 +707,6 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex): TriangleGeome
           writeColor(colors, colors.length, surfel)
         }
         triangleCount += 1
-        trianglesForCenter += 1
       }
     }
   }
@@ -726,9 +763,55 @@ function getGeometryMemoryBytes(geometry: THREE.BufferGeometry): number {
   )
 }
 
+/** Transfer only prepared numeric geometry, never XR resources or camera frames. */
+export interface PreparedRealitySurface {
+  geometries: { attributes: { name: string; array: Float32Array; itemSize: number }[] }[]
+  layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles'; opacity: number }[]
+  stats: RealitySurfaceRenderStats
+}
+
+export function packRealitySurface(resources: RealitySurfaceRenderResources): PreparedRealitySurface {
+  const geometries = resources.geometries.map((geometry) => ({
+    attributes: Object.entries(geometry.attributes).map(([name, attribute]) => ({
+      name, array: attribute.array as Float32Array, itemSize: attribute.itemSize,
+    })),
+  }))
+  const layers: PreparedRealitySurface['layers'] = []
+  for (const object of resources.group.children) {
+    if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Points)) continue
+    const material = object.material
+    if (Array.isArray(material)) continue
+    const kind = object instanceof THREE.Points ? 'points'
+      : material instanceof THREE.ShaderMaterial ? (material.uniforms.uCorePass.value ? 'core' : 'feather')
+        : 'triangles'
+    layers.push({ geometry: resources.geometries.indexOf(object.geometry), kind,
+      opacity: material instanceof THREE.ShaderMaterial ? material.uniforms.uOpacity.value : material.opacity })
+  }
+  return { geometries, layers, stats: resources.stats }
+}
+
+export function restoreRealitySurface(prepared: PreparedRealitySurface): RealitySurfaceRenderResources {
+  const geometries = prepared.geometries.map((source) => {
+    const geometry = new THREE.BufferGeometry()
+    for (const attribute of source.attributes) geometry.setAttribute(attribute.name, new THREE.BufferAttribute(attribute.array, attribute.itemSize))
+    return geometry
+  })
+  const group = new THREE.Group(), materials: THREE.Material[] = []
+  for (const layer of prepared.layers) {
+    const material = layer.kind === 'points' ? createPointMaterial()
+      : layer.kind === 'triangles' ? createSurfaceMaterial()
+        : createSplatMaterial(layer.opacity, layer.kind === 'core')
+    materials.push(material)
+    group.add(layer.kind === 'points'
+      ? new THREE.Points(geometries[layer.geometry], material)
+      : new THREE.Mesh(geometries[layer.geometry], material))
+  }
+  return { group, geometries, materials, stats: prepared.stats }
+}
+
 /** Builds post-scan Reality geometry once; it never changes the measured data. */
 export function createRealitySurfaceRenderResources(
-  reconstruction: FinalizedRealityReconstruction,
+  reconstruction: Pick<FinalizedRealityReconstruction, 'surfels'>,
   mode: RealitySurfaceRenderMode,
 ): RealitySurfaceRenderResources {
   const startedAt = getTimestamp()
@@ -736,10 +819,7 @@ export function createRealitySurfaceRenderResources(
   const geometries: THREE.BufferGeometry[] = []
   const materials: THREE.Material[] = []
   const coloredSurfels = getColoredSurfels(reconstruction)
-  const shouldBuildNeighborIndex = mode === 'splats' || mode === 'dense'
-  const neighborIndex = shouldBuildNeighborIndex
-    ? buildRealityNeighborIndex(coloredSurfels)
-    : null
+  const neighborIndex = buildRealityNeighborIndex(coloredSurfels)
   let renderedSplatCount = 0
   let renderedTriangleCount = 0
   let coloredTriangleVertexCount = 0
@@ -758,7 +838,7 @@ export function createRealitySurfaceRenderResources(
     geometries.push(geometry)
     materials.push(material)
   } else if (neighborIndex) {
-    if (mode === 'dense') {
+    if (mode === 'dense' || mode === 'triangles') {
       const triangleStartedAt = getTimestamp()
       const triangleResult = createDenseTriangleGeometry(neighborIndex)
       triangleGenerationMs = Math.max(0, getTimestamp() - triangleStartedAt)
@@ -772,25 +852,27 @@ export function createRealitySurfaceRenderResources(
       splatSuppressionMask = triangleResult.coveredSurfelIndices
     }
 
-    const splatStartedAt = getTimestamp()
-    const splatResult = createSplatGeometry(
-      neighborIndex,
-      mode === 'dense' ? DENSE_SPLAT_RADIUS_SCALE : BASE_SPLAT_RADIUS_SCALE,
-      splatSuppressionMask,
-    )
-    splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
-    const splatCoreMaterial = createSplatMaterial(1, true)
-    const splatFeatherMaterial = createSplatMaterial(mode === 'dense' ? 0.92 : 1, false)
-    group.add(
-      new THREE.Mesh(splatResult.geometry, splatCoreMaterial),
-      new THREE.Mesh(splatResult.geometry, splatFeatherMaterial),
-    )
-    geometries.push(splatResult.geometry)
-    materials.push(splatCoreMaterial, splatFeatherMaterial)
-    renderedSplatCount = splatResult.renderedSplatCount
-    fallbackSplatCount = mode === 'dense' ? splatResult.renderedSplatCount : 0
-    splatsSuppressedByTriangles = splatResult.suppressedSplatCount
-    visualRadiusScale = splatResult.averageVisualRadiusScale
+    if (mode !== 'triangles') {
+      const splatStartedAt = getTimestamp()
+      const splatResult = createSplatGeometry(
+        neighborIndex,
+        mode === 'dense' ? DENSE_SPLAT_RADIUS_SCALE : BASE_SPLAT_RADIUS_SCALE,
+        splatSuppressionMask,
+      )
+      splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
+      const splatCoreMaterial = createSplatMaterial(1, true)
+      const splatFeatherMaterial = createSplatMaterial(mode === 'dense' ? 0.92 : 1, false)
+      group.add(
+        new THREE.Mesh(splatResult.geometry, splatCoreMaterial),
+        new THREE.Mesh(splatResult.geometry, splatFeatherMaterial),
+      )
+      geometries.push(splatResult.geometry)
+      materials.push(splatCoreMaterial, splatFeatherMaterial)
+      renderedSplatCount = splatResult.renderedSplatCount
+      fallbackSplatCount = mode === 'dense' ? splatResult.renderedSplatCount : 0
+      splatsSuppressedByTriangles = splatResult.suppressedSplatCount
+      visualRadiusScale = splatResult.averageVisualRadiusScale
+    }
   }
 
   const memoryBytes = geometries.reduce(
@@ -806,7 +888,7 @@ export function createRealitySurfaceRenderResources(
       mode,
       sourceSurfelCount: reconstruction.surfels.length,
       coloredSurfelCount: coloredSurfels.length,
-      renderedSurfelCount: mode === 'dense'
+      renderedSurfelCount: mode === 'dense' || mode === 'triangles'
         ? triangleCoveredSurfelCount + renderedSplatCount
         : coloredSurfels.length,
       renderedSplatCount,
@@ -818,7 +900,12 @@ export function createRealitySurfaceRenderResources(
       splatsSuppressedByTriangles,
       visualRadiusScale,
       renderPreparationMs: Math.max(0, getTimestamp() - startedAt),
-      neighborIndexBuildMs: neighborIndex?.buildMs ?? 0,
+      neighborIndexBuildMs: neighborIndex.spatialIndexMs,
+      neighborAnalysisMs: neighborIndex.neighborAnalysisMs,
+      distribution: neighborIndex.distribution,
+      triangleParticipantCount: triangleCoveredSurfelCount,
+      triangleParticipationPercentage: coloredSurfels.length ? triangleCoveredSurfelCount / coloredSurfels.length * 100 : 0,
+      fallbackPercentage: coloredSurfels.length ? fallbackSplatCount / coloredSurfels.length * 100 : 0,
       splatGeometryMs,
       triangleGenerationMs,
       medianNearestNeighborSpacingMeters: neighborIndex?.medianNearestNeighborSpacingMeters ?? null,

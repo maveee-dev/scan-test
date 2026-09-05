@@ -641,6 +641,32 @@
   gap: 4px;
 }
 
+.scanner-reality-diagnostics {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.scanner-reality-diagnostics > span,
+.scanner-reality-diagnostics .scanner-reality-color-samples > span {
+  display: block;
+  margin-top: 8px;
+}
+
+.scanner-reality-diagnostics summary {
+  min-height: 44px;
+  padding: 10px 0;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.scanner-reality-diagnostics button {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+  font-size: 11px;
+}
+
 .scanner-reality-render-modes {
   display: flex;
   flex-wrap: wrap;

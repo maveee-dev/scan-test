@@ -1131,3 +1131,99 @@ snapshot with the dense snapshot. If dense numeric color validation fails,
 the review safely uses Structural Reality rather than displaying a white
 fallback scene. This milestone changes no camera capture, RGB-D registration,
 color weighting, geometry matching, capacity, or structural output.
+
+## M8.4.3.2 sampling-lattice / surface-continuity audit
+
+The physical M8.4.3.1 baseline is 28,814 stable / 32,637 active dense samples,
+0.025 m median / 0.031 m p90 spacing, and 100% color coverage. Those summary
+numbers do **not** establish whether the photographed stripes exist in the
+finalized positions. The physical snapshot was not available to this code
+audit; another device comparison is required before blaming live sampling.
+
+The live audit found a cached, fixed 80 x 45 normalized view/depth sampling
+grid: `(column + 0.5) / 80`, `(row + 0.5) / 45`. At the reported 160 x 90
+depth size the nominal steps span two pixels, subject to the runtime depth
+transform. There is no depth-grid temporal offset. The four-phase coverage
+schedule acts downstream, not on the dense RGB-D input; the every-second-tick
+camera schedule also does not change sample positions. No new sampling phase,
+camera copy, readback, or live work is introduced without physical evidence
+that the input lattice itself is the remaining cause.
+
+Dense hash keys index 2.5 cm cells, but stored/finalized positions are measured
+positions with bounded running position fusion, **not cell centers**. The
+snapshot does not retain per-sample source depth pixels or capture phase.
+This milestone neither invents that provenance nor changes the dense store,
+60,000 capacity, geometry matching, real RGB, or sRGB/linear fusion.
+
+Two renderer connectivity defects were reproduced on a synthetic uniformly
+sampled plane:
+
+- The former 96-entry query budget was consumed in lexicographic hash-cell
+  order, including entries skipped because of earlier IDs. It could miss
+  closer points and prefer one direction. Reversing IDs changed the triangles.
+- The `1e-6` squared-cross-product area gate rejected a valid 2.5 cm right
+  triangle (`3.90625e-7`). Selecting the first four nearest-neighbor pairs also
+  produced duplicate/overlapping, directionally biased triangles.
+
+Post-scan neighbor lookup now uses a balanced, near-first spatial tree, keeping
+the existing eight-neighbor budget. Queries have a 512-node safety bound and
+report any exhaustion. Tangent-plane empty-circumcircle tests choose local
+triangles geometrically; cocircular ties use measured-position ordering, not
+IDs, and duplicate triples are suppressed. A scale-relative degeneracy test
+accepts small well-shaped measured triangles. Existing distance, normal,
+bidirectional plane-residual, and adaptive maximum-edge gates remain, with an
+additional rejection of unsupported angular spans over 120 degrees. No new
+vertices, room sheets, or measured positions are generated.
+
+A separate confirmed display mismatch affected dark splats: the custom shader
+received linear RGB but omitted Three.js's output-color conversion used by
+the triangle material. Both core and feather now use the same
+`colorspace_fragment` conversion as MeshBasicMaterial. Source RGB and alpha
+are unchanged; the opaque core still writes depth, the feather does not, and
+both test depth. There is still no uncolored gray fallback population.
+
+Reality development diagnostics are collapsed but available in deployed phone
+builds. Using the **same selected snapshot**, compare Raw Points (8 mm diagnostic
+points), Splats, Triangles only, and Final. Rows in Raw Points are data evidence;
+additional patterns in triangles implicate connectivity; spots added by Final
+implicate splat composition. Truly dark captured RGB, unsupported space, and
+missing triangle connectivity remain separate possibilities, not an automatic
+classification of every dark screen pixel.
+
+Bounded diagnostics include folded tangent-direction and 5 mm spacing
+histograms, tangent U/V median link spacing and anisotropy, missing directional
+links, query exhaustion, genuinely dark source-RGB count, triangle participants,
+fallback/suppressed counts and percentages, preparation timings, geometry memory,
+and existing throttled preview FPS. Directional-link gaps are not exact hole
+areas; triangle participation is a vertex count, **not** surface-area coverage.
+Earlier snapshot gap estimates remain visible but are not proof of watertight
+coverage. The eight existing sample RGB/position records remain available.
+
+Controlled desktop Node checks (not POCO measurements), same 28,900-point
+2.5 cm plane:
+
+| Renderer audit | Before | After |
+| --- | ---: | ---: |
+| Reported compatible-neighbor median / p90 | .0354 / .0791 m | .025 / .025 m |
+| Triangle participants | 99.875% | 100% |
+| Fallback vertices | .125% | 0% |
+| Triangles | 105,550, including overlaps | 57,122 |
+| Index + triangle preparation | ~346 ms | ~933 ms |
+
+These are renderer diagnostics on identical data, **not a physical density
+increase**. A 59,536-point grid took about 1.87 s and produced 118,098 triangles
+(8.11 MiB of position/color buffers); the 28,900-point grid used 3.92 MiB.
+Neither query exhausted its bound. Timing varies by hardware/JIT and does not
+predict phone FPS. Processing runs in a cancellable post-scan worker with
+`Preparing Reality Preview...`; transferred numeric geometry is uploaded once,
+and leaving/changing modes terminates obsolete jobs. Eight bounded neighbor
+records per sample and temporary worker data are released after preparation.
+No camera frames are retained, and suppressed splats do not reserve full
+capacity buffers. Phone preparation, orbit performance, actual triangle/fallback
+rates, and stripe reduction must be measured in the next physical test.
+
+Run `npm run test:reality` for planar coverage, ID/rotation invariance,
+small/degenerate triangles, separated planes/open gaps, anisotropic data,
+empty/uncolored inputs, RGB preservation, and worker-transfer composition tests.
+This remains measured local Reality surface visualization, not photogrammetry,
+texture mapping, or M8.5.

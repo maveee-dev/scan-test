@@ -24,10 +24,11 @@ import {
   type SurfaceCustomizationMap,
 } from '../services/surfaceCustomizationService'
 import {
-  createRealitySurfaceRenderResources,
+  restoreRealitySurface,
   type RealitySurfaceRenderMode,
   type RealitySurfaceRenderStats,
 } from '../services/realitySurfaceRenderingService'
+import { usePreparedRealitySurface } from '../hooks/usePreparedRealitySurface'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -484,6 +485,8 @@ function FinalizedSpatialScanPreview({
   const preferredRealityReconstruction = realityRenderSource === 'dense' && denseRealityColorIsRenderable
     ? denseRealityReconstruction
     : realityReconstruction
+  const realityPreparation = usePreparedRealitySurface(preferredRealityReconstruction, realityRenderMode, mode === 'reality-preview')
+  const preparedReality = realityPreparation.prepared
   const denseRealityFallbackActive = realityRenderSource === 'dense' &&
     denseRealityReconstruction?.status === 'available' &&
     !denseRealityColorIsRenderable &&
@@ -642,7 +645,7 @@ function FinalizedSpatialScanPreview({
     let structuralResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let intersectionResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
     let boundaryResources: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } | null = null
-    let realityResources: ReturnType<typeof createRealitySurfaceRenderResources> | null = null
+    let realityResources: ReturnType<typeof restoreRealitySurface> | null = null
     let roomSurfaceResources: {
       geometries: THREE.BufferGeometry[]
       materials: THREE.Material[]
@@ -685,11 +688,8 @@ function FinalizedSpatialScanPreview({
       roomSurfaceResources = addRoomSurfaces(scene, roomSurfaceConstruction)
       roomSurfaceMeshesRef.current = roomSurfaceResources.surfaceMeshes
       roomSurfaceOutlinesRef.current = roomSurfaceResources.surfaceOutlines
-    } else if (mode === 'reality-preview' && preferredRealityReconstruction) {
-      realityResources = createRealitySurfaceRenderResources(
-        preferredRealityReconstruction,
-        realityRenderMode,
-      )
+    } else if (mode === 'reality-preview' && preparedReality) {
+      realityResources = restoreRealitySurface(preparedReality)
       scene.add(realityResources.group)
     }
 
@@ -840,7 +840,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityResources.group)
       }
     }
-  }, [analysisResult, denseRealityReconstruction, mode, preferredRealityReconstruction, realityReconstruction, realityRenderMode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
+  }, [analysisResult, denseRealityReconstruction, mode, preferredRealityReconstruction, preparedReality, realityReconstruction, realityRenderMode, roomBoundary, roomSurfaceConstruction, scan, selectSurface, structuralInterpretation, structuralIntersections])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1086,8 +1086,10 @@ function FinalizedSpatialScanPreview({
             capacity {preferredRealityReconstruction.captureSummary.capacityUtilizationPercentage.toFixed(1)}%
             {preferredRealityReconstruction.captureSummary.capacityReached ? ' (reached)' : ''}
           </span>
-          {import.meta.env.DEV ? (
-            <>
+          {realityPreparation.pending ? <span role="status">Preparing Reality Preview… You can switch modes or leave review.</span> : null}
+          {realityPreparation.error ? <span role="alert">{realityPreparation.error}</span> : null}
+            <details className="scanner-reality-diagnostics">
+              <summary>Reality development diagnostics / layer comparison</summary>
               <div className="scanner-reality-render-modes" role="group" aria-label="Reality render source">
                 <span>Reality source</span>
                 <button
@@ -1117,7 +1119,7 @@ function FinalizedSpatialScanPreview({
               </div>
               <div className="scanner-reality-render-modes" role="group" aria-label="Reality render comparison modes">
                 <span>Debug render</span>
-                {(['points', 'splats', 'dense'] as const).map((renderMode) => (
+                {(['points', 'splats', 'triangles', 'dense'] as const).map((renderMode) => (
                   <button
                     key={renderMode}
                     type="button"
@@ -1132,7 +1134,7 @@ function FinalizedSpatialScanPreview({
                       ? 'Raw Reality Points'
                       : renderMode === 'splats'
                         ? 'Reality Splats'
-                        : 'Dense Reality Surface'}
+                        : renderMode === 'triangles' ? 'Dense Triangles only' : 'Dense Reality Surface (Final)'}
                   </button>
                 ))}
               </div>
@@ -1143,13 +1145,40 @@ function FinalizedSpatialScanPreview({
               ) : null}
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
-                  Refinement index {realityRenderStats.neighborIndexBuildMs.toFixed(1)} ms / splats {realityRenderStats.splatGeometryMs.toFixed(1)} ms / triangles {realityRenderStats.triangleGenerationMs.toFixed(1)} ms / memory {(realityRenderStats.memoryBytes / 1024).toFixed(1)} KB / median spacing {realityRenderStats.medianNearestNeighborSpacingMeters === null
+                  Refinement index {realityRenderStats.neighborIndexBuildMs.toFixed(1)} ms / neighbors {realityRenderStats.neighborAnalysisMs.toFixed(1)} ms / splats {realityRenderStats.splatGeometryMs.toFixed(1)} ms / triangles {realityRenderStats.triangleGenerationMs.toFixed(1)} ms / memory {(realityRenderStats.memoryBytes / 1024).toFixed(1)} KB / median spacing {realityRenderStats.medianNearestNeighborSpacingMeters === null
                     ? 'N/A'
                     : `${realityRenderStats.medianNearestNeighborSpacingMeters.toFixed(3)} m`} / p90 {realityRenderStats.p90NearestNeighborSpacingMeters === null
                       ? 'N/A'
                       : `${realityRenderStats.p90NearestNeighborSpacingMeters.toFixed(3)} m`}
                 </span>
               ) : null}
+              {realityRenderStats?.mode === realityRenderMode ? (
+                <span>
+                  Triangle participants {realityRenderStats.triangleParticipantCount} / {realityRenderStats.coloredSurfelCount} ({realityRenderStats.triangleParticipationPercentage.toFixed(1)}%) / fallback {realityRenderStats.fallbackPercentage.toFixed(1)}%. Participation is a vertex count, not covered surface area.
+                </span>
+              ) : null}
+              {realityRenderStats?.mode === realityRenderMode && realityRenderStats.distribution ? (
+                <>
+                  <span>
+                    Data tangent U/V median links: {realityRenderStats.distribution.medianTangentUSpacing?.toFixed(3) ?? 'N/A'} / {realityRenderStats.distribution.medianTangentVSpacing?.toFixed(3) ?? 'N/A'} m;
+                    anisotropy {realityRenderStats.distribution.anisotropyRatio?.toFixed(2) ?? 'N/A'};
+                    dominant nearest-spacing bin {realityRenderStats.distribution.dominantSpacingMeters?.toFixed(3) ?? 'N/A'} m (5 mm bins).
+                  </span>
+                  <span>Compatible-link directions (12 tangent-angle bins, 0–180°): {realityRenderStats.distribution.directionBins.join(' / ')}</span>
+                  <span>Nearest-spacing histogram (0–120 mm, 5 mm bins): {realityRenderStats.distribution.spacingBins.join(' / ')}</span>
+                  <span>
+                    No compatible U/V link: {realityRenderStats.distribution.missingTangentU} / {realityRenderStats.distribution.missingTangentV}; bounded queries exhausted: {realityRenderStats.distribution.truncatedQueries}.
+                    These are local directional evidence, not exact holes or a quality score.
+                  </span>
+                  <span>Genuinely dark source RGB (all sRGB channels below 0.08): {realityRenderStats.distribution.darkRgbSamples}. No uncolored fallback material is rendered.</span>
+                </>
+              ) : null}
+              <span>
+                Isolation guide: rows in Raw Points indicate measured distribution; triangles-only isolates connectivity; spots added only by Final indicate fallback/composition. Empty areas in all geometry layers may be unsupported; dark RGB counts alone cannot locate screen artifacts.
+              </span>
+              <span>
+                Capture audit: fixed 80 × 45 normalized sample grid (steps 1/80, 1/45); no temporal depth phase. At 160 × 90 this nominally spans two pixels per step, subject to runtime transforms. Coverage phases do not alter depth/RGB-D input. Source pixels and capture phase are not retained per finalized sample. Live capture is unchanged.
+              </span>
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
                   Triangle vertices colored {realityRenderStats.coloredTriangleVertexCount} / uncolored {realityRenderStats.uncoloredTriangleVertexCount} / colored splats {realityRenderStats.renderedSplatCount} / fallback splats {realityRenderStats.fallbackSplatCount} / uncolored fallback {realityRenderStats.uncoloredFallbackSplatCount} / splats suppressed by triangles {realityRenderStats.splatsSuppressedByTriangles}
@@ -1179,8 +1208,7 @@ function FinalizedSpatialScanPreview({
                   Runtime {realityRuntimeStats.fps.toFixed(0)} FPS · {realityRuntimeStats.frameTimeMs.toFixed(1)} ms · {realityRuntimeStats.drawCalls} draw calls · {realityRuntimeStats.geometryCount} geometries
                 </span>
               ) : null}
-            </>
-          ) : null}
+            </details>
           {preferredRealityReconstruction.status !== 'available' ? (
             <span>Original camera colors were not retained for this scan; structural review remains available.</span>
           ) : null}
