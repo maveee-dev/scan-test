@@ -18,6 +18,7 @@ self.onmessage = (event: MessageEvent<{
       {
         transfer: [
           table.memberships.buffer,
+          table.samplePositions.buffer,
           table.logicalSurfaceIndices.buffer,
           table.patchIndices.buffer,
         ],

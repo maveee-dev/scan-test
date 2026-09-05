@@ -1359,3 +1359,50 @@ M8.5.1 introduces a two-tier structural association architecture:
   - **Reality Wall Mask**: Green/cyan for `WALL_MEMBER`, amber for `UNCERTAIN`, dark red for `NON_WALL`.
 - Diagnostics panel displays logical wall group composition, total areas,
   coplanar residuals, and detailed evidence for the last Reality tap.
+
+### M8.5.2 — Robust Structural Surface Membership Expansion
+
+M8.5.2 preserves M8.5.1's strict trusted structural seeds, but separates
+high-precision seed membership from a bounded surface-aware expansion pass.
+This improves visible wall/ceiling recall without restoring the unsafe rule
+that every Reality sample inside a structural polygon is paintable:
+
+```text
+Logical structural surface (member M7.4 patch union)
+        ↓
+candidate Reality domain
+        ↓
+strict trusted core
+        ↓
+bounded local normal / plane / connected-neighbor expansion
+        ↓
+CORE / EXPANDED / UNCERTAIN / NON_WALL
+        ↓
+Design paint mask
+```
+
+- `CORE_WALL_MEMBER` is a strict M8.5.1-style anchor: low plane residual,
+  strong individual normal, polygon containment, and structural-support
+  proximity.
+- `EXPANDED_WALL_MEMBER` is reached only through measured dense-Reality
+  connectivity with multi-neighbor support, local normal consensus,
+  representative-plane agreement, and a bounded local depth step.
+- Expansion thresholds are calibrated from strict-core residual and local
+  spacing distributions, then clamped to conservative meter-scale bounds.
+  This remains orientation independent for walls, ceilings, and floors.
+- A structural polygon is a valid **candidate domain**, not the paint mask.
+  Samples that lack enough proof are `UNCERTAIN` and retain original RGB;
+  `NON_WALL` requires positive foreground/conflicting evidence.
+- Foreground components remain barriers. A curtain/cabinet depth offset,
+  discontinuity, conflicting logical surface, or disconnected component cannot
+  be crossed merely because it is close to the same plane.
+- All member M7.4 patch extents of a logical surface are evaluated as a union;
+  this preserves shared customization across fragmented observed portions while
+  never fabricating unobserved wall geometry.
+
+The worker exposes per-logical-surface candidate/core/expanded/uncertain
+counts, rejection reasons, residual/normal/depth-step distributions, selected
+expansion bounds, and seed/index/growth/finalization timings. Reality Wall Mask
+uses cyan for core, green for expanded, amber for uncertain, and dark red for
+non-wall. Only core and expanded samples receive Design paint; Original Reality
+remains immutable.

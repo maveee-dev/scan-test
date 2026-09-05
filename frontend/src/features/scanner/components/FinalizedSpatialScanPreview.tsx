@@ -1392,12 +1392,12 @@ function FinalizedSpatialScanPreview({
               </span>
               {realityAssociation.table ? (
                 <span>
-                  Reality/Structural association: {realityAssociation.table.wallMemberCount} wall-member samples / {realityAssociation.table.nonWallCount} non-wall (preserved foreground/furniture) / {realityAssociation.table.uncertainCount} uncertain; preparation {realityAssociation.table.elapsedMs.toFixed(1)} ms.
+                  Reality/Structural association: {realityAssociation.table.coreWallMemberCount} strict core + {realityAssociation.table.expandedWallMemberCount} expanded = {realityAssociation.table.wallMemberCount} paintable / {realityAssociation.table.uncertainCount} uncertain / {realityAssociation.table.nonWallCount} non-wall; worker {realityAssociation.table.elapsedMs.toFixed(1)} ms (seed {realityAssociation.table.seedPassMs.toFixed(1)} / index {realityAssociation.table.neighborIndexMs.toFixed(1)} / growth {realityAssociation.table.regionGrowthMs.toFixed(1)} / finalize {realityAssociation.table.classificationFinalizationMs.toFixed(1)} ms).
                 </span>
               ) : null}
               <div className="scanner-reality-group-diagnostics">
                 <span>
-                  <strong>Logical Surface Groups (M8.5.1):</strong> {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches
+                  <strong>Logical Surface Membership (M8.5.2):</strong> cyan = strict core, green = expanded, amber = uncertain, dark red = non-wall. {logicalSurfaces.length} logical surfaces formed from {roomPatches.length} M7.4 patches.
                 </span>
                 {logicalSurfaces.map((l) => (
                   <span key={l.id} style={{ display: 'block', fontSize: '0.82rem', opacity: 0.88 }}>
@@ -1405,6 +1405,26 @@ function FinalizedSpatialScanPreview({
                   </span>
                 ))}
               </div>
+              {realityAssociation.table?.perLogicalSurface.map((diagnostic) => {
+                const total = Math.max(1, diagnostic.candidateSampleCount)
+                const reasons = Object.entries(diagnostic.rejectionCounts).filter(([, count]) => count > 0)
+                return (
+                  <div key={`${diagnostic.logicalSurfaceId}-membership`} className="scanner-reality-group-diagnostics">
+                    <span>
+                      <strong>{diagnostic.logicalSurfaceId} membership:</strong> candidates {diagnostic.candidateSampleCount}; core {diagnostic.coreMemberCount} ({(diagnostic.coreMemberCount / total * 100).toFixed(1)}%) / expanded {diagnostic.expandedMemberCount} ({(diagnostic.expandedMemberCount / total * 100).toFixed(1)}%) / paintable {diagnostic.totalPaintableCount} ({(diagnostic.totalPaintableCount / total * 100).toFixed(1)}%) / uncertain {diagnostic.uncertainCount} ({(diagnostic.uncertainCount / total * 100).toFixed(1)}%).
+                    </span>
+                    <span>
+                      Residual m med/p90/p95 {diagnostic.planeResidualMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p90?.toFixed(3) ?? 'N/A'} / {diagnostic.planeResidualMeters.p95?.toFixed(3) ?? 'N/A'}; normal deg med/p90 {diagnostic.normalAngleDegrees.median?.toFixed(1) ?? 'N/A'} / {diagnostic.normalAngleDegrees.p90?.toFixed(1) ?? 'N/A'}; step m med/p90 {diagnostic.neighborDepthStepMeters.median?.toFixed(3) ?? 'N/A'} / {diagnostic.neighborDepthStepMeters.p90?.toFixed(3) ?? 'N/A'}.
+                    </span>
+                    <span>
+                      Expansion residual &lt;= {diagnostic.expansionPlaneResidualMeters.toFixed(3)} m, local normal dot &gt;= {diagnostic.expansionMinimumLocalNormalDot.toFixed(2)}, step &lt;= {diagnostic.expansionMaximumDepthStepMeters.toFixed(3)} m, radius &lt;= {diagnostic.expansionNeighborRadiusMeters.toFixed(3)} m; seed/local/grow/final {diagnostic.seedPassMs.toFixed(1)} / {diagnostic.localEvidenceMs.toFixed(1)} / {diagnostic.regionGrowthMs.toFixed(1)} / {diagnostic.finalizationMs.toFixed(1)} ms.
+                    </span>
+                    {reasons.length > 0 ? (
+                      <span>Unpainted reasons: {reasons.map(([reason, count]) => `${reason} ${count} (${(count / total * 100).toFixed(1)}%)`).join(' · ')}</span>
+                    ) : null}
+                  </div>
+                )
+              })}
               {realityTapHit ? (
                 <div className="scanner-reality-tap-diagnostics">
                   <span>

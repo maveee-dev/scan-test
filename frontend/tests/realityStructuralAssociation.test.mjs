@@ -73,6 +73,32 @@ function surfel(id, x, y, z, normal = { x: 0, y: 0, z: 1 }, color = { r: 0.5, g:
   }
 }
 
+function ceilingPatch(id = 'ceiling-a') {
+  const y = 2
+  return {
+    ...patch(id, { normal: { x: 0, y: 1, z: 0 }, planeConstant: y, role: 'ceiling' }),
+    vertices3D: [{ x: 0, y, z: 0 }, { x: 2, y, z: 0 }, { x: 2, y, z: 2 }, { x: 0, y, z: 2 }],
+    vertices2DLocal: [{ u: 0, v: 0 }, { u: 2, v: 0 }, { u: 2, v: 2 }, { u: 0, v: 2 }],
+    basis: {
+      origin: { x: 0, y, z: 0 },
+      axisU: { x: 1, y: 0, z: 0 },
+      axisV: { x: 0, y: 0, z: 1 },
+    },
+  }
+}
+
+function clusteredWallSamples({ badCenterNormal = false } = {}) {
+  const result = []
+  let id = 1
+  for (const y of [0.9, 0.92, 0.94]) {
+    for (const x of [0.9, 0.92, 0.94]) {
+      const center = Math.abs(x - 0.92) < 0.001 && Math.abs(y - 0.92) < 0.001
+      result.push(surfel(id++, x, y, 0.006, center && badCenterNormal ? { x: 0.75, y: 0, z: 0.66 } : { x: 0, y: 0, z: 1 }))
+    }
+  }
+  return result
+}
+
 // 1. Two coplanar, adjacent M7.4 patches belonging to same physical wall form 1 LogicalStructuralSurface.
 test('1. Two coplanar adjacent patches form 1 logical wall', () => {
   const patch1 = patch('wall-patch-1', { offsetX: 0, width: 2 })
@@ -261,4 +287,113 @@ test('14. Original captured RGB data remains 100% immutable', () => {
   association.buildRealityDesignColors(samples, table, [], 'patch')
 
   assert.equal(JSON.stringify(samples), originalJson, 'Original Reality surfels must remain completely unmodified')
+})
+
+// 15. A bad individual depth normal may expand when its bounded local wall
+// neighborhood supplies a strong plane-normal consensus.
+test('15. Noisy planar wall normal expands from strict local core', () => {
+  const samples = clusteredWallSamples({ badCenterNormal: true })
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const center = samples[4]
+  const index = samples.findIndex((sample) => sample.id === center.id)
+  assert.equal(table.memberships[index], association.RealityMembershipCode.EXPANDED_WALL_MEMBER)
+  assert.ok(table.coreWallMemberCount >= 6)
+  assert.ok(table.expandedWallMemberCount >= 1)
+})
+
+// 16. The same evidence model is orientation independent: ceiling samples do
+// not depend on a vertical-wall axis assumption.
+test('16. Noisy planar ceiling expands identically to a wall', () => {
+  const ceiling = ceilingPatch()
+  const samples = []
+  let id = 1
+  for (const z of [0.9, 0.92, 0.94]) {
+    for (const x of [0.9, 0.92, 0.94]) {
+      const center = Math.abs(x - 0.92) < 0.001 && Math.abs(z - 0.92) < 0.001
+      samples.push(surfel(id++, x, 2.006, z, center ? { x: 0.7, y: 0.7, z: 0 } : { x: 0, y: 1, z: 0 }))
+    }
+  }
+  const table = association.associateRealitySurfels(samples, [ceiling])
+  assert.equal(table.memberships[4], association.RealityMembershipCode.EXPANDED_WALL_MEMBER)
+  assert.equal(table.logicalSurfaces[0].role, 'ceiling')
+})
+
+// 17. Logical member-patch union allows two observed fragments of one wall to
+// share a paint identity without turning the unobserved opening into geometry.
+test('17. Continuous logical member patches share expanded paint domain', () => {
+  const first = patch('wall-a', { offsetX: 0, width: 1 })
+  const second = patch('wall-b', { offsetX: 1.05, width: 1 })
+  const samples = [
+    ...clusteredWallSamples(),
+    ...clusteredWallSamples().map((sample, index) => surfel(100 + index, sample.position.x + 1.05, sample.position.y, sample.position.z)),
+  ]
+  const table = association.associateRealitySurfels(samples, [first, second])
+  assert.equal(table.logicalSurfaces.length, 1)
+  const colors = association.buildRealityDesignColors(samples, table, [{ surfaceId: table.logicalSurfaces[0].id, paintColor: '#3366cc' }])
+  assert.equal(colors.size, samples.length)
+})
+
+// 18. A lone noisy point does not become paintable merely because it lies in a
+// structural polygon; it is explicitly UNCERTAIN instead of default NON_WALL.
+test('18. Isolated plausible noisy sample remains uncertain, not wall-member', () => {
+  const table = association.associateRealitySurfels([surfel(1, 1, 1, 0.02, { x: 1, y: 0, z: 0 })], [patch('wall-a')])
+  assert.equal(table.memberships[0], association.RealityMembershipCode.UNCERTAIN)
+})
+
+// 19. A close curtain with a wall-like normal is protected by the measured
+// out-of-plane step; it cannot grow from the wall core.
+test('19. Close wall-like curtain blocks propagation', () => {
+  const samples = [
+    ...clusteredWallSamples(),
+    surfel(50, 0.95, 0.92, 0.028),
+    surfel(51, 0.97, 0.92, 0.028),
+  ]
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const curtainIndexes = [50, 51].map((id) => samples.findIndex((sample) => sample.id === id))
+  for (const index of curtainIndexes) assert.equal(association.isPaintableRealityMembership(table.memberships[index]), false)
+})
+
+// 20. Large depth discontinuities remain hard barriers and are classified as
+// positive foreground evidence rather than receiving design paint.
+test('20. Large depth discontinuity remains non-wall', () => {
+  const samples = [...clusteredWallSamples(), surfel(90, 0.96, 0.92, 0.06)]
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  assert.equal(table.memberships[samples.length - 1], association.RealityMembershipCode.NON_WALL)
+})
+
+// 21. A disconnected coplanar component without structural seed support is
+// uncertain rather than painted across a large empty region.
+test('21. Disconnected coplanar component is not painted', () => {
+  const wall = patch('wall-a', { width: 4 })
+  const structuralSupport = [{ position: { x: 1, y: 1, z: 0 }, normal: { x: 0, y: 0, z: 1 } }]
+  const samples = [surfel(1, 1, 1, 0.006), surfel(2, 3.5, 1, 0.006)]
+  const table = association.associateRealitySurfels(samples, [wall], structuralSupport)
+  assert.equal(table.memberships[0], association.RealityMembershipCode.CORE_WALL_MEMBER)
+  assert.equal(table.memberships[1], association.RealityMembershipCode.UNCERTAIN)
+})
+
+// 22. Core and expanded classifications both paint; uncertain/non-wall keep
+// original RGB and therefore cannot mutate the Reality Original snapshot.
+test('22. Core and expanded paint while uncertain and non-wall preserve RGB', () => {
+  const samples = [...clusteredWallSamples({ badCenterNormal: true }), surfel(90, 1.5, 1, 0.02, { x: 1, y: 0, z: 0 }), surfel(91, 1.6, 1, 0.06)]
+  const original = JSON.stringify(samples)
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const colors = association.buildRealityDesignColors(samples, table, [{ surfaceId: 'logical-wall-1', paintColor: '#ff0033' }])
+  assert.ok(colors.has(samples[0].id))
+  assert.ok(colors.has(samples[4].id))
+  assert.equal(colors.has(90), false)
+  assert.equal(colors.has(91), false)
+  assert.equal(JSON.stringify(samples), original)
+})
+
+// 23. Expanded geometry is selectable; nearby foreground/non-wall geometry is
+// still rejected by the same membership lookup used by triangle voting.
+test('23. Expanded wall tap is accepted and foreground tap is rejected', () => {
+  const samples = clusteredWallSamples({ badCenterNormal: true })
+  const table = association.associateRealitySurfels(samples, [patch('wall-a')])
+  const center = samples[4].position
+  const expandedTap = association.evaluateRealityTapHit(center, { x: 0, y: 0, z: 1 }, null, table)
+  assert.equal(expandedTap.accepted, true)
+  const curtainTap = association.evaluateRealityTapHit({ x: center.x, y: center.y, z: 0.06 }, { x: 0, y: 0, z: 1 }, null, table)
+  assert.equal(curtainTap.accepted, false)
 })
