@@ -52,7 +52,7 @@ import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
 } from '../services/logicalSurfaceService'
-import { VisibleWallMaskCode, VisibleWallMaskEvidenceCode, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
+import { VisibleWallMaskCode, VisibleWallMaskEvidenceCode, VisibleWallMaskTerminalReason, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -97,7 +97,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'paintability-evidence' | 'non-wall-uncertain' | 'projected-3d-mask'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -838,9 +838,9 @@ function FinalizedSpatialScanPreview({
         image.data[offset] = maskValue === VisibleWallMaskCode.WALL ? 34 : maskValue === VisibleWallMaskCode.NON_WALL ? 232 : 80
         image.data[offset + 1] = maskValue === VisibleWallMaskCode.WALL ? 184 : maskValue === VisibleWallMaskCode.NON_WALL ? 67 : 80
         image.data[offset + 2] = maskValue === VisibleWallMaskCode.WALL ? 255 : maskValue === VisibleWallMaskCode.NON_WALL ? 181 : 80
-      } else if (realityKeyframeDebugMode === 'paintability-evidence' || realityKeyframeDebugMode === 'preserved-object-evidence') {
+      } else if (realityKeyframeDebugMode === 'paintability-evidence' || realityKeyframeDebugMode === 'preserved-object-evidence' || realityKeyframeDebugMode === 'preserved-visual-islands' || realityKeyframeDebugMode === 'secondary-wall-expansion') {
         const reason = mask.evidence[pixel]
-        const preserveOnly = realityKeyframeDebugMode === 'preserved-object-evidence'
+        const preserveOnly = realityKeyframeDebugMode === 'preserved-object-evidence' || realityKeyframeDebugMode === 'preserved-visual-islands'
         const preserve = reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT || reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT || reason === VisibleWallMaskEvidenceCode.UNCERTAIN
         if (preserveOnly && !preserve) {
           image.data[offset] = sourceR * 0.12; image.data[offset + 1] = sourceG * 0.12; image.data[offset + 2] = sourceB * 0.12
@@ -848,12 +848,29 @@ function FinalizedSpatialScanPreview({
           image.data[offset] = 248; image.data[offset + 1] = 255; image.data[offset + 2] = 122
         } else if (reason === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH) {
           image.data[offset] = 34; image.data[offset + 1] = 184; image.data[offset + 2] = 255
+        } else if (reason === VisibleWallMaskEvidenceCode.SECONDARY_WALL_EXPANSION) {
+          image.data[offset] = 76; image.data[offset + 1] = 222; image.data[offset + 2] = 150
         } else if (reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT) {
           image.data[offset] = 255; image.data[offset + 1] = 114; image.data[offset + 2] = 64
         } else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) {
           image.data[offset] = 232; image.data[offset + 1] = 67; image.data[offset + 2] = 181
         } else {
           image.data[offset] = 100; image.data[offset + 1] = 100; image.data[offset + 2] = 100
+        }
+      } else if (realityKeyframeDebugMode === 'uncertain-terminal-reasons') {
+        const reason = mask.terminalReasons[pixel]
+        if (maskValue !== VisibleWallMaskCode.UNCERTAIN) {
+          image.data[offset] = sourceR * 0.12; image.data[offset + 1] = sourceG * 0.12; image.data[offset + 2] = sourceB * 0.12
+        } else if (reason === VisibleWallMaskTerminalReason.SEED_COLOR_MISMATCH) {
+          image.data[offset] = 255; image.data[offset + 1] = 190; image.data[offset + 2] = 64
+        } else if (reason === VisibleWallMaskTerminalReason.LOCAL_CONTINUITY_BREAK) {
+          image.data[offset] = 255; image.data[offset + 1] = 120; image.data[offset + 2] = 64
+        } else if (reason === VisibleWallMaskTerminalReason.STRONG_GRADIENT_BOUNDARY) {
+          image.data[offset] = 232; image.data[offset + 1] = 67; image.data[offset + 2] = 181
+        } else if (reason === VisibleWallMaskTerminalReason.OBJECT_BOUNDARY || reason === VisibleWallMaskTerminalReason.ENCLOSED_REGION) {
+          image.data[offset] = 255; image.data[offset + 1] = 64; image.data[offset + 2] = 96
+        } else {
+          image.data[offset] = 112; image.data[offset + 1] = 112; image.data[offset + 2] = 112
         }
       } else if (realityKeyframeDebugMode === 'non-wall-uncertain') {
         const preserve = maskValue !== VisibleWallMaskCode.WALL
@@ -1806,6 +1823,9 @@ function FinalizedSpatialScanPreview({
                   ['rgb-wall-mask', 'RGB Wall Mask'],
                   ['paintability-evidence', 'Paintability Evidence'],
                   ['preserved-object-evidence', 'Preserved Object Evidence'],
+                  ['preserved-visual-islands', 'Preserved Visual Islands'],
+                  ['secondary-wall-expansion', 'Secondary Wall Expansion'],
+                  ['uncertain-terminal-reasons', 'Uncertain Terminal Reasons'],
                   ['non-wall-uncertain', 'Non-Wall / Uncertain'],
                   ['projected-3d-mask', '3D Projected Wall Mask'],
                 ] as const).map(([debugMode, label]) => (
@@ -1838,9 +1858,17 @@ function FinalizedSpatialScanPreview({
                   </span>
                   {selectedVisibleWallMaskSurface.masks.map((mask) => (
                     <span key={`${selectedVisibleWallMaskSurface.logicalSurfaceId}-${mask.keyframeId}`}>
-                      KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, wall seed/grown {mask.seedWallPixelCount}/{mask.grownWallPixelCount}; preserved strong/enclosed {mask.strongVisualObjectPixelCount}/{mask.enclosedVisualObjectPixelCount}; uncertain {mask.uncertainPixelCount}; quality {mask.qualityScore.toFixed(2)}.
+                      KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, wall seed/primary/secondary {mask.seedWallPixelCount}/{mask.grownWallPixelCount}/{mask.secondaryExpandedWallPixelCount}; preserved strong/enclosed {mask.strongVisualObjectPixelCount}/{mask.enclosedVisualObjectPixelCount}; uncertain {mask.uncertainPixelCount}; islands {mask.preservedIslands.length}; quality {mask.qualityScore.toFixed(2)}.
                     </span>
                   ))}
+                  <span>
+                    3D unresolved reasons: {Object.entries(selectedVisibleWallMaskSurface.threeDUncertainReasonCounts).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(' / ') || 'none'}.
+                  </span>
+                  {visibleWallMask.result ? (
+                    <span>
+                      RGB-mask worker: preserved-island analysis {visibleWallMask.result.componentAnalysisMs.toFixed(1)} ms / secondary expansion {visibleWallMask.result.secondaryExpansionMs.toFixed(1)} ms / 3D projection {visibleWallMask.result.projectionMs.toFixed(1)} ms / total {visibleWallMask.result.preparationMs.toFixed(1)} ms / {(visibleWallMask.result.memoryBytes / 1024).toFixed(1)} KiB.
+                    </span>
+                  ) : null}
                 </>
               ) : null}
               {realityRenderStats?.mode === realityRenderMode ? (

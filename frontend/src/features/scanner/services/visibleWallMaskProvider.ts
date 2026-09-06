@@ -12,13 +12,33 @@ export const VisibleWallMaskEvidenceCode = {
   STRONG_VISUAL_OBJECT: 3,
   ENCLOSED_VISUAL_OBJECT: 4,
   UNCERTAIN: 5,
+  SECONDARY_WALL_EXPANSION: 6,
 } as const
+
+/** Mutually exclusive final explanation for pixels left unpainted. */
+export const VisibleWallMaskTerminalReason = {
+  NONE: 0,
+  NO_REACHABLE_WALL_SEED: 1,
+  SEED_COLOR_MISMATCH: 2,
+  LOCAL_CONTINUITY_BREAK: 3,
+  STRONG_GRADIENT_BOUNDARY: 4,
+  OBJECT_BOUNDARY: 5,
+  ENCLOSED_REGION: 6,
+  INSUFFICIENT_NEIGHBOR_SUPPORT: 7,
+} as const
+
+export interface PreservedVisualIsland {
+  readonly pixelCount: number
+  readonly boundaryClosureScore: number
+  readonly wallSurroundScore: number
+}
 
 export interface VisibleWallMaskKeyframe {
   readonly keyframeId: number
   readonly roi: { x: number; y: number; width: number; height: number }
   readonly mask: Uint8Array
   readonly evidence: Uint8Array
+  readonly terminalReasons: Uint8Array
   /** Pixel indices of high-confidence projected structural/Reality seeds. */
   readonly seedPixels: Uint32Array
   readonly seedPixelCount: number
@@ -29,6 +49,8 @@ export interface VisibleWallMaskKeyframe {
   readonly grownWallPixelCount: number
   readonly strongVisualObjectPixelCount: number
   readonly enclosedVisualObjectPixelCount: number
+  readonly secondaryExpandedWallPixelCount: number
+  readonly preservedIslands: readonly PreservedVisualIsland[]
   readonly projectedAreaPixels: number
   readonly qualityScore: number
 }
@@ -45,6 +67,7 @@ export interface VisibleWallMaskSurfaceResult {
   readonly wallConfirmedSampleCount: number
   readonly nonWallSampleCount: number
   readonly uncertainSampleCount: number
+  readonly threeDUncertainReasonCounts: Readonly<Record<string, number>>
 }
 
 export interface VisibleWallMaskResult {
@@ -55,6 +78,8 @@ export interface VisibleWallMaskResult {
   readonly preparationMs: number
   readonly projectionMs: number
   readonly maskMs: number
+  readonly componentAnalysisMs: number
+  readonly secondaryExpansionMs: number
   readonly memoryBytes: number
 }
 
@@ -75,6 +100,10 @@ const STRONG_OBJECT_LUMINANCE_DISTANCE = 0.55
 const ENCLOSED_OBJECT_MIN_PIXELS = 4
 const ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE = 0.055
 const ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE = 0.10
+const COMPONENT_EDGE_CHROMA_DISTANCE = 0.07
+const COMPONENT_EDGE_LUMINANCE_DISTANCE = 0.14
+const SECONDARY_WALL_CHROMA_DISTANCE = 0.17
+const SECONDARY_WALL_LUMINANCE_DISTANCE = 0.34
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -138,41 +167,132 @@ function forEachRoiNeighbor(x: number, y: number, roi: { x: number; y: number; w
   if (y + 1 < roi.y + roi.height) visit(x, y + 1)
 }
 
-function preserveEnclosedVisualObjects(
+function visualEdge(first: readonly number[], second: readonly number[]): boolean {
+  return chromaDistance(first, second) > COMPONENT_EDGE_CHROMA_DISTANCE ||
+    Math.abs(luminance(first) - luminance(second)) > COMPONENT_EDGE_LUMINANCE_DISTANCE
+}
+
+interface UncertainRegion {
+  readonly pixels: readonly number[]
+  readonly touchesRoiBoundary: boolean
+  readonly wallBoundaryCount: number
+  readonly objectBoundaryCount: number
+  readonly boundaryChroma: number
+  readonly boundaryLuminance: number
+  readonly meanColor: readonly number[]
+}
+
+function collectUncertainRegions(
   frame: RealityRgbKeyframe,
   roi: { x: number; y: number; width: number; height: number },
   mask: Uint8Array,
-  evidence: Uint8Array,
-): void {
+): UncertainRegion[] {
   const visited = new Uint8Array(mask.length), queue: number[] = [], component: number[] = []
+  const regions: UncertainRegion[] = []
   for (let y = roi.y; y < roi.y + roi.height; y++) for (let x = roi.x; x < roi.x + roi.width; x++) {
     const start = y * frame.width + x
     if (visited[start] || mask[start] !== VisibleWallMaskCode.UNCERTAIN) continue
     queue.length = 0; component.length = 0; queue.push(start); visited[start] = 1
-    let touchesRoiBoundary = false, boundaryCount = 0, chromaSum = 0, luminanceSum = 0
+    let touchesRoiBoundary = false, wallBoundaryCount = 0, objectBoundaryCount = 0, chromaSum = 0, luminanceSum = 0
+    const colorSum = [0, 0, 0]
     while (queue.length > 0) {
       const current = queue.pop() as number, currentX = current % frame.width, currentY = Math.floor(current / frame.width)
       component.push(current)
       if (currentX === roi.x || currentX === roi.x + roi.width - 1 || currentY === roi.y || currentY === roi.y + roi.height - 1) touchesRoiBoundary = true
       const currentColor = rgb(frame, currentX, currentY)
+      colorSum[0] += currentColor[0]; colorSum[1] += currentColor[1]; colorSum[2] += currentColor[2]
       forEachRoiNeighbor(currentX, currentY, roi, (nextX, nextY) => {
         const next = nextY * frame.width + nextX
-        if (mask[next] === VisibleWallMaskCode.UNCERTAIN && !visited[next]) { visited[next] = 1; queue.push(next) }
+        if (mask[next] === VisibleWallMaskCode.UNCERTAIN && !visited[next] && !visualEdge(currentColor, rgb(frame, nextX, nextY))) { visited[next] = 1; queue.push(next) }
         if (mask[next] === VisibleWallMaskCode.WALL) {
           const neighborColor = rgb(frame, nextX, nextY)
           chromaSum += chromaDistance(currentColor, neighborColor)
           luminanceSum += Math.abs(luminance(currentColor) - luminance(neighborColor))
-          boundaryCount++
+          wallBoundaryCount++
         }
+        else if (mask[next] === VisibleWallMaskCode.NON_WALL) objectBoundaryCount++
       })
     }
-    const meanChroma = boundaryCount > 0 ? chromaSum / boundaryCount : 0
-    const meanLuminance = boundaryCount > 0 ? luminanceSum / boundaryCount : 0
-    const enclosedDistinctObject = !touchesRoiBoundary && component.length >= ENCLOSED_OBJECT_MIN_PIXELS && boundaryCount >= 2 &&
-      (meanChroma >= ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE || meanLuminance >= ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE)
-    for (const pixel of component) evidence[pixel] = enclosedDistinctObject ? VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT : VisibleWallMaskEvidenceCode.UNCERTAIN
-    if (enclosedDistinctObject) for (const pixel of component) mask[pixel] = VisibleWallMaskCode.NON_WALL
+    regions.push({
+      pixels: [...component],
+      touchesRoiBoundary,
+      wallBoundaryCount,
+      objectBoundaryCount,
+      boundaryChroma: wallBoundaryCount > 0 ? chromaSum / wallBoundaryCount : 0,
+      boundaryLuminance: wallBoundaryCount > 0 ? luminanceSum / wallBoundaryCount : 0,
+      meanColor: [colorSum[0] / component.length, colorSum[1] / component.length, colorSum[2] / component.length],
+    })
   }
+  return regions
+}
+
+function expandWallLikeUncertainRegions(
+  frame: RealityRgbKeyframe,
+  roi: { x: number; y: number; width: number; height: number },
+  mask: Uint8Array,
+  evidence: Uint8Array,
+  terminalReasons: Uint8Array,
+  wallMean: readonly number[],
+): void {
+  for (const region of collectUncertainRegions(frame, roi, mask)) {
+    const chroma = chromaDistance(region.meanColor, wallMean)
+    const luma = Math.abs(luminance(region.meanColor) - luminance(wallMean))
+    // A broad smooth wall/shadow region has confirmed wall contact, no object
+    // contact, and remains broadly wall-coloured. It can bridge around a
+    // protected island but never cross a high-gradient island boundary.
+    const likelyWall = region.wallBoundaryCount >= 2 && region.objectBoundaryCount === 0 &&
+      chroma <= SECONDARY_WALL_CHROMA_DISTANCE && luma <= SECONDARY_WALL_LUMINANCE_DISTANCE &&
+      region.boundaryChroma < COMPONENT_EDGE_CHROMA_DISTANCE && region.boundaryLuminance < COMPONENT_EDGE_LUMINANCE_DISTANCE
+    if (likelyWall) {
+      for (const pixel of region.pixels) {
+        mask[pixel] = VisibleWallMaskCode.WALL
+        evidence[pixel] = VisibleWallMaskEvidenceCode.SECONDARY_WALL_EXPANSION
+        terminalReasons[pixel] = VisibleWallMaskTerminalReason.NONE
+      }
+    }
+  }
+}
+
+function preserveEnclosedVisualObjects(
+  frame: RealityRgbKeyframe,
+  roi: { x: number; y: number; width: number; height: number },
+  mask: Uint8Array,
+  evidence: Uint8Array,
+  terminalReasons: Uint8Array,
+  wallMean: readonly number[],
+): PreservedVisualIsland[] {
+  const islands: PreservedVisualIsland[] = []
+  for (const region of collectUncertainRegions(frame, roi, mask)) {
+    const totalBoundary = Math.max(1, region.wallBoundaryCount + region.objectBoundaryCount)
+    const wallSurroundScore = region.wallBoundaryCount / totalBoundary
+    const boundaryClosureScore = region.wallBoundaryCount / Math.max(1, region.wallBoundaryCount + (region.touchesRoiBoundary ? region.pixels.length : 0))
+    const distinctFromWall = chromaDistance(region.meanColor, wallMean) >= ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE ||
+      Math.abs(luminance(region.meanColor) - luminance(wallMean)) >= ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE
+    const boundedObject = !region.touchesRoiBoundary && region.pixels.length >= ENCLOSED_OBJECT_MIN_PIXELS &&
+      region.wallBoundaryCount >= 2 && wallSurroundScore >= 0.5 && distinctFromWall &&
+      (region.boundaryChroma >= ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE || region.boundaryLuminance >= ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE)
+    if (boundedObject) {
+      for (const pixel of region.pixels) {
+        mask[pixel] = VisibleWallMaskCode.NON_WALL
+        evidence[pixel] = VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT
+        terminalReasons[pixel] = VisibleWallMaskTerminalReason.ENCLOSED_REGION
+      }
+      islands.push({ pixelCount: region.pixels.length, boundaryClosureScore, wallSurroundScore })
+      continue
+    }
+    const terminal = region.objectBoundaryCount > 0
+      ? VisibleWallMaskTerminalReason.OBJECT_BOUNDARY
+      : region.wallBoundaryCount < 2
+        ? VisibleWallMaskTerminalReason.INSUFFICIENT_NEIGHBOR_SUPPORT
+        : region.boundaryChroma >= COMPONENT_EDGE_CHROMA_DISTANCE || region.boundaryLuminance >= COMPONENT_EDGE_LUMINANCE_DISTANCE
+          ? VisibleWallMaskTerminalReason.STRONG_GRADIENT_BOUNDARY
+          : VisibleWallMaskTerminalReason.LOCAL_CONTINUITY_BREAK
+    for (const pixel of region.pixels) {
+      evidence[pixel] = VisibleWallMaskEvidenceCode.UNCERTAIN
+      terminalReasons[pixel] = terminal
+    }
+  }
+  return islands
 }
 
 /** Local deterministic seed-and-grow mask provider; replaceable by future semantic providers. */
@@ -185,14 +305,14 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
     // first deterministic logical surface rather than oscillating by loop order.
     const sampleVoteStrength = new Uint8Array(surfels.length)
     const surfaces: VisibleWallMaskSurfaceResult[] = []
-    let projectionMs = 0, maskMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
+    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
     const projection = { u: 0, v: 0 }, pixel = { x: 0, y: 0 }
     for (let logicalIndex = 0; logicalIndex < table.logicalSurfaces.length; logicalIndex++) {
       const vertices = surfaceVertices(table, logicalIndex)
       const ranked = keyframes.keyframes.map((frame) => ({ frame, roi: roiFor(frame, vertices) })).filter((entry): entry is { frame: RealityRgbKeyframe; roi: NonNullable<ReturnType<typeof roiFor>> } => entry.roi !== null).sort((left, right) => right.roi.area * right.frame.qualityScore - left.roi.area * left.frame.qualityScore).slice(0, MAX_KEYFRAMES_PER_SURFACE)
       const masks: VisibleWallMaskKeyframe[] = []
       for (const entry of ranked) {
-        const maskStarted = timestamp(), mask = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskCode.UNCERTAIN), evidence = new Uint8Array(entry.frame.width * entry.frame.height)
+        const maskStarted = timestamp(), mask = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskCode.UNCERTAIN), evidence = new Uint8Array(entry.frame.width * entry.frame.height), terminalReasons = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskTerminalReason.NO_REACHABLE_WALL_SEED)
         const seedColors: number[][] = [], seedPixels: number[] = []
         for (let index = 0; index < surfels.length; index++) {
           const membership = table.memberships[index]
@@ -205,6 +325,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
             seedPixels.push(seedPixel)
             mask[seedPixel] = VisibleWallMaskCode.WALL
             evidence[seedPixel] = VisibleWallMaskEvidenceCode.STRUCTURAL_SEED
+            terminalReasons[seedPixel] = VisibleWallMaskTerminalReason.NONE
           }
         }
         if (seedColors.length === 0) continue
@@ -224,38 +345,66 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
             if (chroma <= WALL_GROWTH_CHROMA_DISTANCE && luminanceDifference <= WALL_GROWTH_LUMINANCE_DISTANCE && localChroma <= WALL_LOCAL_EDGE_CHROMA_DISTANCE && localLuminanceDifference <= WALL_LOCAL_EDGE_LUMINANCE_DISTANCE) {
               mask[next] = VisibleWallMaskCode.WALL
               evidence[next] = VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH
+              terminalReasons[next] = VisibleWallMaskTerminalReason.NONE
               queue.push(next)
             } else if (chroma > STRONG_OBJECT_CHROMA_DISTANCE || luminanceDifference > STRONG_OBJECT_LUMINANCE_DISTANCE) {
               mask[next] = VisibleWallMaskCode.NON_WALL
               evidence[next] = VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT
+              terminalReasons[next] = VisibleWallMaskTerminalReason.OBJECT_BOUNDARY
+            } else if (chroma > WALL_GROWTH_CHROMA_DISTANCE || luminanceDifference > WALL_GROWTH_LUMINANCE_DISTANCE) {
+              terminalReasons[next] = VisibleWallMaskTerminalReason.SEED_COLOR_MISMATCH
+            } else {
+              terminalReasons[next] = VisibleWallMaskTerminalReason.LOCAL_CONTINUITY_BREAK
             }
           })
         }
-        preserveEnclosedVisualObjects(entry.frame, entry.roi, mask, evidence)
-        let wall = 0, nonWall = 0, uncertain = 0, seedWall = 0, grownWall = 0, strongObject = 0, enclosedObject = 0
+        // First recover smooth wall-like regions; then identify enclosed
+        // visually distinct islands against the newly established surround.
+        const expansionStarted = timestamp()
+        expandWallLikeUncertainRegions(entry.frame, entry.roi, mask, evidence, terminalReasons, mean)
+        secondaryExpansionMs += timestamp() - expansionStarted
+        const componentStarted = timestamp()
+        const islands = preserveEnclosedVisualObjects(entry.frame, entry.roi, mask, evidence, terminalReasons, mean)
+        componentAnalysisMs += timestamp() - componentStarted
+        let wall = 0, nonWall = 0, uncertain = 0, seedWall = 0, grownWall = 0, secondaryWall = 0, strongObject = 0, enclosedObject = 0
         for (let y = entry.roi.y; y < entry.roi.y + entry.roi.height; y++) for (let x = entry.roi.x; x < entry.roi.x + entry.roi.width; x++) {
           const cell = y * entry.frame.width + x, value = mask[cell], reason = evidence[cell]
           if (value === VisibleWallMaskCode.WALL) wall++; else if (value === VisibleWallMaskCode.NON_WALL) nonWall++; else uncertain++
           if (reason === VisibleWallMaskEvidenceCode.STRUCTURAL_SEED) seedWall++
           else if (reason === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH) grownWall++
+          else if (reason === VisibleWallMaskEvidenceCode.SECONDARY_WALL_EXPANSION) secondaryWall++
           else if (reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT) strongObject++
           else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) enclosedObject++
         }
         const seedPixelArray = new Uint32Array(seedPixels)
-        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + seedPixelArray.byteLength
-        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
+        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + terminalReasons.byteLength + seedPixelArray.byteLength
+        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, terminalReasons, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, secondaryExpandedWallPixelCount: secondaryWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, preservedIslands: islands, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
       }
       let wallConfirmed = 0, nonWall = 0, uncertain = 0
+      const threeDUncertainReasonCounts: Record<string, number> = {
+        'not observed enough': 0,
+        'conflicting keyframes': 0,
+        '2D mask uncertain': 0,
+        'object evidence': 0,
+        'UV outside': 0,
+        'insufficient wall votes': 0,
+      }
+      const frameById = new Map(keyframes.keyframes.map((frame) => [frame.id, frame]))
       const projectionStarted = timestamp()
       for (let index = 0; index < surfels.length; index++) {
-        let wallVotes = 0, nonWallVotes = 0, uncertainVotes = 0
+        let wallVotes = 0, nonWallVotes = 0, uncertainVotes = 0, observedVotes = 0, strongestWallQuality = 0
         for (const mask of masks) {
-          const frame = keyframes.keyframes.find((candidate) => candidate.id === mask.keyframeId)
+          const frame = frameById.get(mask.keyframeId)
           if (!frame || !project(surfels[index].position, frame, projection) || !mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, pixel)) continue
+          observedVotes++
           const value = mask.mask[pixel.y * frame.width + pixel.x]
-          if (value === VisibleWallMaskCode.WALL) wallVotes++; else if (value === VisibleWallMaskCode.NON_WALL) nonWallVotes++; else uncertainVotes++
+          if (value === VisibleWallMaskCode.WALL) { wallVotes++; strongestWallQuality = Math.max(strongestWallQuality, frame.qualityScore) }
+          else if (value === VisibleWallMaskCode.NON_WALL) nonWallVotes++
+          else uncertainVotes++
         }
-        if (wallVotes > nonWallVotes && wallVotes > 0) {
+        const strongBestWall = wallVotes === 1 && nonWallVotes === 0 && strongestWallQuality >= 0.9
+        const robustWall = wallVotes >= 2 && wallVotes > nonWallVotes
+        if (robustWall || strongBestWall) {
           const strength = wallVotes - nonWallVotes
           if (strength > sampleVoteStrength[index]) {
             sampleLogicalSurfaceIndices[index] = logicalIndex
@@ -263,9 +412,17 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
             sampleVoteStrength[index] = strength
           }
           wallConfirmed++
+        } else if (nonWallVotes > 0) {
+          nonWall++
+          if (wallVotes > 0) threeDUncertainReasonCounts['conflicting keyframes']++
+          else threeDUncertainReasonCounts['object evidence']++
+        } else {
+          uncertain++
+          if (observedVotes === 0) threeDUncertainReasonCounts['UV outside']++
+          else if (uncertainVotes === observedVotes) threeDUncertainReasonCounts['2D mask uncertain']++
+          else if (wallVotes === 0) threeDUncertainReasonCounts['not observed enough']++
+          else threeDUncertainReasonCounts['insufficient wall votes']++
         }
-        else if (nonWallVotes > 0) nonWall++
-        else if (uncertainVotes > 0) uncertain++
       }
       projectionMs += timestamp() - projectionStarted
       surfaces.push({
@@ -280,8 +437,9 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         wallConfirmedSampleCount: wallConfirmed,
         nonWallSampleCount: nonWall,
         uncertainSampleCount: uncertain,
+        threeDUncertainReasonCounts,
       })
     }
-    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, memoryBytes }
+    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, memoryBytes }
   }
 }

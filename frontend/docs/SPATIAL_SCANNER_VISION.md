@@ -1724,3 +1724,59 @@ paintable pixels, preserved-object pixels/coverage, preserved-uncertain pixels,
 and per-keyframe seed/grown/strong-object/enclosed-object/uncertain counts.
 The work remains bounded and post-scan; no XR capture rate, RGB-D registration,
 Dense Reality geometry, or Reality Original data changes.
+
+### M8.6.2 — Confident Wall Expansion Around Preserved Visual Islands
+
+M8.6.1 deliberately tightened the primary RGB wall-growth pass to protect
+attached visual content. Physical validation showed the intended precision
+gain, but too many normal wall pixels then remained `UNCERTAIN`. M8.6.2 keeps
+the strict seed definition and primary growth thresholds unchanged, and adds a
+separate bounded post-scan reconsideration pass:
+
+```
+strict wall seeds
+       ↓
+primary RGB growth
+       ↓
+visual-edge-separated uncertain regions
+       ↓
+preserved visual islands + secondary wall expansion
+       ↓
+multi-keyframe sample evidence
+       ↓
+WALL / OBJECT / UNCERTAIN
+       ↓
+Dense Reality triangle paint
+```
+
+Uncertain pixels are grouped only through locally smooth image appearance;
+strong RGB/luminance edges split components. A region can become secondary
+wall only when it touches confirmed wall in multiple places, has no preserved
+object contact, remains broadly compatible with the trusted wall appearance,
+and has no high-gradient boundary. This recovers smooth shadows and lighting
+variation without allowing the expansion to cross a decoration boundary.
+
+A bounded, visually distinct, sufficiently enclosed region surrounded by
+confirmed wall becomes a preserved visual island. It remains original Reality
+and acts as a hole around which the wall can continue. A colour difference by
+itself is still not enough: gradual connected variation remains wall, while a
+bounded high-contrast interior with strong surrounding support is preserved.
+The provider preserves any region that cannot meet either proof; `UNCERTAIN`
+is a safety state, not a substitute for object detection.
+
+Selected keyframes still fuse evidence by reprojection onto the same Dense
+Reality samples. M8.6.2 uses conservative multi-view sample voting (two wall
+votes, or a single high-quality uncontested wall vote) and reports mutually
+exclusive 3D unresolved reasons. It intentionally does not introduce a new
+wall-local UV raster in this release: M7 remains the semantic ROI prior and
+multi-view world-to-keyframe projection remains the final evidence path.
+
+Development diagnostics add secondary-wall expansion, preserved visual-island,
+and uncertain-terminal-reason views. Per keyframe they report strict seed,
+primary-grown, secondary-expanded, strong-object, enclosed-object, uncertain,
+and island counts. Per selected logical surface they report 3D unresolved
+reasons (`not observed enough`, `conflicting keyframes`, `2D mask uncertain`,
+`object evidence`, `UV outside`, or `insufficient wall votes`) plus bounded
+analysis/projection timings and memory. The refinement remains post-scan and
+does not alter keyframe cadence, camera capture, RGB-D registration, Dense
+Reality data, M7, or Reality Original.

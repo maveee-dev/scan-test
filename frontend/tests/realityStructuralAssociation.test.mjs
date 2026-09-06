@@ -999,5 +999,33 @@ test('60. Enclosed attached decoration becomes preserved-object evidence', () =>
   const mask = result.surfaces[0].masks[0]
   assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
   assert.ok(mask.enclosedVisualObjectPixelCount > 0, 'attached visual component must produce bounded preserved-object evidence')
+  assert.ok(mask.preservedIslands.length > 0, 'enclosed decoration must be surfaced as a protected visual island')
   assert.ok(result.surfaces[0].preservedObjectPixelCount > 0)
+})
+
+// 61. A smooth, shadow-like wall region can recover in secondary expansion without crossing a picture edge.
+test('61. Secondary wall expansion recovers wall-like uncertainty around a preserved island', () => {
+  const wall = patch('wall-secondary', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.2 })
+  const samples = [
+    surfel(741, -0.65, 0.2, -1), surfel(742, -0.55, 0.4, -1), surfel(743, -0.45, 0.55, -1),
+    surfel(744, 0.55, 0.1, -1),
+  ]
+  const frame = testKeyframe(1, 16, 16, false)
+  // A bounded brightness step remains broadly wall-coloured, but is too sharp
+  // for primary local growth. The region-level pass should recover it.
+  for (let y = 0; y < frame.height; y++) for (let x = 9; x < frame.width; x++) frame.rgb.set([143, 140, 134], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], 0)
+  assert.ok(result.surfaces[0].masks[0].secondaryExpandedWallPixelCount > 0)
+})
+
+// 62. The same bounded picture in two views strengthens preserved evidence rather than being repainted by a competing wall vote.
+test('62. Repeated visual island remains preserved across keyframes', () => {
+  const wall = patch('wall-cross-view', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(751, -0.55, 0.2, -1), surfel(752, -0.35, 0.4, -1), surfel(753, 0.5, 0.55, -1), surfel(754, 0, 0, -1)]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1), testKeyframe(2)]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.ok(result.surfaces[0].masks.every((mask) => mask.strongVisualObjectPixelCount + mask.enclosedVisualObjectPixelCount > 0))
 })
