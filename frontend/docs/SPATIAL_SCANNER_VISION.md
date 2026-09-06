@@ -1939,3 +1939,50 @@ geometry, M7 structural geometry, Original mode, and swatch-change reuse remain
 immutable. This is deterministic geometric/RGB evidence, not semantic AI;
 unframed or extremely weakly bounded near-coplanar content remains an honest
 limitation for a future replaceable mask provider.
+
+### M8.6.6 — Dominant Wall-Mounted Object Selection and Envelope Ranking
+
+M8.6.5 can form a technically valid completed envelope from several preserved
+regions, but not every valid envelope is a wall-mounted object. A shelf or
+lower furniture cluster can also contain object evidence and be correctly
+preserved, while being the wrong candidate to complete as a painting-sized
+wall mask hole. M8.6.6 therefore ranks completed-envelope candidates before
+they are allowed to add high-confidence object protection:
+
+```text
+PreservedVisualRegion
+       ↓
+completed-envelope candidate
+       ↓
+wall-mounted ranking and rejection
+       ↓
+dominant protected object envelope(s)
+       ↓
+existing wall-local fusion and 3D protection
+```
+
+The deterministic score combines outer-boundary closure, surrounding-wall
+support, bounded area, aspect, structural-wall-local placement, ROI edge
+margin, normalized cross-keyframe extent consistency, and sampled Dense
+Reality plane-offset/variance evidence. A candidate receives a substantial
+foreground penalty only when it is both materially farther from the structural
+wall and variable enough to resemble shelf or furniture geometry. This avoids
+penalizing the small, calibrated M7/Dense-Reality offset that a mounted frame
+can legitimately have.
+
+Candidates marked `dominant-wall-mounted` complete and protect their full
+envelope interior. `preserved-non-dominant` candidates retain their existing
+M8.6.4 object/foreground protection but cannot create a large completed
+painting envelope; rejected candidates remain diagnostic only. Multiple
+distinct strong wall-mounted candidates may be accepted independently, while
+separated paintings remain separate and a shelf below a painting is not merged
+into it. The M7 basis is used only to compare placement on the aligned wall,
+not to render an M7 polygon.
+
+Development views now show all candidates, their ranking, dominant wall-mounted
+objects, rejected major candidates, and final protected envelopes. Per-candidate
+diagnostics include area, aspect, wall-local height, edge proximity, closure,
+surround, depth offset/variance, cross-view support, foreground penalty, final
+score, and decision. Ranking and completed-envelope application remain local,
+bounded post-scan work; capture, original RGB, Dense Reality geometry, M7, and
+the Design renderer remain unchanged.

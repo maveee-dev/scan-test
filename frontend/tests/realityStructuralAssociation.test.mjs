@@ -1132,10 +1132,36 @@ test('69. Aligned black and gold painting regions complete one protected outer e
   const mask = result.surfaces[0].masks[0]
   const cluster = mask.preservedVisualObjectClusters.find((candidate) => candidate.accepted)
   assert.ok(cluster)
+  assert.equal(cluster.decision, 'dominant-wall-mounted')
   assert.equal(cluster.memberRegionIds.length, 2)
   assert.ok(cluster.filledInteriorPixelCount > cluster.memberAreaPixels)
   const interior = 7 * frame.width + 32
   assert.equal(mask.mask[interior], visibleWallMask.VisibleWallMaskCode.NON_WALL)
   assert.equal(mask.mask[7 * frame.width + 12], visibleWallMask.VisibleWallMaskCode.WALL)
   assert.equal(result.surfaces[0].threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.NON_WALL, 'completed object interior must project back to Dense Reality protection')
+})
+
+// 70. A lower, more protruding shelf can remain preserved without winning the
+// wall-mounted envelope ranking over a better enclosed, near-wall painting.
+test('70. Lower foreground shelf candidate loses wall-mounted envelope ranking', () => {
+  const wall = patch('wall-ranked-candidates', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [
+    surfel(831, -0.7, 0.25, -1), surfel(832, -0.2, 0.75, -1), surfel(833, 0.6, 1.25, -1),
+    surfel(834, -0.5, 0.15, -0.85), surfel(835, 0.15, 0.15, -0.85),
+    surfel(836, -0.5, 1.3, -1), surfel(837, 0.15, 1.3, -1),
+  ]
+  const frame = testKeyframe(1, 80, 80, false)
+  frame.projectionMatrix[5] = 0.5
+  for (let y = 12; y <= 17; y++) for (const startX of [18, 44]) for (let x = startX; x <= startX + 4; x++) frame.rgb.set(startX === 18 ? [8, 8, 8] : [212, 138, 28], (y * frame.width + x) * 3)
+  for (let y = 36; y <= 41; y++) for (const startX of [18, 44]) for (let x = startX; x <= startX + 4; x++) frame.rgb.set(startX === 18 ? [8, 8, 8] : [212, 138, 28], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  const candidates = result.surfaces[0].masks[0].preservedVisualObjectClusters
+  const upper = candidates.find((candidate) => candidate.centroid.y < 28)
+  const lower = candidates.find((candidate) => candidate.centroid.y > 28)
+  assert.ok(upper)
+  assert.ok(lower)
+  assert.equal(upper.decision, 'dominant-wall-mounted')
+  assert.equal(lower.decision, 'preserved-non-dominant')
+  assert.ok(lower.foregroundPenalty > upper.foregroundPenalty)
 })

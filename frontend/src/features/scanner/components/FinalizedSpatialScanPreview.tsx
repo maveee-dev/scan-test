@@ -105,7 +105,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes' | 'raw-object-fragments' | 'merged-object-regions' | 'preserved-region-interior' | 'object-clusters' | 'outer-boundary-candidates' | 'completed-object-envelope' | 'filled-object-interior' | 'wall-local-object-fusion' | 'wall-local-object-envelope' | 'object-boundary-band' | '3d-preserved-object-assignment' | '3d-completed-object-envelope'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes' | 'raw-object-fragments' | 'merged-object-regions' | 'preserved-region-interior' | 'object-clusters' | 'all-object-envelope-candidates' | 'candidate-ranking' | 'dominant-wall-mounted-objects' | 'rejected-major-candidates' | 'final-protected-envelope' | 'outer-boundary-candidates' | 'completed-object-envelope' | 'filled-object-interior' | 'wall-local-object-fusion' | 'wall-local-object-envelope' | 'object-boundary-band' | '3d-preserved-object-assignment' | '3d-completed-object-envelope'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -890,7 +890,7 @@ function FinalizedSpatialScanPreview({
     if (!context) return
     const image = context.createImageData(frame.width, frame.height)
     const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes' || realityKeyframeDebugMode === '3d-preserved-object-assignment' || realityKeyframeDebugMode === '3d-completed-object-envelope'
-    const objectRegionDebug = realityKeyframeDebugMode === 'raw-object-fragments' || realityKeyframeDebugMode === 'merged-object-regions' || realityKeyframeDebugMode === 'preserved-region-interior' || realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'outer-boundary-candidates' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior' || realityKeyframeDebugMode === 'object-boundary-band'
+    const objectRegionDebug = realityKeyframeDebugMode === 'raw-object-fragments' || realityKeyframeDebugMode === 'merged-object-regions' || realityKeyframeDebugMode === 'preserved-region-interior' || realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'all-object-envelope-candidates' || realityKeyframeDebugMode === 'candidate-ranking' || realityKeyframeDebugMode === 'dominant-wall-mounted-objects' || realityKeyframeDebugMode === 'rejected-major-candidates' || realityKeyframeDebugMode === 'final-protected-envelope' || realityKeyframeDebugMode === 'outer-boundary-candidates' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior' || realityKeyframeDebugMode === 'object-boundary-band'
     for (let pixel = 0; pixel < frame.width * frame.height; pixel++) {
       const offset = pixel * 4, maskValue = mask.mask[pixel]
       const sourceOffset = pixel * 3
@@ -954,8 +954,12 @@ function FinalizedSpatialScanPreview({
         for (const pixel of pixels) { const offset = pixel * 4; image.data[offset] = color[0]; image.data[offset + 1] = color[1]; image.data[offset + 2] = color[2]; image.data[offset + 3] = 255 }
       }
       if (realityKeyframeDebugMode === 'raw-object-fragments') paintPixels(mask.rawObjectFragmentPixels, [255, 114, 64])
-      else if (realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior') {
-        for (const cluster of mask.preservedVisualObjectClusters) if (cluster.accepted) paintPixels(cluster.pixelIndices, [232, 67, 181])
+      else if (realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'all-object-envelope-candidates' || realityKeyframeDebugMode === 'candidate-ranking' || realityKeyframeDebugMode === 'dominant-wall-mounted-objects' || realityKeyframeDebugMode === 'rejected-major-candidates' || realityKeyframeDebugMode === 'final-protected-envelope' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior') {
+        for (const cluster of mask.preservedVisualObjectClusters) {
+          if ((realityKeyframeDebugMode === 'dominant-wall-mounted-objects' || realityKeyframeDebugMode === 'final-protected-envelope' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior') && cluster.decision !== 'dominant-wall-mounted') continue
+          if (realityKeyframeDebugMode === 'rejected-major-candidates' && cluster.decision !== 'rejected') continue
+          paintPixels(cluster.pixelIndices, cluster.decision === 'dominant-wall-mounted' ? [232, 67, 181] : cluster.decision === 'preserved-non-dominant' ? [255, 154, 54] : [220, 70, 70])
+        }
       } else if (realityKeyframeDebugMode === 'outer-boundary-candidates') {
         for (const region of mask.preservedVisualRegions) paintPixels(region.pixelIndices, [255, 114, 64])
       } else for (const region of mask.preservedVisualRegions) paintPixels(region.pixelIndices, realityKeyframeDebugMode === 'object-boundary-band' ? [255, 216, 82] : [232, 67, 181])
@@ -997,10 +1001,10 @@ function FinalizedSpatialScanPreview({
       }
     }
     context.putImageData(image, 0, 0)
-    if (realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'outer-boundary-candidates' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior') {
+    if (realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'all-object-envelope-candidates' || realityKeyframeDebugMode === 'candidate-ranking' || realityKeyframeDebugMode === 'dominant-wall-mounted-objects' || realityKeyframeDebugMode === 'rejected-major-candidates' || realityKeyframeDebugMode === 'final-protected-envelope' || realityKeyframeDebugMode === 'outer-boundary-candidates' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior') {
       context.lineWidth = Math.max(1, Math.round(frame.width / 120))
       for (const cluster of mask.preservedVisualObjectClusters) {
-        context.strokeStyle = cluster.accepted ? '#f8ff7a' : '#ff7043'
+        context.strokeStyle = cluster.decision === 'dominant-wall-mounted' ? '#f8ff7a' : cluster.decision === 'preserved-non-dominant' ? '#ff9a36' : '#ff7043'
         context.beginPath()
         cluster.outerContour.forEach((point, index) => {
           if (index === 0) context.moveTo(point.x, point.y)
@@ -1961,6 +1965,11 @@ function FinalizedSpatialScanPreview({
                   ['merged-object-regions', 'Merged Object Regions'],
                   ['preserved-region-interior', 'Preserved Region Interior'],
                   ['object-clusters', 'Object Clusters'],
+                  ['all-object-envelope-candidates', 'All Object Envelope Candidates'],
+                  ['candidate-ranking', 'Candidate Ranking'],
+                  ['dominant-wall-mounted-objects', 'Dominant Wall-Mounted Objects'],
+                  ['rejected-major-candidates', 'Rejected Major Candidates'],
+                  ['final-protected-envelope', 'Final Protected Envelope'],
                   ['outer-boundary-candidates', 'Outer Boundary Candidates'],
                   ['completed-object-envelope', 'Completed Object Envelope'],
                   ['filled-object-interior', 'Filled Object Interior'],
@@ -2006,7 +2015,7 @@ function FinalizedSpatialScanPreview({
                     <span key={region.id}>Region {region.id}: {region.boundingBox.width} by {region.boundingBox.height} px, raw {region.rawFragmentPixelCount}, enclosure {region.enclosureScore.toFixed(2)}, wall surround {region.wallSurroundScore.toFixed(2)}, confidence {region.confidence.toFixed(2)}.</span>
                   )))}
                   {selectedVisibleWallMaskSurface.masks.flatMap((mask) => mask.preservedVisualObjectClusters.map((cluster) => (
-                    <span key={cluster.id}>Object cluster {cluster.id}: {cluster.accepted ? 'accepted' : `rejected (${cluster.rejectionReason ?? 'insufficient evidence'})`}; members {cluster.memberRegionIds.join(', ')}; envelope {cluster.boundingBox.width} by {cluster.boundingBox.height} px; closure {cluster.closureScore.toFixed(2)}; sides T/R/B/L {cluster.boundarySupport.top.toFixed(2)}/{cluster.boundarySupport.right.toFixed(2)}/{cluster.boundarySupport.bottom.toFixed(2)}/{cluster.boundarySupport.left.toFixed(2)}; wall surround {cluster.wallSurroundScore.toFixed(2)}; largest gap {cluster.largestContourGapPixels} px; filled {cluster.filledInteriorPixelCount} px; inferred sides {cluster.inferredBoundarySections.join(', ') || 'none'}; confidence {cluster.confidence.toFixed(2)}.</span>
+                    <span key={cluster.id}>Object candidate {cluster.id}: {cluster.decision}{cluster.rejectionReason ? ` (${cluster.rejectionReason})` : ''}; members {cluster.memberRegionIds.join(', ')}; envelope {cluster.boundingBox.width} by {cluster.boundingBox.height} px; aspect {cluster.aspectRatio.toFixed(2)}; height {cluster.heightOnWall.toFixed(2)}; ROI edge {cluster.roiEdgeProximity.toFixed(2)}; closure {cluster.closureScore.toFixed(2)}; sides T/R/B/L {cluster.boundarySupport.top.toFixed(2)}/{cluster.boundarySupport.right.toFixed(2)}/{cluster.boundarySupport.bottom.toFixed(2)}/{cluster.boundarySupport.left.toFixed(2)}; wall surround {cluster.wallSurroundScore.toFixed(2)}; depth offset/variance {cluster.depthOffsetMeters === null ? 'N/A' : `${cluster.depthOffsetMeters.toFixed(3)} m`}/{cluster.depthVarianceMeters === null ? 'N/A' : `${cluster.depthVarianceMeters.toFixed(3)} m`}; cross-view {cluster.crossKeyframeSupport.toFixed(2)}; foreground penalty {cluster.foregroundPenalty.toFixed(2)}; score {cluster.rankingScore.toFixed(2)}; largest gap {cluster.largestContourGapPixels} px; filled {cluster.filledInteriorPixelCount} px.</span>
                   )))}
                   {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion ? (
                     <span>Wall-local object fusion: {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.width} by {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.height}; object/wall/uncertain cells {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.objectSupportedCellCount}/{selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.wallSupportedCellCount}/{selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.uncertainCellCount}; fused regions {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.regionCount}; protected samples {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.protectedSampleCount}.</span>

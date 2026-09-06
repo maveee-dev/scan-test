@@ -83,6 +83,15 @@ export interface PreservedVisualObjectCluster {
   readonly confidence: number
   readonly accepted: boolean
   readonly rejectionReason: string | null
+  readonly aspectRatio: number
+  readonly heightOnWall: number
+  readonly roiEdgeProximity: number
+  readonly depthOffsetMeters: number | null
+  readonly depthVarianceMeters: number | null
+  readonly crossKeyframeSupport: number
+  readonly foregroundPenalty: number
+  readonly rankingScore: number
+  readonly decision: 'dominant-wall-mounted' | 'preserved-non-dominant' | 'rejected'
 }
 
 export interface WallLocalPreservedObjectFusion {
@@ -639,8 +648,6 @@ function completePreservedObjectOuterBoundaries(
   frame: RealityRgbKeyframe,
   roi: { x: number; y: number; width: number; height: number },
   mask: Uint8Array,
-  evidence: Uint8Array,
-  terminalReasons: Uint8Array,
   regions: readonly PreservedVisualRegion[],
 ): { clusters: readonly PreservedVisualObjectCluster[]; clusterFormationMs: number; outerBoundaryAnalysisMs: number; gapCompletionMs: number; interiorFillMs: number } {
   const formationStarted = timestamp()
@@ -695,9 +702,6 @@ function completePreservedObjectOuterBoundaries(
       const pixel = y * frame.width + x
       const isBand = x < minX || x > maxX || y < minY || y > maxY
       if (isBand) boundaryBandPixelCount++
-      mask[pixel] = VisibleWallMaskCode.NON_WALL
-      evidence[pixel] = VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT
-      terminalReasons[pixel] = VisibleWallMaskTerminalReason.ENCLOSED_REGION
       protectedPixels.push(pixel)
     }
     gapCompletionMs += timestamp() - gapStarted
@@ -708,10 +712,152 @@ function completePreservedObjectOuterBoundaries(
       outerContour,
       memberAreaPixels, filledInteriorPixelCount: protectedPixels.length, boundaryBandPixelCount, wallSurroundScore: surround, boundarySupport, closureScore, largestContourGapPixels: largestGap,
       inferredBoundarySections, confidence, accepted, rejectionReason,
+      aspectRatio: Math.max(box.width / Math.max(1, box.height), box.height / Math.max(1, box.width)),
+      heightOnWall: 1 - (box.y + box.height / 2 - roi.y) / Math.max(1, roi.height),
+      roiEdgeProximity: Math.min(box.x - roi.x, roi.x + roi.width - 1 - maxX, box.y - roi.y, roi.y + roi.height - 1 - maxY) / Math.max(1, Math.min(roi.width, roi.height)),
+      depthOffsetMeters: null, depthVarianceMeters: null, crossKeyframeSupport: 0, foregroundPenalty: 0, rankingScore: 0,
+      decision: accepted ? 'preserved-non-dominant' : 'rejected',
     })
     interiorFillMs += timestamp() - gapStarted
   }
   return { clusters, clusterFormationMs, outerBoundaryAnalysisMs: timestamp() - boundaryStarted - gapCompletionMs, gapCompletionMs, interiorFillMs }
+}
+
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) return null
+  const ordered = [...values].sort((left, right) => left - right), middle = Math.floor(ordered.length / 2)
+  return ordered.length % 2 === 0 ? (ordered[middle - 1] + ordered[middle]) / 2 : ordered[middle]
+}
+
+function clampUnit(value: number): number { return Math.max(0, Math.min(1, value)) }
+
+function normalizedClusterBox(cluster: PreservedVisualObjectCluster, roi: { x: number; y: number; width: number; height: number }): { x: number; y: number; width: number; height: number } {
+  return { x: (cluster.boundingBox.x - roi.x) / roi.width, y: (cluster.boundingBox.y - roi.y) / roi.height, width: cluster.boundingBox.width / roi.width, height: cluster.boundingBox.height / roi.height }
+}
+
+function crossKeyframeClusterSupport(cluster: PreservedVisualObjectCluster, owner: VisibleWallMaskKeyframe, masks: readonly VisibleWallMaskKeyframe[]): number {
+  const source = normalizedClusterBox(cluster, owner.roi)
+  let support = 0
+  for (const otherMask of masks) {
+    if (otherMask.keyframeId === owner.keyframeId) continue
+    for (const other of otherMask.preservedVisualObjectClusters) {
+      if (!other.accepted) continue
+      const target = normalizedClusterBox(other, otherMask.roi)
+      const sourceCenterX = source.x + source.width / 2, sourceCenterY = source.y + source.height / 2
+      const targetCenterX = target.x + target.width / 2, targetCenterY = target.y + target.height / 2
+      const centerDistance = Math.hypot(sourceCenterX - targetCenterX, sourceCenterY - targetCenterY)
+      const aspectDifference = Math.abs(Math.log(Math.max(EPSILON, cluster.aspectRatio) / Math.max(EPSILON, other.aspectRatio)))
+      if (centerDistance <= 0.24 && aspectDifference <= 0.7) { support++; break }
+    }
+  }
+  // One selected view is meaningful but cannot pretend to be multi-view proof.
+  return masks.length <= 1 ? 0.5 : support / Math.max(1, masks.length - 1)
+}
+
+function clusterGeometryEvidence(
+  cluster: PreservedVisualObjectCluster,
+  mask: VisibleWallMaskKeyframe,
+  frame: RealityRgbKeyframe,
+  surfels: readonly FinalizedRealitySurfel[],
+  referencePatch: RealityStructuralAssociationTable['patches'][number] | undefined,
+  wallLocalVRange: { min: number; max: number } | null,
+): { depthOffsetMeters: number | null; depthVarianceMeters: number | null; foregroundPenalty: number; wallLocalHeight: number | null } {
+  if (!referencePatch) return { depthOffsetMeters: null, depthVarianceMeters: null, foregroundPenalty: 0, wallLocalHeight: null }
+  const pixels = new Uint8Array(frame.width * frame.height)
+  for (const pixel of cluster.pixelIndices) pixels[pixel] = 1
+  const offsets: number[] = [], localVs: number[] = [], projected = { x: 0, y: 0 }
+  for (const surfel of surfels) {
+    if (!projectWorldPointToKeyframePixel(surfel.position, frame, projected) || !pixelInsideRoi(projected, mask.roi) || !pixels[projected.y * frame.width + projected.x]) continue
+    const normal = referencePatch.normal
+    offsets.push(Math.abs(normal.x * surfel.position.x + normal.y * surfel.position.y + normal.z * surfel.position.z - referencePatch.planeConstant))
+    if (wallLocalVRange) localVs.push(wallLocalCoordinate(surfel.position, referencePatch.basis).v)
+  }
+  const offset = median(offsets)
+  if (offset === null) return { depthOffsetMeters: null, depthVarianceMeters: null, foregroundPenalty: 0, wallLocalHeight: null }
+  const mean = offsets.reduce((sum, value) => sum + value, 0) / offsets.length
+  const variance = Math.sqrt(offsets.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / offsets.length)
+  // Calibrated Reality can legitimately sit a few centimetres from M7. Penalize
+  // only the larger, more variable offsets typical of shelf/furniture geometry.
+  const foregroundPenalty = clampUnit(Math.max(0, offset - 0.045) / 0.09 * 0.72 + Math.max(0, variance - 0.018) / 0.07 * 0.28)
+  const localV = median(localVs)
+  const wallLocalHeight = localV === null || !wallLocalVRange ? null : clampUnit((localV - wallLocalVRange.min) / Math.max(EPSILON, wallLocalVRange.max - wallLocalVRange.min))
+  return { depthOffsetMeters: offset, depthVarianceMeters: variance, foregroundPenalty, wallLocalHeight }
+}
+
+function summarizeMask(mask: VisibleWallMaskKeyframe, frame: RealityRgbKeyframe): Pick<VisibleWallMaskKeyframe, 'wallPixelCount' | 'nonWallPixelCount' | 'uncertainPixelCount' | 'seedWallPixelCount' | 'grownWallPixelCount' | 'strongVisualObjectPixelCount' | 'enclosedVisualObjectPixelCount' | 'secondaryExpandedWallPixelCount'> {
+  let wall = 0, nonWall = 0, uncertain = 0, seed = 0, grown = 0, strong = 0, enclosed = 0, secondary = 0
+  for (let y = mask.roi.y; y < mask.roi.y + mask.roi.height; y++) for (let x = mask.roi.x; x < mask.roi.x + mask.roi.width; x++) {
+    const pixel = y * frame.width + x
+    const value = mask.mask[pixel], reason = mask.evidence[pixel]
+    if (value === VisibleWallMaskCode.WALL) wall++; else if (value === VisibleWallMaskCode.NON_WALL) nonWall++; else uncertain++
+    if (reason === VisibleWallMaskEvidenceCode.STRUCTURAL_SEED) seed++
+    else if (reason === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH) grown++
+    else if (reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT) strong++
+    else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) enclosed++
+    else if (reason === VisibleWallMaskEvidenceCode.SECONDARY_WALL_EXPANSION) secondary++
+  }
+  return { wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seed, grownWallPixelCount: grown, strongVisualObjectPixelCount: strong, enclosedVisualObjectPixelCount: enclosed, secondaryExpandedWallPixelCount: secondary }
+}
+
+function rankAndApplyDominantObjectEnvelopes(
+  masks: readonly VisibleWallMaskKeyframe[],
+  frames: ReadonlyMap<number, RealityRgbKeyframe>,
+  surfels: readonly FinalizedRealitySurfel[],
+  table: RealityStructuralAssociationTable,
+  logicalIndex: number,
+): VisibleWallMaskKeyframe[] {
+  const logical = table.logicalSurfaces[logicalIndex]
+  const referencePatch = logical ? table.patches.find((patch) => logical.memberPatchIds.includes(patch.id)) : undefined
+  const localVertices = logical && referencePatch
+    ? logical.memberPatchIds.flatMap((id) => table.patches.find((patch) => patch.id === id)?.vertices3D ?? []).map((point) => wallLocalCoordinate(point, referencePatch.basis))
+    : []
+  const wallLocalVRange = localVertices.length > 0
+    ? { min: Math.min(...localVertices.map((point) => point.v)), max: Math.max(...localVertices.map((point) => point.v)) }
+    : null
+  const ranked = masks.map((mask) => {
+    const frame = frames.get(mask.keyframeId)
+    if (!frame) return mask
+    const clusters = mask.preservedVisualObjectClusters.map((cluster) => {
+      if (!cluster.accepted) return { ...cluster, decision: 'rejected' as const }
+      const geometry = clusterGeometryEvidence(cluster, mask, frame, surfels, referencePatch, wallLocalVRange)
+      const crossKeyframeSupport = crossKeyframeClusterSupport(cluster, mask, masks)
+      const areaRatio = cluster.filledInteriorPixelCount / Math.max(1, mask.roi.width * mask.roi.height)
+      const areaScore = areaRatio <= 0 || areaRatio > OUTER_OBJECT_MAX_ROI_FRACTION ? 0 : Math.min(1, Math.sqrt(areaRatio / 0.075))
+      const aspectScore = cluster.aspectRatio >= 1.1 && cluster.aspectRatio <= 5.5 ? 1 : clampUnit(1 - Math.abs(cluster.aspectRatio - 2.2) / 4.5)
+      const upperWallScore = geometry.wallLocalHeight ?? clampUnit(cluster.heightOnWall)
+      const edgeMarginScore = clampUnit(cluster.roiEdgeProximity * 10)
+      const geometryScore = 1 - geometry.foregroundPenalty
+      const rankingScore = clampUnit(
+        cluster.closureScore * 0.22 + cluster.wallSurroundScore * 0.22 + areaScore * 0.16 + aspectScore * 0.08 +
+        crossKeyframeSupport * 0.13 + upperWallScore * 0.08 + edgeMarginScore * 0.05 + geometryScore * 0.06 - geometry.foregroundPenalty * 0.30,
+      )
+      const dominant = rankingScore >= 0.48 && geometry.foregroundPenalty < 0.58
+      const rankingReason = dominant ? null
+        : geometry.foregroundPenalty >= 0.58 ? 'foreground depth/variance penalty'
+          : rankingScore < 0.48 ? 'ranked below wall-mounted envelope threshold'
+            : 'not a dominant wall-mounted candidate'
+      return {
+        ...cluster,
+        depthOffsetMeters: geometry.depthOffsetMeters,
+        depthVarianceMeters: geometry.depthVarianceMeters,
+        heightOnWall: geometry.wallLocalHeight ?? cluster.heightOnWall,
+        crossKeyframeSupport,
+        foregroundPenalty: geometry.foregroundPenalty,
+        rankingScore,
+        rejectionReason: rankingReason,
+        decision: dominant ? 'dominant-wall-mounted' as const : 'preserved-non-dominant' as const,
+      }
+    })
+    const completedObjectEnvelopePixels = new Uint8Array(mask.mask.length)
+    for (const cluster of clusters) if (cluster.decision === 'dominant-wall-mounted') for (const pixel of cluster.pixelIndices) {
+      mask.mask[pixel] = VisibleWallMaskCode.NON_WALL
+      mask.evidence[pixel] = VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT
+      mask.terminalReasons[pixel] = VisibleWallMaskTerminalReason.ENCLOSED_REGION
+      completedObjectEnvelopePixels[pixel] = 1
+    }
+    return { ...mask, ...summarizeMask(mask, frame), preservedVisualObjectClusters: clusters, completedObjectEnvelopePixels }
+  })
+  return ranked
 }
 
 function bitCount(value: number): number {
@@ -812,7 +958,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
     for (let logicalIndex = 0; logicalIndex < table.logicalSurfaces.length; logicalIndex++) {
       const vertices = surfaceVertices(table, logicalIndex)
       const ranked = keyframes.keyframes.map((frame) => ({ frame, roi: roiFor(frame, vertices) })).filter((entry): entry is { frame: RealityRgbKeyframe; roi: NonNullable<ReturnType<typeof roiFor>> } => entry.roi !== null).sort((left, right) => right.roi.area * right.frame.qualityScore - left.roi.area * left.frame.qualityScore).slice(0, MAX_KEYFRAMES_PER_SURFACE)
-      const masks: VisibleWallMaskKeyframe[] = []
+      let masks: VisibleWallMaskKeyframe[] = []
       for (const entry of ranked) {
         const maskStarted = timestamp(), mask = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskCode.UNCERTAIN), evidence = new Uint8Array(entry.frame.width * entry.frame.height), terminalReasons = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskTerminalReason.NO_REACHABLE_WALL_SEED)
         const seedColors: number[][] = [], seedPixels: number[] = []
@@ -872,13 +1018,14 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         fragmentExtractionMs += consolidatedObjects.fragmentExtractionMs
         componentMergeMs += consolidatedObjects.componentMergeMs
         enclosureAnalysisMs += consolidatedObjects.enclosureAnalysisMs
-        const completedObjects = completePreservedObjectOuterBoundaries(entry.frame, entry.roi, mask, evidence, terminalReasons, consolidatedObjects.regions)
+        const completedObjects = completePreservedObjectOuterBoundaries(entry.frame, entry.roi, mask, consolidatedObjects.regions)
         clusterFormationMs += completedObjects.clusterFormationMs
         outerBoundaryAnalysisMs += completedObjects.outerBoundaryAnalysisMs
         gapCompletionMs += completedObjects.gapCompletionMs
         interiorFillMs += completedObjects.interiorFillMs
+        // M8.6.6 selects which valid candidates are wall-mounted only after
+        // candidates from every selected keyframe can be ranked together.
         const completedObjectEnvelopePixels = new Uint8Array(mask.length)
-        for (const cluster of completedObjects.clusters) if (cluster.accepted) for (const pixel of cluster.pixelIndices) completedObjectEnvelopePixels[pixel] = 1
         let wall = 0, nonWall = 0, uncertain = 0, seedWall = 0, grownWall = 0, secondaryWall = 0, strongObject = 0, enclosedObject = 0
         for (let y = entry.roi.y; y < entry.roi.y + entry.roi.height; y++) for (let x = entry.roi.x; x < entry.roi.x + entry.roi.width; x++) {
           const cell = y * entry.frame.width + x, value = mask[cell], reason = evidence[cell]
@@ -893,6 +1040,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + terminalReasons.byteLength + seedPixelArray.byteLength + completedObjectEnvelopePixels.byteLength + consolidatedObjects.rawFragmentPixels.byteLength + consolidatedObjects.regions.reduce((sum, region) => sum + region.pixelIndices.byteLength, 0) + completedObjects.clusters.reduce((sum, cluster) => sum + cluster.pixelIndices.byteLength, 0)
         masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, terminalReasons, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, secondaryExpandedWallPixelCount: secondaryWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, preservedIslands: islands, rawObjectFragmentPixelCount: consolidatedObjects.rawFragmentPixelCount, rawObjectFragmentCount: consolidatedObjects.rawFragmentCount, rawObjectFragmentPixels: consolidatedObjects.rawFragmentPixels, preservedVisualRegions: consolidatedObjects.regions, preservedVisualObjectClusters: completedObjects.clusters, completedObjectEnvelopePixels, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
       }
+      masks = rankAndApplyDominantObjectEnvelopes(masks, new Map(keyframes.keyframes.map((frame) => [frame.id, frame])), surfels, table, logicalIndex)
       let wallConfirmed = 0, nonWall = 0, uncertain = 0
       const threeDSampleClassifications = new Uint8Array(surfels.length)
       const threeDSampleObservationCounts = new Uint8Array(surfels.length)
