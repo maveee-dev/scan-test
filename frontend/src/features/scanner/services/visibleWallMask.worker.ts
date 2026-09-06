@@ -10,6 +10,14 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
     for (const surface of result.surfaces) for (const mask of surface.masks) {
       transfer.push(mask.mask.buffer, mask.evidence.buffer, mask.terminalReasons.buffer, mask.seedPixels.buffer)
     }
+    for (const surface of result.surfaces) {
+      transfer.push(
+        surface.threeDSampleClassifications.buffer,
+        surface.threeDSampleObservationCounts.buffer,
+        surface.threeDSampleWallConfidence.buffer,
+        surface.threeDSampleTerminalReasons.buffer,
+      )
+    }
     self.postMessage({ result }, { transfer })
   } catch (error) {
     self.postMessage({ error: error instanceof Error ? error.message : 'RGB wall-mask preparation failed.' })

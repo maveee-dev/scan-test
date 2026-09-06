@@ -52,7 +52,15 @@ import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
 } from '../services/logicalSurfaceService'
-import { VisibleWallMaskCode, VisibleWallMaskEvidenceCode, VisibleWallMaskTerminalReason, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
+import {
+  projectWorldPointToKeyframePixel,
+  VisibleWallMask3dCode,
+  VisibleWallMask3dTerminalReason,
+  VisibleWallMaskCode,
+  VisibleWallMaskEvidenceCode,
+  VisibleWallMaskTerminalReason,
+  type VisibleWallMaskResult,
+} from '../services/visibleWallMaskProvider'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -97,7 +105,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -818,6 +826,24 @@ function FinalizedSpatialScanPreview({
   const selectedVisibleWallMaskSurface = useMemo(() => selectedLogicalSurface
     ? visibleWallMask.result?.surfaces.find((surface) => surface.logicalSurfaceId === selectedLogicalSurface.id) ?? null
     : null, [selectedLogicalSurface, visibleWallMask.result])
+  const selectedRgbTriangleVoteStats = useMemo(() => {
+    const topology = preparedReality?.triangleTopology
+    const table = realityAssociation.table
+    if (!topology || !table || !preferredRealityReconstruction || !selectedLogicalSurface || !selectedVisibleWallMaskSurface) return null
+    const logicalIndex = table.logicalSurfaces.findIndex((surface) => surface.id === selectedLogicalSurface.id)
+    if (logicalIndex < 0) return null
+    const sampleIndexById = new Map(preferredRealityReconstruction.surfels.map((sample, index) => [sample.id, index]))
+    let three = 0, two = 0, one = 0, zero = 0
+    for (let triangle = 0; triangle < topology.triangleCount; triangle++) {
+      let votes = 0
+      for (let vertex = 0; vertex < 3; vertex++) {
+        const sampleIndex = sampleIndexById.get(topology.vertexSurfelIds[triangle * 3 + vertex])
+        if (sampleIndex !== undefined && selectedVisibleWallMaskSurface.threeDSampleClassifications[sampleIndex] === VisibleWallMask3dCode.WALL && visibleWallMask.result?.sampleLogicalSurfaceIndices[sampleIndex] === logicalIndex) votes++
+      }
+      if (votes === 3) three++; else if (votes === 2) two++; else if (votes === 1) one++; else zero++
+    }
+    return { three, two, one, zero, painted: three + two }
+  }, [preferredRealityReconstruction, preparedReality?.triangleTopology, realityAssociation.table, selectedLogicalSurface, selectedVisibleWallMaskSurface, visibleWallMask.result])
 
   useEffect(() => {
     const canvas = keyframeCanvasRef.current
@@ -830,11 +856,16 @@ function FinalizedSpatialScanPreview({
     const context = canvas.getContext('2d')
     if (!context) return
     const image = context.createImageData(frame.width, frame.height)
+    const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes'
     for (let pixel = 0; pixel < frame.width * frame.height; pixel++) {
       const offset = pixel * 4, maskValue = mask.mask[pixel]
       const sourceOffset = pixel * 3
       const sourceR = frame.rgb[sourceOffset], sourceG = frame.rgb[sourceOffset + 1], sourceB = frame.rgb[sourceOffset + 2]
-      if (realityKeyframeDebugMode === 'rgb-wall-mask' || realityKeyframeDebugMode === 'projected-3d-mask') {
+      if (threeDDebug) {
+        image.data[offset] = sourceR * 0.08
+        image.data[offset + 1] = sourceG * 0.08
+        image.data[offset + 2] = sourceB * 0.08
+      } else if (realityKeyframeDebugMode === 'rgb-wall-mask') {
         image.data[offset] = maskValue === VisibleWallMaskCode.WALL ? 34 : maskValue === VisibleWallMaskCode.NON_WALL ? 232 : 80
         image.data[offset + 1] = maskValue === VisibleWallMaskCode.WALL ? 184 : maskValue === VisibleWallMaskCode.NON_WALL ? 67 : 80
         image.data[offset + 2] = maskValue === VisibleWallMaskCode.WALL ? 255 : maskValue === VisibleWallMaskCode.NON_WALL ? 181 : 80
@@ -884,6 +915,40 @@ function FinalizedSpatialScanPreview({
       }
       image.data[offset + 3] = 255
     }
+    if (threeDDebug && preferredRealityReconstruction) {
+      const projected = { x: 0, y: 0 }
+      const setPoint = (x: number, y: number, red: number, green: number, blue: number): void => {
+        for (let offsetY = -1; offsetY <= 1; offsetY++) for (let offsetX = -1; offsetX <= 1; offsetX++) {
+          const px = x + offsetX, py = y + offsetY
+          if (px < 0 || py < 0 || px >= frame.width || py >= frame.height) continue
+          const index = (py * frame.width + px) * 4
+          image.data[index] = red; image.data[index + 1] = green; image.data[index + 2] = blue; image.data[index + 3] = 255
+        }
+      }
+      for (let index = 0; index < preferredRealityReconstruction.surfels.length; index++) {
+        if (!projectWorldPointToKeyframePixel(preferredRealityReconstruction.surfels[index].position, frame, projected) || projected.x < mask.roi.x || projected.x >= mask.roi.x + mask.roi.width || projected.y < mask.roi.y || projected.y >= mask.roi.y + mask.roi.height) continue
+        const classification = maskSurface.threeDSampleClassifications[index]
+        const observations = maskSurface.threeDSampleObservationCounts[index]
+        const confidence = maskSurface.threeDSampleWallConfidence[index]
+        const terminal = maskSurface.threeDSampleTerminalReasons[index]
+        if (realityKeyframeDebugMode === '3d-observation-count') {
+          setPoint(projected.x, projected.y, observations === 1 ? 52 : observations === 2 ? 72 : 212, observations === 1 ? 152 : observations === 2 ? 202 : 244, observations === 1 ? 219 : observations === 2 ? 121 : 98)
+        } else if (realityKeyframeDebugMode === '3d-wall-vote-confidence') {
+          setPoint(projected.x, projected.y, 24, confidence, Math.min(255, 84 + confidence))
+        } else if (realityKeyframeDebugMode === '3d-uncertain-terminal-reason') {
+          const color = terminal === VisibleWallMask3dTerminalReason.MASK_PIXEL_UNCERTAIN ? [255, 184, 64]
+            : terminal === VisibleWallMask3dTerminalReason.ONE_GOOD_WALL_VOTE_QUALITY_FAILED ? [255, 112, 64]
+              : terminal === VisibleWallMask3dTerminalReason.LOGICAL_SURFACE_MISMATCH ? [232, 67, 181] : [112, 112, 112]
+          setPoint(projected.x, projected.y, color[0], color[1], color[2])
+        } else if (realityKeyframeDebugMode === '3d-object-votes') {
+          if (classification === VisibleWallMask3dCode.NON_WALL) setPoint(projected.x, projected.y, 244, 75, 100)
+        } else {
+          const color = classification === VisibleWallMask3dCode.WALL ? [34, 184, 255]
+            : classification === VisibleWallMask3dCode.NON_WALL ? [232, 67, 181] : [112, 112, 112]
+          setPoint(projected.x, projected.y, color[0], color[1], color[2])
+        }
+      }
+    }
     context.putImageData(image, 0, 0)
     if (realityKeyframeDebugMode === 'rgb-wall-seeds') {
       context.fillStyle = '#f8ff7a'
@@ -897,7 +962,7 @@ function FinalizedSpatialScanPreview({
       context.lineWidth = Math.max(1, Math.round(frame.width / 120))
       context.strokeRect(mask.roi.x, mask.roi.y, mask.roi.width, mask.roi.height)
     }
-  }, [applicableRgbKeyframes, realityKeyframeDebugMode, selectedVisibleWallMaskSurface])
+  }, [applicableRgbKeyframes, preferredRealityReconstruction, realityKeyframeDebugMode, selectedVisibleWallMaskSurface])
 
   const setSurfacePaintColor = useCallback((surfaceId: string, color: string): void => {
     const logical = logicalSurfaces.find((l) => l.id === surfaceId || l.memberPatchIds.includes(surfaceId))
@@ -1828,6 +1893,10 @@ function FinalizedSpatialScanPreview({
                   ['uncertain-terminal-reasons', 'Uncertain Terminal Reasons'],
                   ['non-wall-uncertain', 'Non-Wall / Uncertain'],
                   ['projected-3d-mask', '3D Projected Wall Mask'],
+                  ['3d-observation-count', '3D Observation Count'],
+                  ['3d-wall-vote-confidence', '3D Wall Vote Confidence'],
+                  ['3d-uncertain-terminal-reason', '3D Uncertain Reason'],
+                  ['3d-object-votes', '3D Object Votes'],
                 ] as const).map(([debugMode, label]) => (
                   <button
                     key={debugMode}
@@ -1864,6 +1933,17 @@ function FinalizedSpatialScanPreview({
                   <span>
                     3D unresolved reasons: {Object.entries(selectedVisibleWallMaskSurface.threeDUncertainReasonCounts).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(' / ') || 'none'}.
                   </span>
+                  <span>
+                    3D observations: Dense {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.totalDenseRealitySamples}; ROI candidates {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.logicalDomainCandidateSamples}; image-projectable {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.projectableIntoSelectedKeyframes}; valid ROI observations {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.validRoiObservations}; observed by 0/1/2/3 keyframes {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.observedByZeroKeyframes}/{selectedVisibleWallMaskSurface.threeDObservationDiagnostics.observedByOneKeyframe}/{selectedVisibleWallMaskSurface.threeDObservationDiagnostics.observedByTwoKeyframes}/{selectedVisibleWallMaskSurface.threeDObservationDiagnostics.observedByThreeKeyframes}.
+                  </span>
+                  <span>
+                    3D mask evidence: wall/object/uncertain observations {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.wallMaskObservations}/{selectedVisibleWallMaskSurface.threeDObservationDiagnostics.objectMaskObservations}/{selectedVisibleWallMaskSurface.threeDObservationDiagnostics.uncertainMaskObservations}; single uncontested wall {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.singleUncontestedWallObservations}; multi-view wall agreement {selectedVisibleWallMaskSurface.threeDObservationDiagnostics.multiViewWallAgreementSamples}.
+                  </span>
+                  {selectedRgbTriangleVoteStats ? (
+                    <span>
+                      Triangle conversion: 3/3 {selectedRgbTriangleVoteStats.three}; 2/3 {selectedRgbTriangleVoteStats.two}; 1/3 {selectedRgbTriangleVoteStats.one}; 0/3 {selectedRgbTriangleVoteStats.zero}; painted {selectedRgbTriangleVoteStats.painted}.
+                    </span>
+                  ) : null}
                   {visibleWallMask.result ? (
                     <span>
                       RGB-mask worker: preserved-island analysis {visibleWallMask.result.componentAnalysisMs.toFixed(1)} ms / secondary expansion {visibleWallMask.result.secondaryExpansionMs.toFixed(1)} ms / 3D projection {visibleWallMask.result.projectionMs.toFixed(1)} ms / total {visibleWallMask.result.preparationMs.toFixed(1)} ms / {(visibleWallMask.result.memoryBytes / 1024).toFixed(1)} KiB.

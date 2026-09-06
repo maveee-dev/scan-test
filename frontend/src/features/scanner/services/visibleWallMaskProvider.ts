@@ -27,6 +27,23 @@ export const VisibleWallMaskTerminalReason = {
   INSUFFICIENT_NEIGHBOR_SUPPORT: 7,
 } as const
 
+/** Compact per-Dense-Reality-sample state for selected-wall diagnostics. */
+export const VisibleWallMask3dCode = { OUTSIDE_DOMAIN: 0, WALL: 1, NON_WALL: 2, UNCERTAIN: 3 } as const
+export const VisibleWallMask3dTerminalReason = {
+  NONE: 0,
+  NO_SELECTED_KEYFRAME_OBSERVES_SAMPLE: 1,
+  PROJECTION_OUTSIDE_IMAGE: 2,
+  PROJECTION_OUTSIDE_ROI: 3,
+  MASK_PIXEL_UNCERTAIN: 4,
+  INSUFFICIENT_OBSERVATIONS: 5,
+  ONE_GOOD_WALL_VOTE_QUALITY_FAILED: 6,
+  CONFLICTING_WALL_OBJECT_VOTES: 7,
+  CONFLICTING_WALL_UNCERTAIN_VOTES: 8,
+  VISIBILITY_OCCLUSION_UNCERTAINTY: 9,
+  LOGICAL_SURFACE_MISMATCH: 10,
+  OTHER: 11,
+} as const
+
 export interface PreservedVisualIsland {
   readonly pixelCount: number
   readonly boundaryClosureScore: number
@@ -68,6 +85,25 @@ export interface VisibleWallMaskSurfaceResult {
   readonly nonWallSampleCount: number
   readonly uncertainSampleCount: number
   readonly threeDUncertainReasonCounts: Readonly<Record<string, number>>
+  readonly threeDObservationDiagnostics: {
+    readonly totalDenseRealitySamples: number
+    readonly logicalDomainCandidateSamples: number
+    readonly projectableIntoSelectedKeyframes: number
+    readonly validRoiObservations: number
+    readonly wallMaskObservations: number
+    readonly objectMaskObservations: number
+    readonly uncertainMaskObservations: number
+    readonly observedByZeroKeyframes: number
+    readonly observedByOneKeyframe: number
+    readonly observedByTwoKeyframes: number
+    readonly observedByThreeKeyframes: number
+    readonly singleUncontestedWallObservations: number
+    readonly multiViewWallAgreementSamples: number
+  }
+  readonly threeDSampleClassifications: Uint8Array
+  readonly threeDSampleObservationCounts: Uint8Array
+  readonly threeDSampleWallConfidence: Uint8Array
+  readonly threeDSampleTerminalReasons: Uint8Array
 }
 
 export interface VisibleWallMaskResult {
@@ -104,6 +140,7 @@ const COMPONENT_EDGE_CHROMA_DISTANCE = 0.07
 const COMPONENT_EDGE_LUMINANCE_DISTANCE = 0.14
 const SECONDARY_WALL_CHROMA_DISTANCE = 0.17
 const SECONDARY_WALL_LUMINANCE_DISTANCE = 0.34
+const MIN_LOCAL_WALL_OBSERVATION_CONFIDENCE = 0.58
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -122,6 +159,12 @@ function project(point: SpatialPoint, frame: RealityRgbKeyframe, target: { u: nu
   target.u = (clipX / clipW + 1) / 2
   target.v = (1 - clipY / clipW) / 2
   return Number.isFinite(target.u) && Number.isFinite(target.v) && target.u >= 0 && target.u <= 1 && target.v >= 0 && target.v <= 1
+}
+
+/** Shared M8.2/M8.6 world-to-camera projection and copy mapping for diagnostics. */
+export function projectWorldPointToKeyframePixel(point: SpatialPoint, frame: RealityRgbKeyframe, target: { x: number; y: number }): boolean {
+  const projection = { u: 0, v: 0 }
+  return project(point, frame, projection) && mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, target)
 }
 
 function rgb(frame: RealityRgbKeyframe, x: number, y: number): [number, number, number] {
@@ -170,6 +213,34 @@ function forEachRoiNeighbor(x: number, y: number, roi: { x: number; y: number; w
 function visualEdge(first: readonly number[], second: readonly number[]): boolean {
   return chromaDistance(first, second) > COMPONENT_EDGE_CHROMA_DISTANCE ||
     Math.abs(luminance(first) - luminance(second)) > COMPONENT_EDGE_LUMINANCE_DISTANCE
+}
+
+function pixelInsideRoi(pixel: { x: number; y: number }, roi: { x: number; y: number; width: number; height: number }): boolean {
+  return pixel.x >= roi.x && pixel.x < roi.x + roi.width && pixel.y >= roi.y && pixel.y < roi.y + roi.height
+}
+
+function localWallObservationConfidence(
+  surfel: FinalizedRealitySurfel,
+  frame: RealityRgbKeyframe,
+  mask: VisibleWallMaskKeyframe,
+  pixel: { x: number; y: number },
+): number {
+  const evidence = mask.evidence[pixel.y * frame.width + pixel.x]
+  const evidenceStrength = evidence === VisibleWallMaskEvidenceCode.STRUCTURAL_SEED ? 1
+    : evidence === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH ? 0.92
+      : evidence === VisibleWallMaskEvidenceCode.SECONDARY_WALL_EXPANSION ? 0.76 : 0.7
+  const edgeDistance = Math.min(pixel.x - mask.roi.x, mask.roi.x + mask.roi.width - 1 - pixel.x, pixel.y - mask.roi.y, mask.roi.y + mask.roi.height - 1 - pixel.y)
+  const edgeConfidence = 0.85 + 0.15 * Math.min(1, Math.max(0, edgeDistance) / 3)
+  const camera = frame.cameraTransform
+  const dx = camera[12] - surfel.position.x, dy = camera[13] - surfel.position.y, dz = camera[14] - surfel.position.z
+  const distance = Math.hypot(dx, dy, dz)
+  const facing = distance > EPSILON ? Math.abs((surfel.normal.x * dx + surfel.normal.y * dy + surfel.normal.z * dz) / distance) : 1
+  const facingConfidence = 0.86 + 0.14 * Math.min(1, facing)
+  const distanceConfidence = distance <= 4 ? 1 : Math.max(0.86, 1 - (distance - 4) * 0.035)
+  // Whole-frame quality only modulates a locally valid observation; it never
+  // invalidates a well-projected wall pixel by itself.
+  const frameConfidence = 0.9 + 0.1 * Math.max(0, Math.min(1, frame.qualityScore))
+  return evidenceStrength * edgeConfidence * facingConfidence * distanceConfidence * frameConfidence
 }
 
 interface UncertainRegion {
@@ -381,50 +452,100 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, terminalReasons, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, secondaryExpandedWallPixelCount: secondaryWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, preservedIslands: islands, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
       }
       let wallConfirmed = 0, nonWall = 0, uncertain = 0
+      const threeDSampleClassifications = new Uint8Array(surfels.length)
+      const threeDSampleObservationCounts = new Uint8Array(surfels.length)
+      const threeDSampleWallConfidence = new Uint8Array(surfels.length)
+      const threeDSampleTerminalReasons = new Uint8Array(surfels.length)
       const threeDUncertainReasonCounts: Record<string, number> = {
-        'not observed enough': 0,
-        'conflicting keyframes': 0,
-        '2D mask uncertain': 0,
-        'object evidence': 0,
-        'UV outside': 0,
-        'insufficient wall votes': 0,
+        'mask pixel uncertain': 0,
+        'one good wall vote quality failed': 0,
+        'insufficient observations': 0,
+        'conflicting wall/uncertain votes': 0,
+        'logical-surface mismatch': 0,
+        other: 0,
       }
+      let projectableIntoSelectedKeyframes = 0, logicalDomainCandidateSamples = 0, validRoiObservations = 0
+      let wallMaskObservations = 0, objectMaskObservations = 0, uncertainMaskObservations = 0
+      let observedByZeroKeyframes = 0, observedByOneKeyframe = 0, observedByTwoKeyframes = 0, observedByThreeKeyframes = 0
+      let singleUncontestedWallObservations = 0, multiViewWallAgreementSamples = 0
       const frameById = new Map(keyframes.keyframes.map((frame) => [frame.id, frame]))
       const projectionStarted = timestamp()
       for (let index = 0; index < surfels.length; index++) {
-        let wallVotes = 0, nonWallVotes = 0, uncertainVotes = 0, observedVotes = 0, strongestWallQuality = 0
+        let wallVotes = 0, nonWallVotes = 0, uncertainVotes = 0, validObservations = 0, imageProjectable = false, strongestWallConfidence = 0
         for (const mask of masks) {
           const frame = frameById.get(mask.keyframeId)
           if (!frame || !project(surfels[index].position, frame, projection) || !mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, pixel)) continue
-          observedVotes++
+          imageProjectable = true
+          // A projection outside this structural ROI is not a mask observation.
+          // It must not be converted into an UNCERTAIN or negative wall vote.
+          if (!pixelInsideRoi(pixel, mask.roi)) continue
+          validObservations++
+          validRoiObservations++
           const value = mask.mask[pixel.y * frame.width + pixel.x]
-          if (value === VisibleWallMaskCode.WALL) { wallVotes++; strongestWallQuality = Math.max(strongestWallQuality, frame.qualityScore) }
-          else if (value === VisibleWallMaskCode.NON_WALL) nonWallVotes++
-          else uncertainVotes++
+          if (value === VisibleWallMaskCode.WALL) {
+            wallVotes++; wallMaskObservations++
+            strongestWallConfidence = Math.max(strongestWallConfidence, localWallObservationConfidence(surfels[index], frame, mask, pixel))
+          } else if (value === VisibleWallMaskCode.NON_WALL) {
+            nonWallVotes++; objectMaskObservations++
+          } else {
+            uncertainVotes++; uncertainMaskObservations++
+          }
         }
-        const strongBestWall = wallVotes === 1 && nonWallVotes === 0 && strongestWallQuality >= 0.9
-        const robustWall = wallVotes >= 2 && wallVotes > nonWallVotes
-        if (robustWall || strongBestWall) {
-          const strength = wallVotes - nonWallVotes
-          if (strength > sampleVoteStrength[index]) {
+        if (imageProjectable) projectableIntoSelectedKeyframes++
+        threeDSampleObservationCounts[index] = validObservations
+        if (validObservations === 0) {
+          observedByZeroKeyframes++
+          threeDSampleTerminalReasons[index] = imageProjectable
+            ? VisibleWallMask3dTerminalReason.PROJECTION_OUTSIDE_ROI
+            : VisibleWallMask3dTerminalReason.NO_SELECTED_KEYFRAME_OBSERVES_SAMPLE
+          continue
+        }
+        logicalDomainCandidateSamples++
+        if (validObservations === 1) observedByOneKeyframe++
+        else if (validObservations === 2) observedByTwoKeyframes++
+        else observedByThreeKeyframes++
+        if (wallVotes === 1 && nonWallVotes === 0) singleUncontestedWallObservations++
+        if (wallVotes >= 2 && nonWallVotes === 0) multiViewWallAgreementSamples++
+        threeDSampleWallConfidence[index] = Math.round(Math.min(1, strongestWallConfidence) * 255)
+        if (nonWallVotes > 0) {
+          threeDSampleClassifications[index] = VisibleWallMask3dCode.NON_WALL
+          nonWall++
+          threeDSampleTerminalReasons[index] = wallVotes > 0
+            ? VisibleWallMask3dTerminalReason.CONFLICTING_WALL_OBJECT_VOTES
+            : VisibleWallMask3dTerminalReason.NONE
+          continue
+        }
+        if (wallVotes > 0 && strongestWallConfidence >= MIN_LOCAL_WALL_OBSERVATION_CONFIDENCE) {
+          const strength = Math.min(255, Math.round(strongestWallConfidence * 100) + wallVotes)
+          if (strength > sampleVoteStrength[index] || sampleLogicalSurfaceIndices[index] === logicalIndex) {
             sampleLogicalSurfaceIndices[index] = logicalIndex
             sampleConfidence[index] = 2
             sampleVoteStrength[index] = strength
+            threeDSampleClassifications[index] = VisibleWallMask3dCode.WALL
+            wallConfirmed++
+          } else {
+            threeDSampleClassifications[index] = VisibleWallMask3dCode.UNCERTAIN
+            threeDSampleTerminalReasons[index] = VisibleWallMask3dTerminalReason.LOGICAL_SURFACE_MISMATCH
+            threeDUncertainReasonCounts['logical-surface mismatch']++
+            uncertain++
           }
-          wallConfirmed++
-        } else if (nonWallVotes > 0) {
-          nonWall++
-          if (wallVotes > 0) threeDUncertainReasonCounts['conflicting keyframes']++
-          else threeDUncertainReasonCounts['object evidence']++
         } else {
+          threeDSampleClassifications[index] = VisibleWallMask3dCode.UNCERTAIN
           uncertain++
-          if (observedVotes === 0) threeDUncertainReasonCounts['UV outside']++
-          else if (uncertainVotes === observedVotes) threeDUncertainReasonCounts['2D mask uncertain']++
-          else if (wallVotes === 0) threeDUncertainReasonCounts['not observed enough']++
-          else threeDUncertainReasonCounts['insufficient wall votes']++
+          if (wallVotes > 0) {
+            threeDSampleTerminalReasons[index] = VisibleWallMask3dTerminalReason.ONE_GOOD_WALL_VOTE_QUALITY_FAILED
+            threeDUncertainReasonCounts['one good wall vote quality failed']++
+          } else if (uncertainVotes > 0) {
+            threeDSampleTerminalReasons[index] = VisibleWallMask3dTerminalReason.MASK_PIXEL_UNCERTAIN
+            threeDUncertainReasonCounts['mask pixel uncertain']++
+          } else {
+            threeDSampleTerminalReasons[index] = VisibleWallMask3dTerminalReason.OTHER
+            threeDUncertainReasonCounts.other++
+          }
         }
       }
       projectionMs += timestamp() - projectionStarted
+      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength
       surfaces.push({
         logicalSurfaceId: table.logicalSurfaces[logicalIndex].id,
         selectedKeyframeIds: masks.map((mask) => mask.keyframeId),
@@ -438,6 +559,25 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         nonWallSampleCount: nonWall,
         uncertainSampleCount: uncertain,
         threeDUncertainReasonCounts,
+        threeDObservationDiagnostics: {
+          totalDenseRealitySamples: surfels.length,
+          logicalDomainCandidateSamples,
+          projectableIntoSelectedKeyframes,
+          validRoiObservations,
+          wallMaskObservations,
+          objectMaskObservations,
+          uncertainMaskObservations,
+          observedByZeroKeyframes,
+          observedByOneKeyframe,
+          observedByTwoKeyframes: observedByTwoKeyframes,
+          observedByThreeKeyframes: observedByThreeKeyframes,
+          singleUncontestedWallObservations,
+          multiViewWallAgreementSamples,
+        },
+        threeDSampleClassifications,
+        threeDSampleObservationCounts,
+        threeDSampleWallConfidence,
+        threeDSampleTerminalReasons,
       })
     }
     return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, memoryBytes }

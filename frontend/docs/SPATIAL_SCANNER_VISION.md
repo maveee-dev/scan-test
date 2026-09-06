@@ -1780,3 +1780,57 @@ reasons (`not observed enough`, `conflicting keyframes`, `2D mask uncertain`,
 analysis/projection timings and memory. The refinement remains post-scan and
 does not alter keyframe cadence, camera capture, RGB-D registration, Dense
 Reality data, M7, or Reality Original.
+
+### M8.6.3 — Visibility-Aware RGB Mask to Dense Reality Fusion
+
+M8.6.2 established a useful visible-wall mask, but physical diagnostics found
+that a strong 2D wall result could collapse into a mostly `UNCERTAIN` Dense
+Reality assignment. The cause was in the 3D evidence bridge, not RGB
+segmentation: the former fusion pass counted projected pixels outside a
+selected wall ROI as uncertain observations and required either two wall
+votes or a whole-keyframe quality score of 0.90 for a single vote.
+
+```
+NO OBSERVATION
+  != UNCERTAIN OBSERVATION
+  != NON-WALL / OBJECT EVIDENCE
+
+RGB mask
+  ↓
+visibility-aware keyframe observation
+  ↓
+multi-view evidence fusion
+  ↓
+Dense Reality sample assignment
+  ↓
+triangle paint assignment
+```
+
+Only a world point that projects into the selected keyframe image and its wall
+ROI reads a mask pixel. Projections outside that ROI are not observations and
+cannot suppress wall paint. `UNCERTAIN` mask pixels are neutral evidence;
+they do not equal an object vote. Explicit preserved-object pixels remain
+strong negative evidence and override competing wall votes.
+
+A single in-ROI wall observation can now confirm a sample when its local
+confidence is strong and it has no object evidence. Local confidence combines
+mask provenance (seed/primary/secondary), ROI-edge distance, camera-facing
+quality, camera distance, and global keyframe quality as a small modifier.
+It does not reject a clean local wall observation solely because the full
+keyframe has a moderate quality score. Multiple wall observations still
+increase confidence. The same saved pose/projection/copy mapping remains
+authoritative; no second projection convention was introduced.
+
+No keyframe depth snapshot was added: the diagnosed loss was ROI accounting
+and vote policy, not proof of a depth-visibility failure. Wall-local UV raster
+fusion was also deferred; direct multi-view world-to-keyframe evidence is now
+visibility-aware and remains the bounded source of truth.
+
+Post-scan diagnostics expose Dense Reality candidate and observation counts
+(0/1/2/3 selected keyframes), wall/object/uncertain mask observations, single
+and multi-view wall evidence, mutually exclusive unresolved 3D reasons, and
+3D observation-count, wall-confidence, terminal-reason, object-vote, and
+final-assignment views. Triangle diagnostics report 3/3, 2/3, 1/3, and 0/3
+sample support. Added data is compact typed arrays transferred from the
+existing worker; capture cadence, RGB-D registration, Dense Reality, M7,
+renderer geometry, and Reality Original remain unchanged.

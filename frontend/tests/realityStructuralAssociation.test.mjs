@@ -1029,3 +1029,50 @@ test('62. Repeated visual island remains preserved across keyframes', () => {
   assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
   assert.ok(result.surfaces[0].masks.every((mask) => mask.strongVisualObjectPixelCount + mask.enclosedVisualObjectPixelCount > 0))
 })
+
+// 63. A locally strong in-ROI wall observation remains valid even if the whole
+// keyframe is only moderately scored; non-observation is never a negative vote.
+test('63. One strong local wall observation confirms without a global quality gate', () => {
+  const wall = patch('wall-local-quality', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(761, -0.55, 0.2, -1), surfel(762, -0.35, 0.4, -1), surfel(763, 0.5, 0.55, -1), surfel(764, 0.2, 0.1, -1)]
+  const frame = testKeyframe(1, 8, 8, false)
+  frame.qualityScore = 0.2
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], 0)
+  assert.equal(result.surfaces[0].threeDObservationDiagnostics.singleUncontestedWallObservations > 0, true)
+})
+
+// 64. An explicit preserved-object pixel is negative evidence and overrides a
+// wall vote from another visible keyframe.
+test('64. A preserved-object vote overrides a wall vote', () => {
+  const wall = patch('wall-object-override', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(771, -0.55, 0.2, -1), surfel(772, -0.35, 0.4, -1), surfel(773, 0.5, 0.55, -1), surfel(774, 0, 0, -1)]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1, 8, 8, false), testKeyframe(2, 8, 8, true)]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.equal(result.surfaces[0].threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.NON_WALL)
+})
+
+// 65. A neutral uncertain pixel is absence of wall proof, not an object vote.
+test('65. One wall plus one uncertain observation remains wall when locally strong', () => {
+  const wall = patch('wall-neutral-uncertain', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(781, -0.55, 0.2, -1), surfel(782, -0.35, 0.4, -1), surfel(783, 0.5, 0.55, -1), surfel(784, 0, 0, -1)]
+  const uncertain = testKeyframe(2, 8, 8, false)
+  for (let y = 0; y < uncertain.height; y++) for (let x = 4; x < uncertain.width; x++) uncertain.rgb.set([95, 115, 132], (y * uncertain.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1, 8, 8, false), uncertain]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], 0)
+})
+
+// 66. Points that no selected wall ROI actually observes stay outside the
+// domain rather than becoming an artificial uncertain vote.
+test('66. Samples outside all selected wall observations remain outside the 3D mask domain', () => {
+  const wall = patch('wall-outside-observation', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(791, -0.55, 0.2, -1), surfel(792, -0.35, 0.4, -1), surfel(793, 0.5, 0.55, -1), surfel(794, 3, 0, -1)]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1, 8, 8, false)]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.equal(result.surfaces[0].threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.OUTSIDE_DOMAIN)
+  assert.ok(result.surfaces[0].threeDObservationDiagnostics.observedByZeroKeyframes > 0)
+})
