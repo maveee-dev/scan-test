@@ -38,6 +38,7 @@ import {
 } from './rgbDepthRegistrationService'
 import { RealitySurfelColorFusionService } from './realitySurfelColorFusionService'
 import { DenseRealityReconstructionService } from './denseRealityReconstructionService'
+import { RealityRgbKeyframeService } from './realityRgbKeyframeService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -162,6 +163,8 @@ export class XRSessionService {
   private readonly realitySurfelColorFusionService = new RealitySurfelColorFusionService()
 
   private readonly denseRealityReconstructionService = new DenseRealityReconstructionService()
+
+  private readonly realityRgbKeyframeService = new RealityRgbKeyframeService()
 
   private referenceSpace: XRReferenceSpace | null = null
 
@@ -295,6 +298,7 @@ export class XRSessionService {
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
     this.denseRealityReconstructionService.reset()
+    this.realityRgbKeyframeService.reset()
     this.realityCaptureEnabled = false
     this.rawCameraCopyPhase = 0
 
@@ -360,12 +364,17 @@ export class XRSessionService {
         finalizedScan.referenceSpaceType,
         this.rawCameraService.isAvailable(),
       )
+      const realityRgbKeyframes = this.realityRgbKeyframeService.createSnapshot(
+        finalizedScan.id,
+        this.rawCameraService.isAvailable(),
+      )
 
       await this.endActiveSession(session)
       return {
         spatialScan: finalizedScan,
         realityReconstruction,
         denseRealityReconstruction,
+        realityRgbKeyframes,
       }
     } catch (error) {
       if (this.isActiveSession(session)) {
@@ -389,6 +398,7 @@ export class XRSessionService {
     this.rawCameraService.dispose()
     this.realitySurfelColorFusionService.dispose()
     this.denseRealityReconstructionService.dispose()
+    this.realityRgbKeyframeService.dispose()
   }
 
   private async startInternal(options: XRSessionStartOptions): Promise<void> {
@@ -643,6 +653,18 @@ export class XRSessionService {
               )
               if (copied) {
                 currentRawCameraFrame = this.rawCameraService.getLatestCopyFrame()
+                // A separate 320px-long-edge copy is considered only after a
+                // validated camera/RGB-D tick and only when pose diversity
+                // warrants one. It never changes the 160px fusion copy.
+                this.realityRgbKeyframeService.considerCapture(
+                  frame,
+                  primaryView,
+                  time,
+                  this.position,
+                  this.viewerDirection,
+                  densePointFrame.validPointCount,
+                  this.rawCameraService,
+                )
               }
             } else {
               this.rawCameraService.recordSkipped()
@@ -919,6 +941,7 @@ export class XRSessionService {
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
     this.denseRealityReconstructionService.reset()
+    this.realityRgbKeyframeService.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -1012,6 +1035,7 @@ export class XRSessionService {
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
     this.denseRealityReconstructionService.reset()
+    this.realityRgbKeyframeService.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

@@ -5,6 +5,7 @@ import type {
   CoverageCellState,
   FinalizedDenseRealityReconstruction,
   FinalizedRealityReconstruction,
+  FinalizedRealityRgbKeyframes,
   FinalizedSpatialScan,
   RealityRgbColor,
   SpatialPoint,
@@ -32,6 +33,7 @@ import {
 } from '../services/realitySurfaceRenderingService'
 import { usePreparedRealitySurface } from '../hooks/usePreparedRealitySurface'
 import { useRealityStructuralAssociation } from '../hooks/useRealityStructuralAssociation'
+import { useVisibleWallMask } from '../hooks/useVisibleWallMask'
 import {
   evaluateRealityTapHit,
   type RealityDebugColorMode,
@@ -50,11 +52,13 @@ import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
 } from '../services/logicalSurfaceService'
+import { VisibleWallMaskCode, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
   denseRealityReconstruction?: FinalizedDenseRealityReconstruction | null
   realityReconstruction?: FinalizedRealityReconstruction | null
+  realityRgbKeyframes?: FinalizedRealityRgbKeyframes | null
   analysisResult?: RoomAnalysisResult | null
   roomBoundary?: RoomBoundaryResult | null
   roomSurfaceConstruction?: RoomSurfaceConstructionResult | null
@@ -93,6 +97,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'non-wall-uncertain' | 'projected-3d-mask'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -544,6 +549,7 @@ function applyRealityDesignTriangleAppearance(
   inputs: readonly RealityDesignColorInput[],
   compositeMode: RealityDesignCompositeMode,
   visibleOwnerships: readonly VisibleRealitySurfaceOwnership[],
+  visibleWallMask: VisibleWallMaskResult | null,
 ): void {
   const topology = prepared.triangleTopology, triangleAssociation = prepared.designTriangleAssociation
   if (!topology || !triangleAssociation) return
@@ -554,7 +560,18 @@ function applyRealityDesignTriangleAppearance(
   if (compositeMode === 'reality-wall-components' || compositeMode === 'all-reality-components' || compositeMode === 'logical-wall-owned-components') {
     applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, true, false, visibleOwnerships)
   } else if (compositeMode === 'composite' || compositeMode === 'selected-wall-triangles' || compositeMode === 'hit-component') {
-    applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, false, compositeMode === 'selected-wall-triangles', visibleOwnerships)
+    applyRealityTrianglePaint(
+      color.array,
+      source.surfels,
+      topology,
+      triangleAssociation,
+      association,
+      inputs,
+      false,
+      compositeMode === 'selected-wall-triangles',
+      visibleOwnerships,
+      visibleWallMask?.sampleLogicalSurfaceIndices,
+    )
   } else if (compositeMode === 'object-non-wall-triangles' || compositeMode === 'rejected-nearby-components') {
     // Diagnostic isolation: dim confirmed wall components while all preserved
     // object/non-wall triangles retain their captured source RGB.
@@ -577,6 +594,28 @@ function applyRealityDesignTriangleAppearance(
     }
   }
   color.needsUpdate = true
+}
+
+function logicalSurfaceIndexForVisualTriangle(
+  triangleIndex: number,
+  topology: PreparedRealitySurface['triangleTopology'],
+  surfels: FinalizedRealityReconstruction['surfels'],
+  visibleWallMask: VisibleWallMaskResult | null,
+): number {
+  if (!topology || !visibleWallMask) return -1
+  const sampleIndexById = new Map(surfels.map((sample, index) => [sample.id, index]))
+  const votes = new Map<number, number>()
+  for (let vertex = 0; vertex < 3; vertex++) {
+    const sampleIndex = sampleIndexById.get(topology.vertexSurfelIds[triangleIndex * 3 + vertex])
+    const logicalIndex = sampleIndex === undefined ? -1 : visibleWallMask.sampleLogicalSurfaceIndices[sampleIndex]
+    if (logicalIndex >= 0) votes.set(logicalIndex, (votes.get(logicalIndex) ?? 0) + 1)
+  }
+  let winner = -1
+  let count = 0
+  for (const [logicalIndex, voteCount] of votes) {
+    if (voteCount > count) { winner = logicalIndex; count = voteCount }
+  }
+  return count >= 2 ? winner : -1
 }
 
 function applyRoomSurfaceAppearance(
@@ -651,6 +690,7 @@ function FinalizedSpatialScanPreview({
   analysisResult,
   denseRealityReconstruction,
   realityReconstruction,
+  realityRgbKeyframes,
   roomBoundary,
   roomSurfaceConstruction,
   scan,
@@ -658,6 +698,7 @@ function FinalizedSpatialScanPreview({
   structuralInterpretation,
 }: FinalizedSpatialScanPreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const keyframeCanvasRef = useRef<HTMLCanvasElement>(null)
   const resetViewRef = useRef<(() => void) | null>(null)
   const roomSurfaceMeshesRef = useRef<Map<string, RoomSurfaceMesh>>(new Map())
   const roomSurfaceOutlinesRef = useRef<Map<string, RoomSurfaceOutline>>(new Map())
@@ -670,6 +711,7 @@ function FinalizedSpatialScanPreview({
   const [realityAppearanceMode, setRealityAppearanceMode] = useState<RealityAppearanceMode>('original')
   const [realityDesignCompositeMode, setRealityDesignCompositeMode] = useState<RealityDesignCompositeMode>('composite')
   const [realityDebugColorMode, setRealityDebugColorMode] = useState<RealityDebugColorMode>('none')
+  const [realityKeyframeDebugMode, setRealityKeyframeDebugMode] = useState<RealityKeyframeDebugMode>('best-keyframe')
   const [realityTapHit, setRealityTapHit] = useState<RealityTapHitEvaluation | null>(null)
   const [visibleRealityOwnershipState, setVisibleRealityOwnershipState] = useState<{ scanId: string | null; ownerships: readonly VisibleRealitySurfaceOwnership[] }>({ scanId: null, ownerships: EMPTY_VISIBLE_REALITY_OWNERSHIPS })
   const [lastHitOwnershipState, setLastHitOwnershipState] = useState<{ scanId: string | null; result: HitSeededOwnershipResult } | null>(null)
@@ -693,6 +735,12 @@ function FinalizedSpatialScanPreview({
     [roomPatches],
   )
   const realityAssociation = useRealityStructuralAssociation(preferredRealityReconstruction, roomPatches, scan.fusedSurface)
+  // M8.6 runs only for the dense source. Structural Reality is retained as a
+  // safe renderer fallback and has a different sample-index space.
+  const applicableRgbKeyframes = realityRenderSource === 'dense' && preferredRealityReconstruction === denseRealityReconstruction
+    ? realityRgbKeyframes
+    : null
+  const visibleWallMask = useVisibleWallMask(preferredRealityReconstruction, realityAssociation.table, applicableRgbKeyframes)
   const designInputs = useMemo<readonly RealityDesignColorInput[]>(() => Object.entries(surfaceCustomizations)
     .flatMap(([surfaceId, customization]) => customization.paintColor ? [{ surfaceId, paintColor: customization.paintColor }] : []), [surfaceCustomizations])
   // The visible-wall mask depends on selected structural surfaces, never on a
@@ -766,6 +814,56 @@ function FinalizedSpatialScanPreview({
     }
     return ids
   }, [selectedLogicalSurface, selectedSurfaceId])
+
+  const selectedVisibleWallMaskSurface = useMemo(() => selectedLogicalSurface
+    ? visibleWallMask.result?.surfaces.find((surface) => surface.logicalSurfaceId === selectedLogicalSurface.id) ?? null
+    : null, [selectedLogicalSurface, visibleWallMask.result])
+
+  useEffect(() => {
+    const canvas = keyframeCanvasRef.current
+    const maskSurface = selectedVisibleWallMaskSurface
+    const mask = maskSurface?.masks[0]
+    const frame = mask && applicableRgbKeyframes?.keyframes.find((candidate) => candidate.id === mask.keyframeId)
+    if (!canvas || !mask || !frame) return
+    canvas.width = frame.width
+    canvas.height = frame.height
+    const context = canvas.getContext('2d')
+    if (!context) return
+    const image = context.createImageData(frame.width, frame.height)
+    for (let pixel = 0; pixel < frame.width * frame.height; pixel++) {
+      const offset = pixel * 4, maskValue = mask.mask[pixel]
+      const sourceOffset = pixel * 3
+      const sourceR = frame.rgb[sourceOffset], sourceG = frame.rgb[sourceOffset + 1], sourceB = frame.rgb[sourceOffset + 2]
+      if (realityKeyframeDebugMode === 'rgb-wall-mask' || realityKeyframeDebugMode === 'projected-3d-mask') {
+        image.data[offset] = maskValue === VisibleWallMaskCode.WALL ? 34 : maskValue === VisibleWallMaskCode.NON_WALL ? 232 : 80
+        image.data[offset + 1] = maskValue === VisibleWallMaskCode.WALL ? 184 : maskValue === VisibleWallMaskCode.NON_WALL ? 67 : 80
+        image.data[offset + 2] = maskValue === VisibleWallMaskCode.WALL ? 255 : maskValue === VisibleWallMaskCode.NON_WALL ? 181 : 80
+      } else if (realityKeyframeDebugMode === 'non-wall-uncertain') {
+        const preserve = maskValue !== VisibleWallMaskCode.WALL
+        image.data[offset] = preserve ? 232 : sourceR * 0.2
+        image.data[offset + 1] = preserve ? 67 : sourceG * 0.2
+        image.data[offset + 2] = preserve ? 181 : sourceB * 0.2
+      } else {
+        image.data[offset] = sourceR
+        image.data[offset + 1] = sourceG
+        image.data[offset + 2] = sourceB
+      }
+      image.data[offset + 3] = 255
+    }
+    context.putImageData(image, 0, 0)
+    if (realityKeyframeDebugMode === 'rgb-wall-seeds') {
+      context.fillStyle = '#f8ff7a'
+      for (const seed of mask.seedPixels) {
+        const x = seed % frame.width, y = Math.floor(seed / frame.width)
+        context.fillRect(x - 1, y - 1, 3, 3)
+      }
+    }
+    if (realityKeyframeDebugMode === 'structural-roi') {
+      context.strokeStyle = '#f8ff7a'
+      context.lineWidth = Math.max(1, Math.round(frame.width / 120))
+      context.strokeRect(mask.roi.x, mask.roi.y, mask.roi.width, mask.roi.height)
+    }
+  }, [applicableRgbKeyframes, realityKeyframeDebugMode, selectedVisibleWallMaskSurface])
 
   const setSurfacePaintColor = useCallback((surfaceId: string, color: string): void => {
     const logical = logicalSurfaces.find((l) => l.id === surfaceId || l.memberPatchIds.includes(surfaceId))
@@ -995,6 +1093,7 @@ function FinalizedSpatialScanPreview({
           designInputs,
           designComposite.mode,
           visibleRealityOwnerships,
+          visibleWallMask.result,
         )
       }
       realityResources.group.traverse((object) => { object.renderOrder = 1 })
@@ -1099,6 +1198,33 @@ function FinalizedSpatialScanPreview({
       const triangleGeometry = triangleLayer ? realityResources.geometries[triangleLayer.geometry] : null
       if (triangleAssociation && triangleTopology && triangleGeometry && hit.object instanceof THREE.Mesh && hit.object.geometry === triangleGeometry && typeof hit.faceIndex === 'number') {
         const hitPoint = { x: hit.point.x, y: hit.point.y, z: hit.point.z }
+        // M8.6 first answers which visible RGB-guided wall region this exact
+        // frontmost triangle belongs to. The worker produced this assignment
+        // from M7-guided keyframe masks, so it remains a structural validation
+        // rather than a free screen-space guess.
+        const visualLogicalIndex = logicalSurfaceIndexForVisualTriangle(
+          hit.faceIndex,
+          triangleTopology,
+          preferredRealityReconstruction?.surfels ?? [],
+          visibleWallMask.result,
+        )
+        if (visualLogicalIndex >= 0) {
+          const logical = realityAssociation.table.logicalSurfaces[visualLogicalIndex]
+          setRealityTapHit({
+            hitPosition: hitPoint,
+            vertexSampleIds: [],
+            membershipVotes: { wallMember: 3, nonWall: 0, uncertain: 0 },
+            logicalSurfaceId: logical.id,
+            role: logical.role,
+            confidence: 0.82,
+            accepted: true,
+            reason: 'visible RGB-guided wall mask matched the tapped Reality triangle',
+            candidates: [],
+          })
+          selectSurface(logical.id)
+          setRealityAppearanceMode('design')
+          return
+        }
         const hitOwnership = createHitSeededVisibleRealityOwnership(
           preferredRealityReconstruction?.surfels ?? [],
           triangleTopology,
@@ -1291,7 +1417,7 @@ function FinalizedSpatialScanPreview({
         scene.remove(realityDesignResources.group)
       }
     }
-  }, [activeRealityScanId, analysisResult, denseRealityReconstruction, designInputs, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations, visibleRealityOwnerships])
+  }, [activeRealityScanId, analysisResult, denseRealityReconstruction, designInputs, logicalSurfaces, mode, preferredRealityReconstruction, preparedReality, realityAssociation.table, realityReconstruction, realityRenderMode, roomBoundary, roomPatches, roomSurfaceConstruction, scan, selectSurface, selectedLogicalSurface, selectedSurface, structuralInterpretation, structuralIntersections, surfaceCustomizations, visibleRealityOwnerships, visibleWallMask.result])
 
   useEffect(() => {
     applyRoomSurfaceAppearance(
@@ -1487,10 +1613,13 @@ function FinalizedSpatialScanPreview({
             <button type="button" className="scanner-reality-appearance-mode" aria-pressed={realityAppearanceMode === 'original'} onClick={() => setRealityAppearanceMode('original')}>Original</button>
             <button type="button" className="scanner-reality-appearance-mode" aria-pressed={realityAppearanceMode === 'design'} disabled={roomPatches.length === 0 || realityAssociation.pending || realityAssociation.error !== null} onClick={() => setRealityAppearanceMode('design')}>Design</button>
           </div>
-          <span>{realityAppearanceMode === 'original' ? 'Original scanned room appearance.' : 'Design appearance: clean structural paint surfaces with depth-aware preserved Reality foreground.'}</span>
+          <span>{realityAppearanceMode === 'original' ? 'Original scanned room appearance.' : 'Design appearance: RGB-guided paint on confirmed visible Reality wall triangles; other captured Reality stays original.'}</span>
           {roomPatches.length === 0 ? <span role="status">Analyze room surfaces to enable Design mode.</span> : null}
           {realityAssociation.pending ? <span role="status">Matching measured Reality geometry to room surfaces…</span> : null}
           {realityAssociation.error ? <span role="alert">{realityAssociation.error}</span> : null}
+          {realityAppearanceMode === 'design' && selectedLogicalSurface && !visibleWallMask.pending && !selectedVisibleWallMaskSurface ? (
+            <span role="status">Not enough visual coverage to customize this wall. Original Reality is preserved.</span>
+          ) : null}
           {realityTapHit && !realityTapHit.accepted ? <span role="status">{realityTapHit.reason}</span> : null}
           {realityTapHit && realityTapHit.accepted && realityTapHit.logicalSurfaceId ? <span role="status">Matched {realityTapHit.role} {realityTapHit.logicalSurfaceId} ({(realityTapHit.confidence * 100).toFixed(0)}% association confidence).</span> : null}
           {denseRealityReconstruction?.status === 'available' && denseRealityReconstruction.surfels.length > 0 ? (
@@ -1651,6 +1780,50 @@ function FinalizedSpatialScanPreview({
                   </button>
                 ))}
               </div>
+              <div className="scanner-reality-render-modes" role="group" aria-label="RGB keyframe wall-mask diagnostics">
+                <span>RGB wall-mask view</span>
+                {([
+                  ['best-keyframe', 'Best Keyframe'],
+                  ['structural-roi', 'Projected Structural ROI'],
+                  ['rgb-wall-seeds', 'RGB Wall Seeds'],
+                  ['rgb-wall-mask', 'RGB Wall Mask'],
+                  ['non-wall-uncertain', 'Non-Wall / Uncertain'],
+                  ['projected-3d-mask', '3D Projected Wall Mask'],
+                ] as const).map(([debugMode, label]) => (
+                  <button
+                    key={debugMode}
+                    type="button"
+                    className="scanner-reality-render-mode"
+                    aria-pressed={realityKeyframeDebugMode === debugMode}
+                    disabled={!selectedVisibleWallMaskSurface}
+                    onClick={() => setRealityKeyframeDebugMode(debugMode)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {applicableRgbKeyframes?.status === 'available' ? (
+                <span>
+                  RGB keyframes: {applicableRgbKeyframes.diagnostics.retainedCount} retained, {applicableRgbKeyframes.diagnostics.width} × {applicableRgbKeyframes.diagnostics.height}, {(applicableRgbKeyframes.diagnostics.totalBytes / (1024 * 1024)).toFixed(2)} MiB RGB; duplicate rejects {applicableRgbKeyframes.diagnostics.rejectedDuplicateCount}.
+                </span>
+              ) : (
+                <span role="status">No retained RGB keyframes for Dense Reality. Design preserves Original Reality until visual coverage is available.</span>
+              )}
+              {visibleWallMask.pending ? <span role="status">Preparing local RGB wall maskâ€¦</span> : null}
+              {visibleWallMask.error ? <span role="alert">{visibleWallMask.error}</span> : null}
+              {selectedVisibleWallMaskSurface ? (
+                <>
+                  <canvas ref={keyframeCanvasRef} className="scanner-rgb-keyframe-debug" aria-label="Selected wall RGB keyframe mask diagnostic" />
+                  <span>
+                    {selectedVisibleWallMaskSurface.logicalSurfaceId}: keyframes {selectedVisibleWallMaskSurface.selectedKeyframeIds.join(', ') || 'none'} / candidates {selectedVisibleWallMaskSurface.candidateKeyframeCount}; confirmed {selectedVisibleWallMaskSurface.wallConfirmedSampleCount}; non-wall {selectedVisibleWallMaskSurface.nonWallSampleCount}; uncertain {selectedVisibleWallMaskSurface.uncertainSampleCount}.
+                  </span>
+                  {selectedVisibleWallMaskSurface.masks.map((mask) => (
+                    <span key={`${selectedVisibleWallMaskSurface.logicalSurfaceId}-${mask.keyframeId}`}>
+                      KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, seeds {mask.seedPixelCount}, wall/non-wall/uncertain {mask.wallPixelCount}/{mask.nonWallPixelCount}/{mask.uncertainPixelCount}, quality {mask.qualityScore.toFixed(2)}.
+                    </span>
+                  ))}
+                </>
+              ) : null}
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
                   Rendered {realityRenderStats.renderedSurfelCount} surfels · {realityRenderStats.renderedSplatCount} splats · {realityRenderStats.renderedTriangleCount} triangles · preparation {realityRenderStats.renderPreparationMs.toFixed(1)} ms

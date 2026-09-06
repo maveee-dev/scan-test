@@ -50,6 +50,7 @@ const createInitialState = (): ScannerSessionState => ({
   finalizedScan: null,
   realityReconstruction: null,
   denseRealityReconstruction: null,
+  realityRgbKeyframes: null,
 })
 
 function getErrorMessage(error: unknown, fallbackMessage: string): string {
@@ -204,6 +205,7 @@ export function useScannerSession(
               finalizedScan: null,
               realityReconstruction: null,
               denseRealityReconstruction: null,
+              realityRgbKeyframes: null,
               error: null,
             }))
           },
@@ -223,6 +225,7 @@ export function useScannerSession(
           finalizedScan: null,
           realityReconstruction: null,
           denseRealityReconstruction: null,
+          realityRgbKeyframes: null,
           error: null,
         }))
       })
@@ -270,6 +273,7 @@ export function useScannerSession(
           finalizedScan: null,
           realityReconstruction: null,
           denseRealityReconstruction: null,
+          realityRgbKeyframes: null,
           error: null,
         }))
       })
@@ -315,6 +319,7 @@ export function useScannerSession(
           finalizedScan: capture.spatialScan,
           realityReconstruction: capture.realityReconstruction,
           denseRealityReconstruction: capture.denseRealityReconstruction,
+          realityRgbKeyframes: capture.realityRgbKeyframes,
           error: null,
         }))
       })

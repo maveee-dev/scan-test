@@ -2,6 +2,7 @@ import type {
   RawCameraCapabilityReason,
   RawCameraCapabilityState,
   RawCameraCopyFrame,
+  RawCameraKeyframeCopyFrame,
   RawCameraCopyMapping,
   RawCameraCopyStatus,
   RawCameraDebug,
@@ -15,6 +16,8 @@ import type {
 
 const MAX_COPY_DIMENSION = 160
 const MAX_COPY_PIXELS = 160 * 90
+const KEYFRAME_MAX_COPY_DIMENSION = 320
+const KEYFRAME_MAX_COPY_PIXELS = 320 * 180
 const READBACK_SAMPLE_CAPACITY = 32
 
 const FULLSCREEN_TRIANGLE = new Float32Array([
@@ -192,13 +195,13 @@ function getOrientationIndex(orientation: RawCameraOrientation): number {
   }
 }
 
-function getFullFrameCopyDimensions(sourceWidth: number, sourceHeight: number): [number, number] {
+function getFullFrameCopyDimensions(sourceWidth: number, sourceHeight: number, maximumDimension = MAX_COPY_DIMENSION, maximumPixels = MAX_COPY_PIXELS): [number, number] {
   const sourcePixelCount = sourceWidth * sourceHeight
   const sourceMaxDimension = Math.max(sourceWidth, sourceHeight)
   const scale = Math.min(
     1,
-    MAX_COPY_DIMENSION / sourceMaxDimension,
-    Math.sqrt(MAX_COPY_PIXELS / sourcePixelCount),
+    maximumDimension / sourceMaxDimension,
+    Math.sqrt(maximumPixels / sourcePixelCount),
   )
   return [
     Math.max(1, Math.floor(sourceWidth * scale)),
@@ -320,6 +323,18 @@ export class XRRawCameraService {
   private outputTexture: WebGLTexture | null = null
 
   private outputFramebuffer: WebGLFramebuffer | null = null
+
+  private keyframeTexture: WebGLTexture | null = null
+
+  private keyframeFramebuffer: WebGLFramebuffer | null = null
+
+  private keyframeReadback = new Uint8Array(4)
+
+  private keyframeWidth = 1
+
+  private keyframeHeight = 1
+
+  private keyframeSequence = 0
 
   private fullscreenBuffer: WebGLBuffer | null = null
 
@@ -565,6 +580,72 @@ export class XRRawCameraService {
     }
   }
 
+  /**
+   * Performs a bounded, infrequent second copy for RGB keyframes. It is called
+   * only after keyframe scoring accepts an XR frame and never changes the
+   * validated 160px RGB-D copy or its cadence.
+   */
+  public copyKeyframe(
+    frame: XRFrame,
+    view: XRView,
+    timestamp: number,
+  ): RawCameraKeyframeCopyFrame | null {
+    if (!this.session || !this.gl || !this.binding || !this.program || !this.fullscreenBuffer || frame.session !== this.session) return null
+    const camera = view.camera
+    if (!camera || !Number.isFinite(camera.width) || !Number.isFinite(camera.height) || camera.width <= 0 || camera.height <= 0) return null
+    let cameraTexture: WebGLTexture | null = null
+    let previousState: ReturnType<XRRawCameraService['captureGlState']> | null = null
+    try {
+      cameraTexture = this.binding.getCameraImage(camera)
+      if (!cameraTexture) return null
+      const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, KEYFRAME_MAX_COPY_DIMENSION, KEYFRAME_MAX_COPY_PIXELS)
+      this.ensureKeyframeResources(width, height)
+      if (!this.keyframeFramebuffer) return null
+      previousState = this.captureGlState()
+      const gl = this.gl
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.keyframeFramebuffer)
+      gl.viewport(0, 0, width, height)
+      gl.disable(gl.BLEND)
+      gl.disable(gl.DEPTH_TEST)
+      gl.disable(gl.CULL_FACE)
+      gl.disable(gl.SCISSOR_TEST)
+      gl.colorMask(true, true, true, true)
+      gl.depthMask(false)
+      gl.useProgram(this.program)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, cameraTexture)
+      gl.uniform1i(this.cameraImageUniform, 0)
+      gl.uniform4f(this.sourceCropUniform, 0, 0, 1, 1)
+      gl.uniform1i(this.orientationUniform, getOrientationIndex(this.diagnostics.orientation))
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.fullscreenBuffer)
+      gl.enableVertexAttribArray(this.positionAttribute)
+      gl.vertexAttribPointer(this.positionAttribute, 2, gl.FLOAT, false, 0, 0)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, this.keyframeReadback)
+      this.keyframeSequence += 1
+      return {
+        sequence: this.keyframeSequence,
+        timestamp,
+        mapping: {
+          sourceCameraWidth: camera.width,
+          sourceCameraHeight: camera.height,
+          copyWidth: width,
+          copyHeight: height,
+          sourceUvRect: { x: 0, y: 0, width: 1, height: 1 },
+          orientation: this.diagnostics.orientation,
+        },
+        pixels: this.keyframeReadback,
+      }
+    } catch {
+      return null
+    } finally {
+      if (previousState) {
+        try { this.restoreGlState(previousState) } catch { /* must not interrupt XR */ }
+      }
+      cameraTexture = null
+    }
+  }
+
   public isAvailable(): boolean {
     return this.diagnostics.status === 'available' || this.diagnostics.status === 'active'
   }
@@ -624,6 +705,10 @@ export class XRRawCameraService {
     this.readback = new Uint8Array(4)
     this.copyWidth = 1
     this.copyHeight = 1
+    this.keyframeReadback = new Uint8Array(4)
+    this.keyframeWidth = 1
+    this.keyframeHeight = 1
+    this.keyframeSequence = 0
     this.readbackDurations.length = 0
     this.copySequence = 0
     this.diagnostics = createInitialDiagnostics()
@@ -727,6 +812,30 @@ export class XRRawCameraService {
     this.readback = new Uint8Array(copyWidth * copyHeight * 4)
   }
 
+  private ensureKeyframeResources(width: number, height: number): void {
+    const gl = this.gl
+    if (!gl) throw new Error('The raw camera WebGL context is unavailable.')
+    if (!this.keyframeTexture) {
+      this.keyframeTexture = gl.createTexture()
+      this.keyframeFramebuffer = gl.createFramebuffer()
+      if (!this.keyframeTexture || !this.keyframeFramebuffer) throw new Error('Keyframe copy resources could not be created.')
+      gl.bindTexture(gl.TEXTURE_2D, this.keyframeTexture)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    }
+    if (width === this.keyframeWidth && height === this.keyframeHeight && this.keyframeReadback.length === width * height * 4) return
+    gl.bindTexture(gl.TEXTURE_2D, this.keyframeTexture)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.keyframeFramebuffer)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.keyframeTexture, 0)
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('The keyframe framebuffer is incomplete.')
+    this.keyframeWidth = width
+    this.keyframeHeight = height
+    this.keyframeReadback = new Uint8Array(width * height * 4)
+  }
+
   private captureGlState(): {
     framebuffer: WebGLFramebuffer | null
     program: WebGLProgram | null
@@ -817,6 +926,8 @@ export class XRRawCameraService {
       this.program = null
       this.outputTexture = null
       this.outputFramebuffer = null
+      this.keyframeTexture = null
+      this.keyframeFramebuffer = null
       this.fullscreenBuffer = null
       this.positionAttribute = -1
       this.sourceCropUniform = null
@@ -834,12 +945,20 @@ export class XRRawCameraService {
     if (this.outputFramebuffer) {
       this.gl.deleteFramebuffer(this.outputFramebuffer)
     }
+    if (this.keyframeTexture) {
+      this.gl.deleteTexture(this.keyframeTexture)
+    }
+    if (this.keyframeFramebuffer) {
+      this.gl.deleteFramebuffer(this.keyframeFramebuffer)
+    }
     if (this.fullscreenBuffer) {
       this.gl.deleteBuffer(this.fullscreenBuffer)
     }
     this.program = null
     this.outputTexture = null
     this.outputFramebuffer = null
+    this.keyframeTexture = null
+    this.keyframeFramebuffer = null
     this.fullscreenBuffer = null
     this.positionAttribute = -1
     this.sourceCropUniform = null

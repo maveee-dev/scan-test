@@ -1611,3 +1611,82 @@ triangle count, area, calibrated offset, structural candidates, confidence, and
 post-scan adjacency/growth timing. This is still measured triangle recoloring,
 not an opaque M7 paint polygon, image texture projection, semantic object
 recognition, or fabricated wall filling.
+
+### M8.6 — RGB-Guided Visible Wall Segmentation + 3D Projection
+
+M8.6 adds a bounded, local-only visual-analysis branch without changing the
+validated M8.1/M8.2 camera copy used by live RGB-D registration, Dense Reality
+fusion, M7 geometry, or Reality Original rendering.
+
+```text
+SCAN: RGB + depth + pose
+       |
+       +--> Dense Reality ------------------+--> final visible triangle geometry
+       |                                    |
+       +--> bounded application-owned RGB keyframes
+                    |                       |
+M7 logical wall ---+--> projected wall ROI -> local visible-wall mask
+                                            |
+                                            +--> world-to-keyframe projection
+                                                     |
+                                                     +--> Design triangle colors
+```
+
+The raw-camera service still maintains its validated small full-frame RGB copy
+for same-frame fusion. Separately, only a pose-diverse, depth-supported frame
+may receive one modest full-frame keyframe copy (currently up to 320 pixels on
+the long edge and 57,600 pixels). A maximum of 12 application-owned RGB frames
+is retained. For the POCO F5 portrait source this is approximately 144 × 320,
+or about 138 KiB RGB per keyframe and about 1.6 MiB for all RGB payloads,
+plus a negligible set of matrices and mapping descriptors. Keyframes retain
+RGB bytes, camera/inverse-camera transforms, projection matrix, mapping and
+quality metadata; no browser-owned texture, video sequence, or remote upload
+is retained.
+
+During scanning, generic keyframe selection uses a minimum interval together
+with translation or rotation diversity and valid depth support, so it rejects
+near-duplicate poses instead of saving frames at arbitrary time intervals.
+After M7 analysis, a logical surface projects its observed structural support
+into each retained keyframe. Projected area and capture quality select at most
+three keyframes for that surface; the M7 projection is a **search ROI and
+semantic prior**, not the visible paint geometry.
+
+The initial replaceable `VisibleWallMaskProvider` is a deterministic local
+geometric/RGB implementation. High-confidence M8.5 structural/Reality samples
+project into a selected keyframe as trusted visual-wall seeds. Within the ROI,
+bounded connected growth compares normalized chroma separately from luminance,
+so moderate lighting variation can remain wall while strong, enclosed colour
+or texture changes stop growth. Structural seed support and ROI containment
+remain required; RGB alone never declares a different-coloured wall an object.
+The current keyframe representation deliberately does not retain a second
+depth image: existing M7-supported 3D seeds and Dense Reality are the geometry
+evidence for this first local provider. A later provider may add bounded depth
+snapshots or semantic segmentation behind the same interface.
+
+Each Dense Reality sample is reprojected with the same M8.2 convention used for
+registration: world position -> saved inverse camera transform -> projection
+matrix -> NDC/UV -> authoritative camera-copy mapping -> keyframe mask pixel.
+Votes from selected keyframes are fused conservatively. A wall vote must beat
+non-wall votes, and overlapping M7 ROIs cannot overwrite a stronger logical
+surface vote. A Dense Reality triangle receives a wall logical ID only when at
+least two of its three source samples agree. Thus normal **Design** continues
+to use original Dense Reality triangle positions and derives paint colour only
+where visible RGB-guided evidence confirms wall material. `NON_WALL` and
+`UNCERTAIN` remain original captured RGB. **Original** never reads or mutates
+the mask and remains the exact captured Reality appearance.
+
+If no retained keyframe adequately observes a selected wall, the renderer does
+not fall back to an opaque M7 rectangle. It leaves Reality original and reports
+that visual coverage is insufficient. Keyframes and derived masks are
+scan-session-only data: they are reset on a new scan, cancel, session stop, or
+dispose. No cloud API, SAM, TensorFlow, ONNX model, or other remote semantic
+inference is used in M8.6. Thin fully coplanar content, such as a poster flush
+to a wall, remains an honest limitation until a later replaceable mask provider
+adds stronger visual semantics.
+
+Development diagnostics expose retained keyframe count/resolution/memory,
+best keyframe, projected structural ROI, trusted seed and RGB mask statistics,
+non-wall/uncertain view, projected 3D mask evidence, and per-wall selected
+keyframes. Mask preparation runs in a cancellable post-scan worker; paint
+swatch changes reuse the completed sample-to-logical-wall map rather than
+rerunning segmentation or adding XR-loop work.

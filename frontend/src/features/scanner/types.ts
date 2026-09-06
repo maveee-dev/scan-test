@@ -537,6 +537,15 @@ export interface RawCameraCopyFrame {
   readonly pixels: Uint8Array
 }
 
+/** A larger, infrequent application-owned copy used only for post-scan visual analysis. */
+export interface RawCameraKeyframeCopyFrame {
+  readonly sequence: number
+  readonly timestamp: number
+  readonly mapping: RawCameraCopyMapping
+  /** RGBA readback rows are in WebGL bottom-left origin order. */
+  readonly pixels: Uint8Array
+}
+
 export interface RawCameraDebug {
   status: RawCameraCapabilityState
   reason: RawCameraCapabilityReason | null
@@ -770,10 +779,49 @@ export interface FinalizedDenseRealityReconstruction {
   readonly colorSamples: readonly DenseRealityColorSample[]
 }
 
+/** Bounded local RGB evidence retained for a finalized scan; never browser textures. */
+export interface RealityRgbKeyframe {
+  readonly id: number
+  readonly timestamp: number
+  readonly width: number
+  readonly height: number
+  /** Application-owned RGB pixels in top-left row order. */
+  readonly rgb: Uint8Array
+  readonly cameraTransform: Float32Array
+  readonly inverseCameraTransform: Float32Array
+  readonly projectionMatrix: Float32Array
+  readonly mapping: RawCameraCopyMapping
+  readonly qualityScore: number
+  readonly translationDeltaMeters: number
+  readonly rotationDeltaDegrees: number
+  readonly validDepthFraction: number
+}
+
+export interface RealityRgbKeyframeDiagnostics {
+  readonly status: 'active' | 'unavailable' | 'empty'
+  readonly retainedCount: number
+  readonly capacity: number
+  readonly width: number | null
+  readonly height: number | null
+  readonly bytesPerKeyframe: number
+  readonly totalBytes: number
+  readonly captureCount: number
+  readonly rejectedDuplicateCount: number
+  readonly captureMs: number
+}
+
+export interface FinalizedRealityRgbKeyframes {
+  readonly scanId: string
+  readonly status: 'available' | 'unavailable' | 'empty'
+  readonly keyframes: readonly RealityRgbKeyframe[]
+  readonly diagnostics: RealityRgbKeyframeDiagnostics
+}
+
 export interface FinalizedScannerCapture {
   readonly spatialScan: FinalizedSpatialScan
   readonly realityReconstruction: FinalizedRealityReconstruction
   readonly denseRealityReconstruction: FinalizedDenseRealityReconstruction | null
+  readonly realityRgbKeyframes: FinalizedRealityRgbKeyframes
 }
 
 export interface ViewerPoseDebug {
@@ -806,4 +854,5 @@ export interface ScannerSessionState {
   finalizedScan: FinalizedSpatialScan | null
   realityReconstruction: FinalizedRealityReconstruction | null
   denseRealityReconstruction: FinalizedDenseRealityReconstruction | null
+  realityRgbKeyframes: FinalizedRealityRgbKeyframes | null
 }

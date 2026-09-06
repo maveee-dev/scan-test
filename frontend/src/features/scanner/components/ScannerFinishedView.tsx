@@ -3,6 +3,7 @@ import { BUILD_INFO } from '../../../config/buildInfo'
 import type {
   FinalizedDenseRealityReconstruction,
   FinalizedRealityReconstruction,
+  FinalizedRealityRgbKeyframes,
   FinalizedSpatialScan,
 } from '../types'
 import { PlaneExtractionService } from '../../room-analysis/services/planeExtractionService'
@@ -28,6 +29,7 @@ interface ScannerFinishedViewProps {
   scan: FinalizedSpatialScan
   denseRealityReconstruction: FinalizedDenseRealityReconstruction | null
   realityReconstruction: FinalizedRealityReconstruction | null
+  realityRgbKeyframes: FinalizedRealityRgbKeyframes | null
   onStartNewScan: () => void
   onDiscardScan: () => void
 }
@@ -812,6 +814,7 @@ function ScannerFinishedView({
   onDiscardScan,
   onStartNewScan,
   realityReconstruction,
+  realityRgbKeyframes,
   scan,
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
@@ -958,10 +961,11 @@ function ScannerFinishedView({
       {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
 
       {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
-        <FinalizedSpatialScanPreview
+    <FinalizedSpatialScanPreview
           analysisResult={analysisResult}
           denseRealityReconstruction={denseRealityReconstruction}
-          realityReconstruction={realityReconstruction}
+      realityReconstruction={realityReconstruction}
+      realityRgbKeyframes={realityRgbKeyframes}
           scan={scan}
           roomBoundary={boundaryResult}
           roomSurfaceConstruction={roomSurfaceResult}

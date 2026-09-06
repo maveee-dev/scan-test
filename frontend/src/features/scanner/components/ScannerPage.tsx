@@ -219,6 +219,7 @@ function ScannerPage({
               onDiscardScan={onDiscardScan}
               onStartNewScan={onStartNewScan}
               denseRealityReconstruction={sessionState.denseRealityReconstruction}
+              realityRgbKeyframes={sessionState.realityRgbKeyframes}
               realityReconstruction={sessionState.realityReconstruction}
               scan={sessionState.finalizedScan}
             />

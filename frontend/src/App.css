@@ -721,6 +721,17 @@
   background: rgba(204, 255, 0, 0.08);
 }
 
+.scanner-rgb-keyframe-debug {
+  display: block;
+  width: min(100%, 320px);
+  height: auto;
+  max-height: 260px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  image-rendering: auto;
+}
+
 .scanner-analysis-controls {
   display: flex;
   width: 100%;

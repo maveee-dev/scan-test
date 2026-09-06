@@ -420,8 +420,10 @@ export function applyRealityTrianglePaint(
   componentDebug = false,
   selectedOnly = false,
   visibleOwnerships: readonly VisibleRealitySurfaceOwnership[] = [],
+  visualSampleLogicalSurfaceIndices?: Int32Array,
 ): void {
   const sampleById = new Map(samples.map((sample) => [sample.id, sample]))
+  const sampleIndexById = new Map(samples.map((sample, index) => [sample.id, index]))
   const paintBySurface = new Map(inputs.map((input) => [input.surfaceId, paintColor(input.paintColor)]))
   // A user-hit component owns its logical surface for this finalized scan.
   // Suppress automatic components for that same logical surface so a hidden
@@ -435,7 +437,21 @@ export function applyRealityTrianglePaint(
   }
   for (let triangle = 0; triangle < topology.triangleCount; triangle++) {
     const automaticLogicalIndex = triangleAssociation.logicalSurfaceIndices[triangle]
-    const logicalIndex = manualTriangleLogicalIndices.get(triangle) ?? (manualLogicalIndices.has(automaticLogicalIndex) ? -1 : automaticLogicalIndex)
+    let visualLogicalIndex = -1
+    if (visualSampleLogicalSurfaceIndices) {
+      const votes = new Map<number, number>()
+      for (let vertex = 0; vertex < 3; vertex++) {
+        const sampleIndex = sampleIndexById.get(topology.vertexSurfelIds[triangle * 3 + vertex])
+        const visualIndex = sampleIndex === undefined ? -1 : visualSampleLogicalSurfaceIndices[sampleIndex]
+        if (visualIndex >= 0) votes.set(visualIndex, (votes.get(visualIndex) ?? 0) + 1)
+      }
+      for (const [index, count] of votes) if (count >= 2 && (visualLogicalIndex < 0 || count > (votes.get(visualLogicalIndex) ?? 0))) visualLogicalIndex = index
+    }
+    // RGB-guided M8.6 evidence is the primary visible-wall assignment when
+    // available. A triangle without sufficient visual agreement stays original.
+    const logicalIndex = visualSampleLogicalSurfaceIndices
+      ? visualLogicalIndex
+      : manualTriangleLogicalIndices.get(triangle) ?? (manualLogicalIndices.has(automaticLogicalIndex) ? -1 : automaticLogicalIndex)
     if (logicalIndex < 0) continue
     const logical = table.logicalSurfaces[logicalIndex]
     let paint = paintBySurface.get(logical.id) ?? null

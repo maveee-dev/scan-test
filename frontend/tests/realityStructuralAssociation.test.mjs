@@ -20,6 +20,8 @@ const association = await import(moduleUrl(new URL('../src/features/scanner/serv
 const structuralInterpretation = await import(moduleUrl(new URL('../src/features/room-analysis/services/structuralSurfaceInterpretationService.ts', import.meta.url)))
 const compositor = await import(moduleUrl(new URL('../src/features/scanner/services/realityDesignCompositingService.ts', import.meta.url)))
 const triangleAssociation = await import(moduleUrl(new URL('../src/features/scanner/services/realityWallTriangleAssociationService.ts', import.meta.url)))
+const visibleWallMask = await import(moduleUrl(new URL('../src/features/scanner/services/visibleWallMaskProvider.ts', import.meta.url)))
+const keyframeService = await import(moduleUrl(new URL('../src/features/scanner/services/realityRgbKeyframeService.ts', import.meta.url)))
 
 function patch(id, {
   offsetX = 0,
@@ -867,4 +869,118 @@ test('55. Separate compatible observed wall component may join a user-hit logica
   assert.ok(hit.ownership)
   assert.ok(hit.ownership.additionalComponentCount >= 1)
   assert.deepEqual([...hit.ownership.triangleIndices], [0, 1])
+})
+
+function identityMatrix() {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+}
+
+function testKeyframe(id, width = 8, height = 8, picture = true) {
+  const rgb = new Uint8Array(width * height * 3)
+  for (let pixel = 0; pixel < width * height; pixel++) rgb.set([184, 174, 160], pixel * 3)
+  if (picture) for (let y = 3; y <= 4; y++) for (let x = 3; x <= 4; x++) rgb.set([190, 25, 35], (y * width + x) * 3)
+  return {
+    id,
+    timestamp: id * 1000,
+    width,
+    height,
+    rgb,
+    cameraTransform: identityMatrix(),
+    inverseCameraTransform: identityMatrix(),
+    projectionMatrix: identityMatrix(),
+    mapping: { sourceCameraWidth: width, sourceCameraHeight: height, copyWidth: width, copyHeight: height, sourceUvRect: { x: 0, y: 0, width: 1, height: 1 }, orientation: 'upright' },
+    qualityScore: 0.9,
+    translationDeltaMeters: 0.2,
+    rotationDeltaDegrees: 16,
+    validDepthFraction: 1,
+  }
+}
+
+function keyframeSnapshot(keyframes) {
+  return {
+    scanId: 'm8.6-synthetic', status: 'available', keyframes,
+    diagnostics: { status: 'active', retainedCount: keyframes.length, capacity: 12, width: keyframes[0]?.width ?? null, height: keyframes[0]?.height ?? null, bytesPerKeyframe: keyframes[0]?.rgb.byteLength ?? 0, totalBytes: keyframes.reduce((total, frame) => total + frame.rgb.byteLength, 0), captureCount: keyframes.length, rejectedDuplicateCount: 0, captureMs: 0 },
+  }
+}
+
+function rgbMaskTable(samples, wall) {
+  return {
+    patches: [wall],
+    logicalSurfaces: logicalService.groupPatchesIntoLogicalSurfaces([wall]),
+    memberships: new Uint8Array(samples.map((_sample, index) => index < 3 ? 1 : 0)),
+    logicalSurfaceIndices: new Int32Array(samples.map((_sample, index) => index < 3 ? 0 : -1)),
+  }
+}
+
+// 56. Keyframes are application-owned, pose-diverse, and stop at the fixed cap.
+test('56. RGB keyframe storage rejects duplicates and remains bounded', () => {
+  const service = new keyframeService.RealityRgbKeyframeService()
+  let sequence = 0
+  const rawCamera = {
+    copyKeyframe: () => ({
+      sequence: ++sequence,
+      timestamp: sequence * 1000,
+      mapping: { sourceCameraWidth: 4, sourceCameraHeight: 2, copyWidth: 4, copyHeight: 2, sourceUvRect: { x: 0, y: 0, width: 1, height: 1 }, orientation: 'upright' },
+      pixels: new Uint8Array(4 * 2 * 4).fill(120),
+    }),
+  }
+  const view = { transform: { matrix: identityMatrix(), inverse: { matrix: identityMatrix() } }, projectionMatrix: identityMatrix() }
+  service.considerCapture({}, view, 1000, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 3600, rawCamera)
+  service.considerCapture({}, view, 1100, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 3600, rawCamera)
+  for (let index = 1; index < 14; index++) service.considerCapture({}, view, 1000 + index * 1000, { x: index * 0.2, y: 0, z: 0 }, { x: 0, y: 0, z: -1 }, 3600, rawCamera)
+  const snapshot = service.createSnapshot('m8.6-keyframes', true)
+  assert.equal(snapshot.keyframes.length, 12)
+  assert.equal(snapshot.diagnostics.retainedCount, 12)
+  assert.ok(snapshot.diagnostics.rejectedDuplicateCount >= 1)
+  assert.ok(snapshot.diagnostics.totalBytes <= 12 * (4 * 2 * 3 + 16 * 4 * 3))
+  service.reset()
+  assert.equal(service.createSnapshot('fresh', true).status, 'empty')
+})
+
+// 57. Trusted projected wall pixels grow over lighting variation but stop at a strong picture boundary.
+test('57. RGB-guided wall mask preserves a high-contrast picture region', () => {
+  const wall = patch('wall-rgb', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [
+    surfel(701, -0.55, 0.2, -1), surfel(702, -0.35, 0.4, -1), surfel(703, 0.5, 0.55, -1),
+    surfel(704, 0, 0, -1), // projected into the red picture centre
+  ]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1)]))
+  assert.ok(result)
+  assert.equal(result.sampleLogicalSurfaceIndices[0], 0)
+  assert.equal(result.sampleLogicalSurfaceIndices[1], 0)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.ok(result.surfaces[0].masks[0].nonWallPixelCount > 0)
+})
+
+// 58. Multiple keyframes vote conservatively and a mask never leaks into a different logical wall.
+test('58. Multi-keyframe wall votes remain bounded and logical walls stay independent', () => {
+  const wallA = patch('wall-rgb-a', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const wallB = patch('wall-rgb-b', { offsetX: 2.5, offsetZ: -1, planeConstant: -1, width: 1, height: 1 })
+  const samples = [surfel(711, -0.5, 0.2, -1), surfel(712, -0.25, 0.4, -1), surfel(713, 0.5, 0.55, -1), surfel(714, 0, 0, -1)]
+  const table = rgbMaskTable(samples, wallA)
+  table.patches = [wallA, wallB]
+  table.logicalSurfaces = logicalService.groupPatchesIntoLogicalSurfaces([wallA, wallB])
+  const frames = [testKeyframe(1), testKeyframe(2), testKeyframe(3), testKeyframe(4)]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, table, keyframeSnapshot(frames))
+  assert.ok(result)
+  assert.ok(result.surfaces[0].selectedKeyframeIds.length <= 3)
+  assert.equal(result.sampleLogicalSurfaceIndices[0], 0)
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.equal(result.surfaces[1].masks.length, 0, 'off-camera Wall B must not borrow Wall A mask pixels')
+})
+
+// 59. RGB-guided 3D sample votes are the Design paint authority; no automatic M7 fallback paints an unconfirmed triangle.
+test('59. RGB-projected triangle paint requires two agreeing source samples', () => {
+  const wall = patch('wall-rgb-triangle')
+  const samples = [surfel(721, 0.5, 0.5, 0.006), surfel(722, 0.8, 0.5, 0.006), surfel(723, 0.5, 0.8, 0.006), surfel(724, 1.2, 0.5, 0.006), surfel(725, 1.5, 0.5, 0.006), surfel(726, 1.2, 0.8, 0.006)]
+  const topology = triangleTopology([721, 722, 723, 724, 725, 726])
+  const table = association.associateRealitySurfels(samples, [wall])
+  const automatic = triangleAssociation.associateRealityWallTriangles(samples, topology, table, new Uint8Array(samples.length))
+  const colors = new Float32Array(18).fill(0.5)
+  const source = [...colors]
+  const originalSamples = JSON.stringify(samples)
+  triangleAssociation.applyRealityTrianglePaint(colors, samples, topology, automatic, table, [{ surfaceId: 'wall-rgb-triangle', paintColor: '#1565d8' }], false, false, [], new Int32Array([0, 0, -1, -1, -1, -1]))
+  assert.notDeepEqual([...colors.slice(0, 9)], source.slice(0, 9))
+  assert.deepEqual([...colors.slice(9)], source.slice(9))
+  assert.equal(JSON.stringify(samples), originalSamples)
 })
