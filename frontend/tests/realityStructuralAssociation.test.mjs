@@ -984,3 +984,20 @@ test('59. RGB-projected triangle paint requires two agreeing source samples', ()
   assert.deepEqual([...colors.slice(9)], source.slice(9))
   assert.equal(JSON.stringify(samples), originalSamples)
 })
+
+// 60. A visually distinct, near-coplanar enclosed wood decoration is preserved even without a large plane offset.
+test('60. Enclosed attached decoration becomes preserved-object evidence', () => {
+  const wall = patch('wall-wood-decoration', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [
+    surfel(731, -0.55, 0.2, -1), surfel(732, -0.35, 0.4, -1), surfel(733, 0.5, 0.55, -1),
+    surfel(734, 0, 0, -1),
+  ]
+  const frame = testKeyframe(1, 8, 8, false)
+  for (let y = 3; y <= 4; y++) for (let x = 3; x <= 4; x++) frame.rgb.set([136, 93, 50], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  const mask = result.surfaces[0].masks[0]
+  assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
+  assert.ok(mask.enclosedVisualObjectPixelCount > 0, 'attached visual component must produce bounded preserved-object evidence')
+  assert.ok(result.surfaces[0].preservedObjectPixelCount > 0)
+})

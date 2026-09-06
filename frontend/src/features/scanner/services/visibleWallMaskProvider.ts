@@ -4,17 +4,31 @@ import { RealityMembershipCode } from './realityStructuralAssociationService'
 import { mapCameraUvToCopyPixelInto } from './xrRawCameraService'
 
 export const VisibleWallMaskCode = { WALL: 1, NON_WALL: 2, UNCERTAIN: 3 } as const
+/** Compact, per-pixel explanation for the local post-scan visual decision. */
+export const VisibleWallMaskEvidenceCode = {
+  UNKNOWN: 0,
+  STRUCTURAL_SEED: 1,
+  CONSISTENT_WALL_GROWTH: 2,
+  STRONG_VISUAL_OBJECT: 3,
+  ENCLOSED_VISUAL_OBJECT: 4,
+  UNCERTAIN: 5,
+} as const
 
 export interface VisibleWallMaskKeyframe {
   readonly keyframeId: number
   readonly roi: { x: number; y: number; width: number; height: number }
   readonly mask: Uint8Array
+  readonly evidence: Uint8Array
   /** Pixel indices of high-confidence projected structural/Reality seeds. */
   readonly seedPixels: Uint32Array
   readonly seedPixelCount: number
   readonly wallPixelCount: number
   readonly nonWallPixelCount: number
   readonly uncertainPixelCount: number
+  readonly seedWallPixelCount: number
+  readonly grownWallPixelCount: number
+  readonly strongVisualObjectPixelCount: number
+  readonly enclosedVisualObjectPixelCount: number
   readonly projectedAreaPixels: number
   readonly qualityScore: number
 }
@@ -24,6 +38,10 @@ export interface VisibleWallMaskSurfaceResult {
   readonly selectedKeyframeIds: readonly number[]
   readonly masks: readonly VisibleWallMaskKeyframe[]
   readonly candidateKeyframeCount: number
+  readonly roiPixelCount: number
+  readonly paintableWallPixelCount: number
+  readonly preservedObjectPixelCount: number
+  readonly preservedUncertainPixelCount: number
   readonly wallConfirmedSampleCount: number
   readonly nonWallSampleCount: number
   readonly uncertainSampleCount: number
@@ -46,6 +64,17 @@ export interface VisibleWallMaskProvider {
 
 const MAX_KEYFRAMES_PER_SURFACE = 3
 const EPSILON = 1e-8
+// Paint only high-confidence visual wall continuation. Ambiguous pixels stay
+// original, while enclosed divergent regions become preserved object evidence.
+const WALL_GROWTH_CHROMA_DISTANCE = 0.105
+const WALL_GROWTH_LUMINANCE_DISTANCE = 0.22
+const WALL_LOCAL_EDGE_CHROMA_DISTANCE = 0.065
+const WALL_LOCAL_EDGE_LUMINANCE_DISTANCE = 0.13
+const STRONG_OBJECT_CHROMA_DISTANCE = 0.28
+const STRONG_OBJECT_LUMINANCE_DISTANCE = 0.55
+const ENCLOSED_OBJECT_MIN_PIXELS = 4
+const ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE = 0.055
+const ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE = 0.10
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -102,6 +131,50 @@ function roiFor(frame: RealityRgbKeyframe, points: readonly SpatialPoint[]): { x
   return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1, area: (maxX - minX + 1) * (maxY - minY + 1) }
 }
 
+function forEachRoiNeighbor(x: number, y: number, roi: { x: number; y: number; width: number; height: number }, visit: (x: number, y: number) => void): void {
+  if (x > roi.x) visit(x - 1, y)
+  if (x + 1 < roi.x + roi.width) visit(x + 1, y)
+  if (y > roi.y) visit(x, y - 1)
+  if (y + 1 < roi.y + roi.height) visit(x, y + 1)
+}
+
+function preserveEnclosedVisualObjects(
+  frame: RealityRgbKeyframe,
+  roi: { x: number; y: number; width: number; height: number },
+  mask: Uint8Array,
+  evidence: Uint8Array,
+): void {
+  const visited = new Uint8Array(mask.length), queue: number[] = [], component: number[] = []
+  for (let y = roi.y; y < roi.y + roi.height; y++) for (let x = roi.x; x < roi.x + roi.width; x++) {
+    const start = y * frame.width + x
+    if (visited[start] || mask[start] !== VisibleWallMaskCode.UNCERTAIN) continue
+    queue.length = 0; component.length = 0; queue.push(start); visited[start] = 1
+    let touchesRoiBoundary = false, boundaryCount = 0, chromaSum = 0, luminanceSum = 0
+    while (queue.length > 0) {
+      const current = queue.pop() as number, currentX = current % frame.width, currentY = Math.floor(current / frame.width)
+      component.push(current)
+      if (currentX === roi.x || currentX === roi.x + roi.width - 1 || currentY === roi.y || currentY === roi.y + roi.height - 1) touchesRoiBoundary = true
+      const currentColor = rgb(frame, currentX, currentY)
+      forEachRoiNeighbor(currentX, currentY, roi, (nextX, nextY) => {
+        const next = nextY * frame.width + nextX
+        if (mask[next] === VisibleWallMaskCode.UNCERTAIN && !visited[next]) { visited[next] = 1; queue.push(next) }
+        if (mask[next] === VisibleWallMaskCode.WALL) {
+          const neighborColor = rgb(frame, nextX, nextY)
+          chromaSum += chromaDistance(currentColor, neighborColor)
+          luminanceSum += Math.abs(luminance(currentColor) - luminance(neighborColor))
+          boundaryCount++
+        }
+      })
+    }
+    const meanChroma = boundaryCount > 0 ? chromaSum / boundaryCount : 0
+    const meanLuminance = boundaryCount > 0 ? luminanceSum / boundaryCount : 0
+    const enclosedDistinctObject = !touchesRoiBoundary && component.length >= ENCLOSED_OBJECT_MIN_PIXELS && boundaryCount >= 2 &&
+      (meanChroma >= ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE || meanLuminance >= ENCLOSED_OBJECT_BOUNDARY_LUMINANCE_DISTANCE)
+    for (const pixel of component) evidence[pixel] = enclosedDistinctObject ? VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT : VisibleWallMaskEvidenceCode.UNCERTAIN
+    if (enclosedDistinctObject) for (const pixel of component) mask[pixel] = VisibleWallMaskCode.NON_WALL
+  }
+}
+
 /** Local deterministic seed-and-grow mask provider; replaceable by future semantic providers. */
 export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvider {
   public build(surfels: readonly FinalizedRealitySurfel[], table: RealityStructuralAssociationTable, keyframes: FinalizedRealityRgbKeyframes): VisibleWallMaskResult | null {
@@ -119,7 +192,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
       const ranked = keyframes.keyframes.map((frame) => ({ frame, roi: roiFor(frame, vertices) })).filter((entry): entry is { frame: RealityRgbKeyframe; roi: NonNullable<ReturnType<typeof roiFor>> } => entry.roi !== null).sort((left, right) => right.roi.area * right.frame.qualityScore - left.roi.area * left.frame.qualityScore).slice(0, MAX_KEYFRAMES_PER_SURFACE)
       const masks: VisibleWallMaskKeyframe[] = []
       for (const entry of ranked) {
-        const maskStarted = timestamp(), mask = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskCode.UNCERTAIN)
+        const maskStarted = timestamp(), mask = new Uint8Array(entry.frame.width * entry.frame.height).fill(VisibleWallMaskCode.UNCERTAIN), evidence = new Uint8Array(entry.frame.width * entry.frame.height)
         const seedColors: number[][] = [], seedPixels: number[] = []
         for (let index = 0; index < surfels.length; index++) {
           const membership = table.memberships[index]
@@ -131,6 +204,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
             seedColors.push(rgb(entry.frame, pixel.x, pixel.y))
             seedPixels.push(seedPixel)
             mask[seedPixel] = VisibleWallMaskCode.WALL
+            evidence[seedPixel] = VisibleWallMaskEvidenceCode.STRUCTURAL_SEED
           }
         }
         if (seedColors.length === 0) continue
@@ -140,23 +214,36 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         const queue = [...seedPixels]
         while (queue.length) {
           const current = queue.pop() as number, x = current % entry.frame.width, y = Math.floor(current / entry.frame.width)
-          for (const [nextX, nextY] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
-            if (nextX < entry.roi.x || nextX >= entry.roi.x + entry.roi.width || nextY < entry.roi.y || nextY >= entry.roi.y + entry.roi.height) continue
+          const currentColor = rgb(entry.frame, x, y)
+          forEachRoiNeighbor(x, y, entry.roi, (nextX, nextY) => {
             const next = nextY * entry.frame.width + nextX
-            if (mask[next] !== VisibleWallMaskCode.UNCERTAIN) continue
-            const color = rgb(entry.frame, nextX, nextY), closeChroma = chromaDistance(color, mean) <= 0.18, closeLuminance = Math.abs(luminance(color) - luminance(mean)) <= 0.35
-            if (closeChroma && closeLuminance) { mask[next] = VisibleWallMaskCode.WALL; queue.push(next) }
-            else if (chromaDistance(color, mean) > 0.28 || Math.abs(luminance(color) - luminance(mean)) > 0.55) mask[next] = VisibleWallMaskCode.NON_WALL
-          }
+            if (mask[next] !== VisibleWallMaskCode.UNCERTAIN) return
+            const color = rgb(entry.frame, nextX, nextY)
+            const chroma = chromaDistance(color, mean), luminanceDifference = Math.abs(luminance(color) - luminance(mean))
+            const localChroma = chromaDistance(color, currentColor), localLuminanceDifference = Math.abs(luminance(color) - luminance(currentColor))
+            if (chroma <= WALL_GROWTH_CHROMA_DISTANCE && luminanceDifference <= WALL_GROWTH_LUMINANCE_DISTANCE && localChroma <= WALL_LOCAL_EDGE_CHROMA_DISTANCE && localLuminanceDifference <= WALL_LOCAL_EDGE_LUMINANCE_DISTANCE) {
+              mask[next] = VisibleWallMaskCode.WALL
+              evidence[next] = VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH
+              queue.push(next)
+            } else if (chroma > STRONG_OBJECT_CHROMA_DISTANCE || luminanceDifference > STRONG_OBJECT_LUMINANCE_DISTANCE) {
+              mask[next] = VisibleWallMaskCode.NON_WALL
+              evidence[next] = VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT
+            }
+          })
         }
-        let wall = 0, nonWall = 0, uncertain = 0
+        preserveEnclosedVisualObjects(entry.frame, entry.roi, mask, evidence)
+        let wall = 0, nonWall = 0, uncertain = 0, seedWall = 0, grownWall = 0, strongObject = 0, enclosedObject = 0
         for (let y = entry.roi.y; y < entry.roi.y + entry.roi.height; y++) for (let x = entry.roi.x; x < entry.roi.x + entry.roi.width; x++) {
-          const value = mask[y * entry.frame.width + x]
+          const cell = y * entry.frame.width + x, value = mask[cell], reason = evidence[cell]
           if (value === VisibleWallMaskCode.WALL) wall++; else if (value === VisibleWallMaskCode.NON_WALL) nonWall++; else uncertain++
+          if (reason === VisibleWallMaskEvidenceCode.STRUCTURAL_SEED) seedWall++
+          else if (reason === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH) grownWall++
+          else if (reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT) strongObject++
+          else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) enclosedObject++
         }
         const seedPixelArray = new Uint32Array(seedPixels)
-        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + seedPixelArray.byteLength
-        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
+        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + seedPixelArray.byteLength
+        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
       }
       let wallConfirmed = 0, nonWall = 0, uncertain = 0
       const projectionStarted = timestamp()
@@ -181,7 +268,19 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         else if (uncertainVotes > 0) uncertain++
       }
       projectionMs += timestamp() - projectionStarted
-      surfaces.push({ logicalSurfaceId: table.logicalSurfaces[logicalIndex].id, selectedKeyframeIds: masks.map((mask) => mask.keyframeId), masks, candidateKeyframeCount: ranked.length, wallConfirmedSampleCount: wallConfirmed, nonWallSampleCount: nonWall, uncertainSampleCount: uncertain })
+      surfaces.push({
+        logicalSurfaceId: table.logicalSurfaces[logicalIndex].id,
+        selectedKeyframeIds: masks.map((mask) => mask.keyframeId),
+        masks,
+        candidateKeyframeCount: ranked.length,
+        roiPixelCount: masks.reduce((sum, mask) => sum + mask.projectedAreaPixels, 0),
+        paintableWallPixelCount: masks.reduce((sum, mask) => sum + mask.wallPixelCount, 0),
+        preservedObjectPixelCount: masks.reduce((sum, mask) => sum + mask.strongVisualObjectPixelCount + mask.enclosedVisualObjectPixelCount, 0),
+        preservedUncertainPixelCount: masks.reduce((sum, mask) => sum + mask.uncertainPixelCount, 0),
+        wallConfirmedSampleCount: wallConfirmed,
+        nonWallSampleCount: nonWall,
+        uncertainSampleCount: uncertain,
+      })
     }
     return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, memoryBytes }
   }

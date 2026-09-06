@@ -52,7 +52,7 @@ import {
   groupPatchesIntoLogicalSurfaces,
   type LogicalStructuralSurface,
 } from '../services/logicalSurfaceService'
-import { VisibleWallMaskCode, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
+import { VisibleWallMaskCode, VisibleWallMaskEvidenceCode, type VisibleWallMaskResult } from '../services/visibleWallMaskProvider'
 
 interface FinalizedSpatialScanPreviewProps {
   scan: FinalizedSpatialScan
@@ -97,7 +97,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'non-wall-uncertain' | 'projected-3d-mask'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'paintability-evidence' | 'non-wall-uncertain' | 'projected-3d-mask'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -838,6 +838,23 @@ function FinalizedSpatialScanPreview({
         image.data[offset] = maskValue === VisibleWallMaskCode.WALL ? 34 : maskValue === VisibleWallMaskCode.NON_WALL ? 232 : 80
         image.data[offset + 1] = maskValue === VisibleWallMaskCode.WALL ? 184 : maskValue === VisibleWallMaskCode.NON_WALL ? 67 : 80
         image.data[offset + 2] = maskValue === VisibleWallMaskCode.WALL ? 255 : maskValue === VisibleWallMaskCode.NON_WALL ? 181 : 80
+      } else if (realityKeyframeDebugMode === 'paintability-evidence' || realityKeyframeDebugMode === 'preserved-object-evidence') {
+        const reason = mask.evidence[pixel]
+        const preserveOnly = realityKeyframeDebugMode === 'preserved-object-evidence'
+        const preserve = reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT || reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT || reason === VisibleWallMaskEvidenceCode.UNCERTAIN
+        if (preserveOnly && !preserve) {
+          image.data[offset] = sourceR * 0.12; image.data[offset + 1] = sourceG * 0.12; image.data[offset + 2] = sourceB * 0.12
+        } else if (reason === VisibleWallMaskEvidenceCode.STRUCTURAL_SEED) {
+          image.data[offset] = 248; image.data[offset + 1] = 255; image.data[offset + 2] = 122
+        } else if (reason === VisibleWallMaskEvidenceCode.CONSISTENT_WALL_GROWTH) {
+          image.data[offset] = 34; image.data[offset + 1] = 184; image.data[offset + 2] = 255
+        } else if (reason === VisibleWallMaskEvidenceCode.STRONG_VISUAL_OBJECT) {
+          image.data[offset] = 255; image.data[offset + 1] = 114; image.data[offset + 2] = 64
+        } else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) {
+          image.data[offset] = 232; image.data[offset + 1] = 67; image.data[offset + 2] = 181
+        } else {
+          image.data[offset] = 100; image.data[offset + 1] = 100; image.data[offset + 2] = 100
+        }
       } else if (realityKeyframeDebugMode === 'non-wall-uncertain') {
         const preserve = maskValue !== VisibleWallMaskCode.WALL
         image.data[offset] = preserve ? 232 : sourceR * 0.2
@@ -1787,6 +1804,8 @@ function FinalizedSpatialScanPreview({
                   ['structural-roi', 'Projected Structural ROI'],
                   ['rgb-wall-seeds', 'RGB Wall Seeds'],
                   ['rgb-wall-mask', 'RGB Wall Mask'],
+                  ['paintability-evidence', 'Paintability Evidence'],
+                  ['preserved-object-evidence', 'Preserved Object Evidence'],
                   ['non-wall-uncertain', 'Non-Wall / Uncertain'],
                   ['projected-3d-mask', '3D Projected Wall Mask'],
                 ] as const).map(([debugMode, label]) => (
@@ -1815,11 +1834,11 @@ function FinalizedSpatialScanPreview({
                 <>
                   <canvas ref={keyframeCanvasRef} className="scanner-rgb-keyframe-debug" aria-label="Selected wall RGB keyframe mask diagnostic" />
                   <span>
-                    {selectedVisibleWallMaskSurface.logicalSurfaceId}: keyframes {selectedVisibleWallMaskSurface.selectedKeyframeIds.join(', ') || 'none'} / candidates {selectedVisibleWallMaskSurface.candidateKeyframeCount}; confirmed {selectedVisibleWallMaskSurface.wallConfirmedSampleCount}; non-wall {selectedVisibleWallMaskSurface.nonWallSampleCount}; uncertain {selectedVisibleWallMaskSurface.uncertainSampleCount}.
+                    {selectedVisibleWallMaskSurface.logicalSurfaceId}: keyframes {selectedVisibleWallMaskSurface.selectedKeyframeIds.join(', ') || 'none'} / candidates {selectedVisibleWallMaskSurface.candidateKeyframeCount}; ROI {selectedVisibleWallMaskSurface.roiPixelCount} px; paintable {selectedVisibleWallMaskSurface.paintableWallPixelCount} px; preserved object {selectedVisibleWallMaskSurface.preservedObjectPixelCount} px ({(selectedVisibleWallMaskSurface.preservedObjectPixelCount / Math.max(1, selectedVisibleWallMaskSurface.roiPixelCount) * 100).toFixed(1)}%); preserved uncertain {selectedVisibleWallMaskSurface.preservedUncertainPixelCount} px; projected samples confirmed/non-wall/uncertain {selectedVisibleWallMaskSurface.wallConfirmedSampleCount}/{selectedVisibleWallMaskSurface.nonWallSampleCount}/{selectedVisibleWallMaskSurface.uncertainSampleCount}.
                   </span>
                   {selectedVisibleWallMaskSurface.masks.map((mask) => (
                     <span key={`${selectedVisibleWallMaskSurface.logicalSurfaceId}-${mask.keyframeId}`}>
-                      KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, seeds {mask.seedPixelCount}, wall/non-wall/uncertain {mask.wallPixelCount}/{mask.nonWallPixelCount}/{mask.uncertainPixelCount}, quality {mask.qualityScore.toFixed(2)}.
+                      KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, wall seed/grown {mask.seedWallPixelCount}/{mask.grownWallPixelCount}; preserved strong/enclosed {mask.strongVisualObjectPixelCount}/{mask.enclosedVisualObjectPixelCount}; uncertain {mask.uncertainPixelCount}; quality {mask.qualityScore.toFixed(2)}.
                     </span>
                   ))}
                 </>

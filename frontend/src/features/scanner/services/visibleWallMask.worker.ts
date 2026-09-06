@@ -8,7 +8,7 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
     if (!result) { self.postMessage({ result: null }); return }
     const transfer: Transferable[] = [result.sampleLogicalSurfaceIndices.buffer, result.sampleConfidence.buffer]
     for (const surface of result.surfaces) for (const mask of surface.masks) {
-      transfer.push(mask.mask.buffer, mask.seedPixels.buffer)
+      transfer.push(mask.mask.buffer, mask.evidence.buffer, mask.seedPixels.buffer)
     }
     self.postMessage({ result }, { transfer })
   } catch (error) {

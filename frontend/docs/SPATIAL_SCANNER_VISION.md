@@ -1690,3 +1690,37 @@ non-wall/uncertain view, projected 3D mask evidence, and per-wall selected
 keyframes. Mask preparation runs in a cancellable post-scan worker; paint
 swatch changes reuse the completed sample-to-logical-wall map rather than
 rerunning segmentation or adding XR-loop work.
+
+### M8.6.1 — Preserved Attached-Object Exclusion
+
+Physical M8.6 validation showed that the first RGB grow rule could still
+absorb a visually distinct wall-mounted decoration when its depth offset was
+too small to be a reliable foreground barrier. This is treated as a
+preserved-object exclusion failure, not as a successful wall mask.
+
+M8.6.1 therefore separates high-confidence paintable wall continuation from
+ambiguous appearance. RGB growth now accepts only tighter chroma/luminance
+agreement with trusted exposed-wall seeds **and** bounded local pixel-to-pixel
+edge continuity. Pixels outside that confidence do not become wall merely
+because they lie in the projected M7 ROI: they remain original Reality unless
+they have positive preserved-object evidence.
+
+After strict wall growth, the provider examines remaining local RGB regions.
+An enclosed, bounded, visually divergent component with enough border evidence
+against confirmed wall is classified as a preserved attached object. This
+captures frames, pictures, mirrors, and shallow decoration without semantic
+object labels or an unreliable plane-distance threshold. Strongly divergent
+pixels receive the same preserved treatment directly. Regions touching the
+ROI boundary, weakly supported components, shadows, or otherwise uncertain
+appearance remain `UNCERTAIN` and preserve original RGB rather than being
+painted. This deliberately favors a small original-content island over
+painting a real decoration.
+
+Per keyframe, the mask retains compact evidence codes for structural seed,
+consistent wall growth, strong visual object, enclosed visual object, and
+uncertain. Development views now include **Paintability Evidence** and
+**Preserved Object Evidence**. Selected-wall diagnostics report ROI pixels,
+paintable pixels, preserved-object pixels/coverage, preserved-uncertain pixels,
+and per-keyframe seed/grown/strong-object/enclosed-object/uncertain counts.
+The work remains bounded and post-scan; no XR capture rate, RGB-D registration,
+Dense Reality geometry, or Reality Original data changes.
