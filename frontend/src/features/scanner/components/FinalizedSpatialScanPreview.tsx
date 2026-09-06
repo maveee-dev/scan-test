@@ -55,6 +55,7 @@ import {
 import {
   projectWorldPointToKeyframePixel,
   GeometryForegroundCode,
+  GeometryForegroundReason,
   VisibleWallMask3dCode,
   VisibleWallMask3dTerminalReason,
   VisibleWallMaskCode,
@@ -106,7 +107,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes' | 'raw-object-fragments' | 'merged-object-regions' | 'preserved-region-interior' | 'object-clusters' | 'all-object-envelope-candidates' | 'candidate-ranking' | 'dominant-wall-mounted-objects' | 'rejected-major-candidates' | 'final-protected-envelope' | 'outer-boundary-candidates' | 'completed-object-envelope' | 'filled-object-interior' | 'wall-local-object-fusion' | 'wall-local-object-envelope' | 'object-boundary-band' | '3d-preserved-object-assignment' | '3d-completed-object-envelope' | 'wall-plane-residual' | 'foreground-core' | 'foreground-connected-components' | 'normal-deviation' | 'surface-roughness' | 'depth-discontinuity' | 'geometry-wall-foreground' | 'final-paintability-combination'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes' | 'raw-object-fragments' | 'merged-object-regions' | 'preserved-region-interior' | 'object-clusters' | 'all-object-envelope-candidates' | 'candidate-ranking' | 'dominant-wall-mounted-objects' | 'rejected-major-candidates' | 'final-protected-envelope' | 'outer-boundary-candidates' | 'completed-object-envelope' | 'filled-object-interior' | 'wall-local-object-fusion' | 'wall-local-object-envelope' | 'object-boundary-band' | '3d-preserved-object-assignment' | '3d-completed-object-envelope' | 'wall-plane-residual' | 'foreground-core' | 'foreground-connected-components' | 'foreground-growth-frontier' | 'strong-wall-barriers' | 'foreground-core-seed-reasons' | 'normal-deviation' | 'surface-roughness' | 'depth-discontinuity' | 'geometry-wall-foreground' | 'final-paintability-combination'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -890,7 +891,7 @@ function FinalizedSpatialScanPreview({
     const context = canvas.getContext('2d')
     if (!context) return
     const image = context.createImageData(frame.width, frame.height)
-    const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes' || realityKeyframeDebugMode === '3d-preserved-object-assignment' || realityKeyframeDebugMode === '3d-completed-object-envelope' || realityKeyframeDebugMode === 'wall-plane-residual' || realityKeyframeDebugMode === 'foreground-core' || realityKeyframeDebugMode === 'foreground-connected-components' || realityKeyframeDebugMode === 'normal-deviation' || realityKeyframeDebugMode === 'surface-roughness' || realityKeyframeDebugMode === 'depth-discontinuity' || realityKeyframeDebugMode === 'geometry-wall-foreground' || realityKeyframeDebugMode === 'final-paintability-combination'
+    const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes' || realityKeyframeDebugMode === '3d-preserved-object-assignment' || realityKeyframeDebugMode === '3d-completed-object-envelope' || realityKeyframeDebugMode === 'wall-plane-residual' || realityKeyframeDebugMode === 'foreground-core' || realityKeyframeDebugMode === 'foreground-connected-components' || realityKeyframeDebugMode === 'foreground-growth-frontier' || realityKeyframeDebugMode === 'strong-wall-barriers' || realityKeyframeDebugMode === 'foreground-core-seed-reasons' || realityKeyframeDebugMode === 'normal-deviation' || realityKeyframeDebugMode === 'surface-roughness' || realityKeyframeDebugMode === 'depth-discontinuity' || realityKeyframeDebugMode === 'geometry-wall-foreground' || realityKeyframeDebugMode === 'final-paintability-combination'
     const objectRegionDebug = realityKeyframeDebugMode === 'raw-object-fragments' || realityKeyframeDebugMode === 'merged-object-regions' || realityKeyframeDebugMode === 'preserved-region-interior' || realityKeyframeDebugMode === 'object-clusters' || realityKeyframeDebugMode === 'all-object-envelope-candidates' || realityKeyframeDebugMode === 'candidate-ranking' || realityKeyframeDebugMode === 'dominant-wall-mounted-objects' || realityKeyframeDebugMode === 'rejected-major-candidates' || realityKeyframeDebugMode === 'final-protected-envelope' || realityKeyframeDebugMode === 'outer-boundary-candidates' || realityKeyframeDebugMode === 'completed-object-envelope' || realityKeyframeDebugMode === 'filled-object-interior' || realityKeyframeDebugMode === 'object-boundary-band'
     for (let pixel = 0; pixel < frame.width * frame.height; pixel++) {
       const offset = pixel * 4, maskValue = mask.mask[pixel]
@@ -1005,6 +1006,20 @@ function FinalizedSpatialScanPreview({
         } else if (realityKeyframeDebugMode === 'foreground-connected-components') {
           const component = geometry.componentIds[index]
           if (component >= 0) setPoint(projected.x, projected.y, 72 + component * 73 % 176, 92 + component * 113 % 150, 255 - component * 47 % 160)
+        } else if (realityKeyframeDebugMode === 'foreground-growth-frontier') {
+          if (geometryClassification === GeometryForegroundCode.FOREGROUND_CONNECTED) setPoint(projected.x, projected.y, 255, 156, 54)
+          else if (geometryClassification === GeometryForegroundCode.FOREGROUND_CORE) setPoint(projected.x, projected.y, 255, 54, 112)
+        } else if (realityKeyframeDebugMode === 'strong-wall-barriers') {
+          if (geometry.strongWallBarrier[index]) setPoint(projected.x, projected.y, 248, 255, 122)
+          else if (geometryClassification === GeometryForegroundCode.WALL_GEOMETRY) setPoint(projected.x, projected.y, 34, 184, 255)
+        } else if (realityKeyframeDebugMode === 'foreground-core-seed-reasons') {
+          const reason = geometry.reasons[index]
+          const color = reason === GeometryForegroundReason.EXISTING_FOREGROUND ? [232, 67, 181]
+            : reason === GeometryForegroundReason.PLANE_OFFSET ? [255, 112, 64]
+              : reason === GeometryForegroundReason.NORMAL_DISAGREEMENT ? [255, 190, 64]
+                : reason === GeometryForegroundReason.SURFACE_ROUGHNESS ? [170, 90, 255]
+                  : reason === GeometryForegroundReason.DEPTH_DISCONTINUITY ? [255, 54, 112] : [72, 72, 72]
+          if (geometryClassification === GeometryForegroundCode.FOREGROUND_CORE) setPoint(projected.x, projected.y, color[0], color[1], color[2])
         } else if (realityKeyframeDebugMode === 'normal-deviation') {
           const value = geometry.normalDeviationDegrees[index]
           setPoint(projected.x, projected.y, value, 255 - value, 72)
@@ -2009,6 +2024,9 @@ function FinalizedSpatialScanPreview({
                   ['wall-plane-residual', 'Wall Plane Residual'],
                   ['foreground-core', 'Foreground Core'],
                   ['foreground-connected-components', 'Foreground Connected Components'],
+                  ['foreground-growth-frontier', 'Foreground Growth Frontier'],
+                  ['strong-wall-barriers', 'Strong Wall Barriers'],
+                  ['foreground-core-seed-reasons', 'Foreground Core Seed Reasons'],
                   ['normal-deviation', 'Normal Deviation'],
                   ['surface-roughness', 'Surface Roughness'],
                   ['depth-discontinuity', 'Depth Discontinuity'],
@@ -2058,13 +2076,16 @@ function FinalizedSpatialScanPreview({
                   ) : null}
                   <span>Completed object envelopes directly protect {selectedVisibleWallMaskSurface.completedEnvelopeSampleCount} Dense Reality samples before bounded wall-local expansion.</span>
                   <span>
-                    Geometry foreground: calibrated wall residual median/p75/p90/p95 {selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.median === null ? 'N/A' : `${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.median.toFixed(3)}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p75?.toFixed(3) ?? 'N/A'}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p90?.toFixed(3) ?? 'N/A'}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p95?.toFixed(3) ?? 'N/A'} m`}; wall envelope {selectedVisibleWallMaskSurface.geometryForeground.wallEnvelopeMeters.toFixed(3)} m; wall-like/core/connected/uncertain {selectedVisibleWallMaskSurface.geometryForeground.geometryWallLikeSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.foregroundCoreSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.foregroundConnectedSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.geometryUncertainSampleCount}; RGB wall rejected by geometry {selectedVisibleWallMaskSurface.geometryForeground.rgbWallRejectedByGeometryCount}.
+                    Geometry foreground: domain {selectedVisibleWallMaskSurface.geometryForeground.geometryDomainSampleCount}; calibrated support {selectedVisibleWallMaskSurface.geometryForeground.calibrationSampleCount}; wall residual median/p75/p90/p95 {selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.median === null ? 'N/A' : `${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.median.toFixed(3)}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p75?.toFixed(3) ?? 'N/A'}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p90?.toFixed(3) ?? 'N/A'}/${selectedVisibleWallMaskSurface.geometryForeground.wallResidualMeters.p95?.toFixed(3) ?? 'N/A'} m`}; safe/ambiguous/seed {selectedVisibleWallMaskSurface.geometryForeground.wallEnvelopeMeters.toFixed(3)}/{selectedVisibleWallMaskSurface.geometryForeground.ambiguousOffsetMeters.toFixed(3)}/{selectedVisibleWallMaskSurface.geometryForeground.foregroundSeedOffsetMeters.toFixed(3)} m; side {selectedVisibleWallMaskSurface.geometryForeground.foregroundSide}; wall-like/core/connected/uncertain {selectedVisibleWallMaskSurface.geometryForeground.geometryWallLikeSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.foregroundCoreSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.foregroundConnectedSampleCount}/{selectedVisibleWallMaskSurface.geometryForeground.geometryUncertainSampleCount}; RGB wall entering/vetoed {selectedVisibleWallMaskSurface.geometryForeground.rgbWallEnteringGeometryCount}/{selectedVisibleWallMaskSurface.geometryForeground.rgbWallRejectedByGeometryCount}.
+                  </span>
+                  <span>
+                    Signed offsets min/p05/p25/median/p75/p90/p95/max: {selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.min?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.p05?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.p25?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.median?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.p75?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.p90?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.p95?.toFixed(3) ?? 'N/A'}/{selectedVisibleWallMaskSurface.geometryForeground.signedOffsetMeters.max?.toFixed(3) ?? 'N/A'} m.
                   </span>
                   <span>
                     Geometry foreground reasons: {Object.entries(selectedVisibleWallMaskSurface.geometryForeground.foregroundReasonCounts).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(' / ') || 'none'}.
                   </span>
                   {selectedVisibleWallMaskSurface.geometryForeground.components.map((component) => (
-                    <span key={`foreground-${component.id}`}>Foreground component {component.id}: {component.sampleCount} samples, ~{component.estimatedAreaMetersSquared.toFixed(3)} m², offset median/p90 {component.offsetMedianMeters?.toFixed(3) ?? 'N/A'}/{component.offsetP90Meters?.toFixed(3) ?? 'N/A'} m, normal deviation {component.normalDeviationMedianDegrees?.toFixed(1) ?? 'N/A'}°, roughness {component.roughnessMedianMeters?.toFixed(3) ?? 'N/A'} m, wall-boundary samples {component.boundarySampleCount}, confidence {component.confidence.toFixed(2)}.</span>
+                    <span key={`foreground-${component.id}`}>Foreground component {component.id}: {component.sampleCount} samples, ~{component.estimatedAreaMetersSquared.toFixed(3)} m², core/connected {(component.coreFraction * 100).toFixed(0)}%/{(component.connectedFraction * 100).toFixed(0)}%, offset median/p90 {component.offsetMedianMeters?.toFixed(3) ?? 'N/A'}/{component.offsetP90Meters?.toFixed(3) ?? 'N/A'} m, normal deviation {component.normalDeviationMedianDegrees?.toFixed(1) ?? 'N/A'}°, roughness {component.roughnessMedianMeters?.toFixed(3) ?? 'N/A'} m, wall-contact {component.wallContactRatio.toFixed(2)}, confidence {component.confidence.toFixed(2)}.</span>
                   ))}
                   <span>
                     3D unresolved reasons: {Object.entries(selectedVisibleWallMaskSurface.threeDUncertainReasonCounts).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(' / ') || 'none'}.

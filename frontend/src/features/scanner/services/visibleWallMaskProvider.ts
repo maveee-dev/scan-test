@@ -140,6 +140,9 @@ export interface GeometryForegroundComponent {
   readonly normalDeviationMedianDegrees: number | null
   readonly roughnessMedianMeters: number | null
   readonly boundarySampleCount: number
+  readonly coreFraction: number
+  readonly connectedFraction: number
+  readonly wallContactRatio: number
   readonly confidence: number
 }
 
@@ -151,8 +154,16 @@ export interface GeometryForegroundAnalysis {
   readonly roughnessMillimeters: Uint8Array
   readonly depthStepMillimeters: Uint8Array
   readonly componentIds: Int32Array
+  readonly strongWallBarrier: Uint8Array
   readonly wallResidualMeters: { readonly median: number | null; readonly p75: number | null; readonly p90: number | null; readonly p95: number | null }
+  readonly signedOffsetMeters: { readonly min: number | null; readonly p05: number | null; readonly p25: number | null; readonly median: number | null; readonly p75: number | null; readonly p90: number | null; readonly p95: number | null; readonly max: number | null }
   readonly wallEnvelopeMeters: number
+  readonly ambiguousOffsetMeters: number
+  readonly foregroundSeedOffsetMeters: number
+  readonly foregroundSide: -1 | 0 | 1
+  readonly calibrationSampleCount: number
+  readonly geometryDomainSampleCount: number
+  readonly rgbWallEnteringGeometryCount: number
   readonly geometryWallLikeSampleCount: number
   readonly foregroundCoreSampleCount: number
   readonly foregroundConnectedSampleCount: number
@@ -302,11 +313,12 @@ const FOREGROUND_MAX_NEIGHBORS = 20
 const FOREGROUND_MIN_COMPONENT_SUPPORT = 2
 const FOREGROUND_MIN_WALL_ENVELOPE_METERS = 0.025
 const FOREGROUND_MAX_WALL_ENVELOPE_METERS = 0.06
-const FOREGROUND_OFFSET_MARGIN_METERS = 0.018
-const FOREGROUND_STRONG_OFFSET_MARGIN_METERS = 0.035
 const FOREGROUND_NORMAL_DEVIATION_DEGREES = 28
 const FOREGROUND_ROUGHNESS_METERS = 0.014
 const FOREGROUND_DEPTH_STEP_METERS = 0.028
+const FOREGROUND_COMPONENT_MAX_GEODESIC_METERS = 0.45
+const FOREGROUND_SIDE_MINIMUM_SUPPORT = 4
+const STRONG_WALL_BARRIER_NEIGHBORS = 3
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -941,6 +953,23 @@ function wallLocalCoordinate(point: SpatialPoint, basis: { origin: SpatialPoint;
   return { u: x * basis.axisU.x + y * basis.axisU.y + z * basis.axisU.z, v: x * basis.axisV.x + y * basis.axisV.y + z * basis.axisV.z }
 }
 
+function pointInsidePatchDomain(point: SpatialPoint, patch: RealityStructuralAssociationTable['patches'][number], edgeToleranceMeters = 0.08): boolean {
+  const local = wallLocalCoordinate(point, patch.basis), vertices = patch.vertices2DLocal
+  let inside = false
+  for (let index = 0, previous = vertices.length - 1; index < vertices.length; previous = index++) {
+    const a = vertices[index], b = vertices[previous]
+    if ((a.v > local.v) !== (b.v > local.v) && local.u < (b.u - a.u) * (local.v - a.v) / Math.max(EPSILON, b.v - a.v) + a.u) inside = !inside
+  }
+  if (inside) return true
+  for (let index = 0; index < vertices.length; index++) {
+    const a = vertices[index], b = vertices[(index + 1) % vertices.length], dx = b.u - a.u, dy = b.v - a.v
+    const lengthSquared = dx * dx + dy * dy
+    const t = Math.max(0, Math.min(1, ((local.u - a.u) * dx + (local.v - a.v) * dy) / Math.max(EPSILON, lengthSquared)))
+    if (Math.hypot(local.u - (a.u + dx * t), local.v - (a.v + dy * t)) <= edgeToleranceMeters) return true
+  }
+  return false
+}
+
 function quantile(values: readonly number[], fraction: number): number | null {
   if (values.length === 0) return null
   const ordered = [...values].sort((left, right) => left - right)
@@ -1002,13 +1031,21 @@ function analyzeGeometryForeground(
   const componentIds = new Int32Array(surfels.length).fill(-1)
   const domain = new Uint8Array(surfels.length)
   const stableWallResiduals: number[] = []
+  const memberPatches = logical.memberPatchIds.map((id) => table.patches.find((patch) => patch.id === id)).filter((patch): patch is RealityStructuralAssociationTable['patches'][number] => Boolean(patch))
+  let geometryDomainSampleCount = 0, rgbWallEnteringGeometryCount = 0
   for (let index = 0; index < surfels.length; index++) {
     const signed = signedPlaneResidual(surfels[index].position, logical.representativeNormal, calibratedPlaneConstant)
     signedResidualMeters[index] = signed
     const visuallyObserved = rgbClassifications[index] !== VisibleWallMask3dCode.OUTSIDE_DOMAIN
     const structurallyRelated = table.logicalSurfaceIndices[index] === logicalIndex
-    if (!visuallyObserved && !structurallyRelated) continue
+    const insideLogicalDomain = structurallyRelated || memberPatches.some((patch) => Math.abs(signedPlaneResidual(surfels[index].position, patch.normal, patch.planeConstant)) <= 0.12 && pointInsidePatchDomain(surfels[index].position, patch))
+    // An RGB ROI is a visual search prior, not a 3D wall domain. Geometry
+    // analysis must never pull adjacent surfaces into this logical wall merely
+    // because their image projection overlaps the ROI.
+    if (!visuallyObserved || !insideLogicalDomain) continue
     domain[index] = 1
+    geometryDomainSampleCount++
+    if (rgbClassifications[index] === VisibleWallMask3dCode.WALL) rgbWallEnteringGeometryCount++
     const membership = table.memberships?.[index] ?? RealityMembershipCode.NON_WALL
     if (structurallyRelated && (membership === RealityMembershipCode.CORE_WALL_MEMBER || membership === RealityMembershipCode.EXPANDED_WALL_MEMBER)) stableWallResiduals.push(Math.abs(signed))
   }
@@ -1022,6 +1059,14 @@ function analyzeGeometryForeground(
   const residualP90 = quantile(stableWallResiduals, 0.9)
   const residualP95 = quantile(stableWallResiduals, 0.95)
   const wallEnvelopeMeters = Math.max(FOREGROUND_MIN_WALL_ENVELOPE_METERS, Math.min(FOREGROUND_MAX_WALL_ENVELOPE_METERS, (residualP90 ?? residualMedian ?? 0.018) + 0.012))
+  const ambiguousOffsetMeters = wallEnvelopeMeters + 0.012
+  const foregroundSeedOffsetMeters = wallEnvelopeMeters + 0.03
+  const knownForegroundSignedOffsets: number[] = []
+  for (let index = 0; index < surfels.length; index++) if (domain[index] && (table.foregroundMask?.[index] ?? 0) > 0) knownForegroundSignedOffsets.push(signedResidualMeters[index])
+  const foregroundSideMedian = median(knownForegroundSignedOffsets)
+  const foregroundSide: -1 | 0 | 1 = knownForegroundSignedOffsets.length >= FOREGROUND_SIDE_MINIMUM_SUPPORT && foregroundSideMedian !== null && Math.abs(foregroundSideMedian) > 0.006
+    ? foregroundSideMedian > 0 ? 1 : -1
+    : 0
   const calibrationMs = timestamp() - calibrationStarted
 
   const localStarted = timestamp()
@@ -1032,6 +1077,7 @@ function analyzeGeometryForeground(
   }
   const neighborLists: number[][] = Array.from({ length: surfels.length }, () => [])
   const localNormalDeviation: number[] = Array(surfels.length).fill(0)
+  const localNormalConsensus: number[] = Array(surfels.length).fill(1)
   const localRoughness: number[] = Array(surfels.length).fill(0)
   const localDepthStep: number[] = Array(surfels.length).fill(0)
   for (let index = 0; index < surfels.length; index++) if (domain[index]) {
@@ -1044,6 +1090,12 @@ function analyzeGeometryForeground(
       localDepthStep[index] = Math.max(...offsets.map((value) => Math.abs(value - signedResidualMeters[index])))
     }
     localNormalDeviation[index] = absoluteNormalDeviationDegrees(surfels[index].normal, logical.representativeNormal)
+    const normalDots = neighbors.flatMap((neighbor) => {
+      const first = surfels[index].normal, second = surfels[neighbor].normal
+      if (!first || !second || Math.abs(signedResidualMeters[neighbor] - signedResidualMeters[index]) > 0.03) return []
+      return [Math.abs((first.x * second.x + first.y * second.y + first.z * second.z) / Math.max(EPSILON, Math.hypot(first.x, first.y, first.z) * Math.hypot(second.x, second.y, second.z)))]
+    })
+    localNormalConsensus[index] = median(normalDots) ?? 0
     normalDeviationDegrees[index] = Math.min(255, Math.round(localNormalDeviation[index]))
     roughnessMillimeters[index] = Math.min(255, Math.round(localRoughness[index] * 1000))
     depthStepMillimeters[index] = Math.min(255, Math.round(localDepthStep[index] * 1000))
@@ -1051,20 +1103,27 @@ function analyzeGeometryForeground(
   const localAnalysisMs = timestamp() - localStarted
 
   const reasonCounts: Record<string, number> = { 'existing foreground': 0, 'plane offset': 0, 'normal disagreement': 0, roughness: 0, 'depth discontinuity': 0, 'connected foreground': 0, 'geometry uncertain': 0 }
-  const coreQueue: number[] = []
   let geometryWallLikeSampleCount = 0, foregroundCoreSampleCount = 0, geometryUncertainSampleCount = 0
   for (let index = 0; index < surfels.length; index++) if (domain[index]) {
-    const offset = Math.abs(signedResidualMeters[index]), normal = localNormalDeviation[index], roughness = localRoughness[index], depthStep = localDepthStep[index]
+    const signedOffset = signedResidualMeters[index], offset = Math.abs(signedOffset), normal = localNormalDeviation[index], normalConsensus = localNormalConsensus[index], roughness = localRoughness[index], depthStep = localDepthStep[index]
     const existingForeground = (table.foregroundMask?.[index] ?? 0) > 0
-    const strongOffset = offset > wallEnvelopeMeters + FOREGROUND_STRONG_OFFSET_MARGIN_METERS
-    const offsetWithShape = offset > wallEnvelopeMeters + FOREGROUND_OFFSET_MARGIN_METERS && (normal > 20 || roughness > FOREGROUND_ROUGHNESS_METERS * 0.7 || depthStep > FOREGROUND_DEPTH_STEP_METERS * 0.7)
-    const foldedSurface = normal > FOREGROUND_NORMAL_DEVIATION_DEGREES && (roughness > FOREGROUND_ROUGHNESS_METERS * 0.65 || depthStep > FOREGROUND_DEPTH_STEP_METERS * 0.65)
-    if (existingForeground || strongOffset || offsetWithShape || foldedSurface) {
+    const onForegroundSide = foregroundSide === 0 ? false : signedOffset * foregroundSide > 0
+    const nearbyForegroundOffsetSupport = neighborLists[index].filter((neighbor) => {
+      const candidateOffset = signedResidualMeters[neighbor]
+      return foregroundSide === 0
+        ? Math.abs(candidateOffset) >= ambiguousOffsetMeters
+        : candidateOffset * foregroundSide >= ambiguousOffsetMeters
+    }).length >= 2
+    const strongOffset = onForegroundSide && signedOffset * foregroundSide >= foregroundSeedOffsetMeters && nearbyForegroundOffsetSupport
+    const offsetWithShape = onForegroundSide && signedOffset * foregroundSide >= ambiguousOffsetMeters && nearbyForegroundOffsetSupport && normalConsensus >= 0.72 && (normal >= 24 || roughness >= FOREGROUND_ROUGHNESS_METERS || depthStep >= FOREGROUND_DEPTH_STEP_METERS)
+    const foldedSurface = normal >= FOREGROUND_NORMAL_DEVIATION_DEGREES && normalConsensus >= 0.72 && (roughness >= FOREGROUND_ROUGHNESS_METERS || depthStep >= FOREGROUND_DEPTH_STEP_METERS || (offset >= ambiguousOffsetMeters && nearbyForegroundOffsetSupport))
+    const existingForegroundWithSupport = existingForeground && (nearbyForegroundOffsetSupport || (normalConsensus >= 0.7 && (normal >= 22 || roughness >= 0.01 || depthStep >= 0.02)))
+    if (existingForegroundWithSupport || strongOffset || offsetWithShape || foldedSurface) {
       classifications[index] = GeometryForegroundCode.FOREGROUND_CORE
-      reasons[index] = existingForeground ? GeometryForegroundReason.EXISTING_FOREGROUND : strongOffset || offsetWithShape ? GeometryForegroundReason.PLANE_OFFSET : normal > FOREGROUND_NORMAL_DEVIATION_DEGREES ? GeometryForegroundReason.NORMAL_DISAGREEMENT : roughness > FOREGROUND_ROUGHNESS_METERS ? GeometryForegroundReason.SURFACE_ROUGHNESS : GeometryForegroundReason.DEPTH_DISCONTINUITY
+      reasons[index] = existingForegroundWithSupport ? GeometryForegroundReason.EXISTING_FOREGROUND : strongOffset || offsetWithShape ? GeometryForegroundReason.PLANE_OFFSET : normal >= FOREGROUND_NORMAL_DEVIATION_DEGREES ? GeometryForegroundReason.NORMAL_DISAGREEMENT : roughness >= FOREGROUND_ROUGHNESS_METERS ? GeometryForegroundReason.SURFACE_ROUGHNESS : GeometryForegroundReason.DEPTH_DISCONTINUITY
       reasonCounts[reasons[index] === GeometryForegroundReason.EXISTING_FOREGROUND ? 'existing foreground' : reasons[index] === GeometryForegroundReason.PLANE_OFFSET ? 'plane offset' : reasons[index] === GeometryForegroundReason.NORMAL_DISAGREEMENT ? 'normal disagreement' : reasons[index] === GeometryForegroundReason.SURFACE_ROUGHNESS ? 'roughness' : 'depth discontinuity']++
-      foregroundCoreSampleCount++; coreQueue.push(index)
-    } else if (offset <= wallEnvelopeMeters && normal <= 22 && roughness <= FOREGROUND_ROUGHNESS_METERS && depthStep <= FOREGROUND_DEPTH_STEP_METERS) {
+      foregroundCoreSampleCount++
+    } else if (offset <= ambiguousOffsetMeters && normal <= 32 && (normalConsensus >= 0.62 || normal <= 18) && roughness <= FOREGROUND_ROUGHNESS_METERS * 1.35 && depthStep <= FOREGROUND_DEPTH_STEP_METERS * 1.35) {
       classifications[index] = GeometryForegroundCode.WALL_GEOMETRY
       geometryWallLikeSampleCount++
     } else {
@@ -1077,25 +1136,32 @@ function analyzeGeometryForeground(
   const growthStarted = timestamp()
   const components: GeometryForegroundComponent[] = []
   let foregroundConnectedSampleCount = 0, nextComponentId = 0
+  const strongWallBarrier = new Uint8Array(surfels.length)
+  for (let index = 0; index < surfels.length; index++) if (classifications[index] === GeometryForegroundCode.WALL_GEOMETRY) {
+    const wallNeighbors = neighborLists[index].filter((neighbor) => classifications[neighbor] === GeometryForegroundCode.WALL_GEOMETRY).length
+    if (wallNeighbors >= STRONG_WALL_BARRIER_NEIGHBORS && Math.abs(signedResidualMeters[index]) <= wallEnvelopeMeters && localNormalDeviation[index] <= 22 && localRoughness[index] <= 0.012) strongWallBarrier[index] = 1
+  }
   for (let seed = 0; seed < surfels.length; seed++) {
     if (classifications[seed] !== GeometryForegroundCode.FOREGROUND_CORE || componentIds[seed] >= 0) continue
-    const componentId = nextComponentId++, queue = [seed], members: number[] = []
+    const componentId = nextComponentId++, queue = [seed], geodesic = [0], members: number[] = []
     componentIds[seed] = componentId
     for (let cursor = 0; cursor < queue.length; cursor++) {
       const current = queue[cursor]
       members.push(current)
       for (const neighbor of neighborLists[current]) {
         if (!domain[neighbor] || componentIds[neighbor] >= 0 || rgbClassifications[neighbor] === VisibleWallMask3dCode.NON_WALL) continue
-        const stableStructuralWall = table.logicalSurfaceIndices[neighbor] === logicalIndex &&
-          ((table.memberships?.[neighbor] ?? RealityMembershipCode.NON_WALL) === RealityMembershipCode.CORE_WALL_MEMBER || (table.memberships?.[neighbor] ?? RealityMembershipCode.NON_WALL) === RealityMembershipCode.EXPANDED_WALL_MEMBER) &&
-          Math.abs(signedResidualMeters[neighbor]) <= wallEnvelopeMeters && localNormalDeviation[neighbor] <= 18 && localRoughness[neighbor] <= 0.01
-        if (stableStructuralWall) continue
+        if (strongWallBarrier[neighbor]) continue
         const predecessorNormal = surfels[current].normal, neighborNormal = surfels[neighbor].normal
         const normalCompatibility = !predecessorNormal || !neighborNormal ? 1 : Math.abs((predecessorNormal.x * neighborNormal.x + predecessorNormal.y * neighborNormal.y + predecessorNormal.z * neighborNormal.z) / Math.max(EPSILON, Math.hypot(predecessorNormal.x, predecessorNormal.y, predecessorNormal.z) * Math.hypot(neighborNormal.x, neighborNormal.y, neighborNormal.z)))
         const offsetStep = Math.abs(signedResidualMeters[current] - signedResidualMeters[neighbor])
+        const distance = Math.hypot(surfels[current].position.x - surfels[neighbor].position.x, surfels[current].position.y - surfels[neighbor].position.y, surfels[current].position.z - surfels[neighbor].position.z)
         const foregroundNeighbors = neighborLists[neighbor].filter((candidate) => componentIds[candidate] === componentId).length
-        const nearForegroundShape = localNormalDeviation[neighbor] >= 16 || localRoughness[neighbor] >= 0.007 || Math.abs(signedResidualMeters[neighbor]) > wallEnvelopeMeters * 0.8
-        if (normalCompatibility < 0.52 || offsetStep > 0.035 || (foregroundNeighbors < FOREGROUND_MIN_COMPONENT_SUPPORT && !(members.length === 1 && nearForegroundShape))) continue
+        const coreAnchors = neighborLists[neighbor].filter((candidate) => componentIds[candidate] === componentId && classifications[candidate] === GeometryForegroundCode.FOREGROUND_CORE).length
+        const nearForegroundShape = localNormalDeviation[neighbor] >= 20 || localRoughness[neighbor] >= 0.009 || Math.abs(signedResidualMeters[neighbor]) > ambiguousOffsetMeters
+        const continuesForegroundOffset = foregroundSide === 0
+          ? Math.abs(signedResidualMeters[neighbor]) >= wallEnvelopeMeters * 0.75
+          : signedResidualMeters[neighbor] * foregroundSide >= wallEnvelopeMeters * 0.65
+        if (geodesic[cursor] + distance > FOREGROUND_COMPONENT_MAX_GEODESIC_METERS || normalCompatibility < 0.62 || offsetStep > 0.032 || foregroundNeighbors < FOREGROUND_MIN_COMPONENT_SUPPORT || (!nearForegroundShape && !continuesForegroundOffset && coreAnchors < 2)) continue
         if (classifications[neighbor] !== GeometryForegroundCode.FOREGROUND_CORE) {
           const wasWallGeometry = classifications[neighbor] === GeometryForegroundCode.WALL_GEOMETRY
           const wasGeometryUncertain = classifications[neighbor] === GeometryForegroundCode.GEOMETRY_UNCERTAIN
@@ -1105,7 +1171,7 @@ function analyzeGeometryForeground(
           reasonCounts['connected foreground']++
         }
         componentIds[neighbor] = componentId
-        queue.push(neighbor)
+        queue.push(neighbor); geodesic.push(geodesic[cursor] + distance)
       }
     }
     const offsets = members.map((index) => Math.abs(signedResidualMeters[index]))
@@ -1113,13 +1179,26 @@ function analyzeGeometryForeground(
     const roughness = members.map((index) => localRoughness[index])
     let boundarySampleCount = 0
     for (const member of members) if (neighborLists[member].some((neighbor) => classifications[neighbor] === GeometryForegroundCode.WALL_GEOMETRY)) boundarySampleCount++
-    components.push({ id: componentId, sampleCount: members.length, estimatedAreaMetersSquared: members.length * 0.000625, offsetMedianMeters: median(offsets), offsetP90Meters: quantile(offsets, 0.9), normalDeviationMedianDegrees: median(normals), roughnessMedianMeters: median(roughness), boundarySampleCount, confidence: clampUnit(Math.min(1, members.length / 12) * 0.45 + Math.min(1, (quantile(offsets, 0.9) ?? 0) / Math.max(EPSILON, wallEnvelopeMeters + FOREGROUND_OFFSET_MARGIN_METERS)) * 0.35 + Math.min(1, (median(normals) ?? 0) / 40) * 0.2) })
+    const coreCount = members.filter((index) => reasons[index] !== GeometryForegroundReason.CONNECTED_FOREGROUND).length
+    const connectedCount = members.length - coreCount
+    const wallContactRatio = members.length === 0 ? 0 : boundarySampleCount / members.length
+    // A very large component that contains almost no direct foreground proof
+    // is a flood, not an object. Return its marginal growth to conservative
+    // uncertainty instead of allowing it to erase a wall.
+    const flood = members.length >= 32 && coreCount / members.length < 0.12 && (median(offsets) ?? 0) <= ambiguousOffsetMeters && wallContactRatio > 0.35
+    if (flood) for (const member of members) if (reasons[member] === GeometryForegroundReason.CONNECTED_FOREGROUND) {
+      classifications[member] = GeometryForegroundCode.GEOMETRY_UNCERTAIN
+      reasons[member] = GeometryForegroundReason.GEOMETRY_UNCERTAIN
+      foregroundConnectedSampleCount--; geometryUncertainSampleCount++; reasonCounts['connected foreground']--; reasonCounts['geometry uncertain']++
+    }
+    components.push({ id: componentId, sampleCount: members.length, estimatedAreaMetersSquared: members.length * 0.000625, offsetMedianMeters: median(offsets), offsetP90Meters: quantile(offsets, 0.9), normalDeviationMedianDegrees: median(normals), roughnessMedianMeters: median(roughness), boundarySampleCount, coreFraction: members.length === 0 ? 0 : coreCount / members.length, connectedFraction: members.length === 0 ? 0 : connectedCount / members.length, wallContactRatio, confidence: clampUnit(Math.min(1, coreCount / 8) * 0.45 + Math.min(1, (quantile(offsets, 0.9) ?? 0) / Math.max(EPSILON, ambiguousOffsetMeters)) * 0.35 + Math.min(1, (median(normals) ?? 0) / 40) * 0.2) })
   }
   const componentGrowthMs = timestamp() - growthStarted
   let rgbWallRejectedByGeometryCount = 0
   for (let index = 0; index < surfels.length; index++) if (rgbClassifications[index] === VisibleWallMask3dCode.WALL && (classifications[index] === GeometryForegroundCode.FOREGROUND_CORE || classifications[index] === GeometryForegroundCode.FOREGROUND_CONNECTED || classifications[index] === GeometryForegroundCode.GEOMETRY_UNCERTAIN)) rgbWallRejectedByGeometryCount++
-  const memoryBytes = classifications.byteLength + reasons.byteLength + signedResidualMeters.byteLength + normalDeviationDegrees.byteLength + roughnessMillimeters.byteLength + depthStepMillimeters.byteLength + componentIds.byteLength
-  return { classifications, reasons, signedResidualMeters, normalDeviationDegrees, roughnessMillimeters, depthStepMillimeters, componentIds, wallResidualMeters: { median: residualMedian, p75: residualP75, p90: residualP90, p95: residualP95 }, wallEnvelopeMeters, geometryWallLikeSampleCount, foregroundCoreSampleCount, foregroundConnectedSampleCount, geometryUncertainSampleCount, rgbWallRejectedByGeometryCount, foregroundReasonCounts: reasonCounts, components, calibrationMs, localAnalysisMs, componentGrowthMs, memoryBytes }
+  const domainSignedOffsets = Array.from(signedResidualMeters).filter((_value, index) => domain[index])
+  const memoryBytes = classifications.byteLength + reasons.byteLength + signedResidualMeters.byteLength + normalDeviationDegrees.byteLength + roughnessMillimeters.byteLength + depthStepMillimeters.byteLength + componentIds.byteLength + strongWallBarrier.byteLength
+  return { classifications, reasons, signedResidualMeters, normalDeviationDegrees, roughnessMillimeters, depthStepMillimeters, componentIds, strongWallBarrier, wallResidualMeters: { median: residualMedian, p75: residualP75, p90: residualP90, p95: residualP95 }, signedOffsetMeters: { min: domainSignedOffsets.length ? Math.min(...domainSignedOffsets) : null, p05: quantile(domainSignedOffsets, 0.05), p25: quantile(domainSignedOffsets, 0.25), median: median(domainSignedOffsets), p75: quantile(domainSignedOffsets, 0.75), p90: quantile(domainSignedOffsets, 0.9), p95: quantile(domainSignedOffsets, 0.95), max: domainSignedOffsets.length ? Math.max(...domainSignedOffsets) : null }, wallEnvelopeMeters, ambiguousOffsetMeters, foregroundSeedOffsetMeters, foregroundSide, calibrationSampleCount: stableWallResiduals.length, geometryDomainSampleCount, rgbWallEnteringGeometryCount, geometryWallLikeSampleCount, foregroundCoreSampleCount, foregroundConnectedSampleCount, geometryUncertainSampleCount, rgbWallRejectedByGeometryCount, foregroundReasonCounts: reasonCounts, components, calibrationMs, localAnalysisMs, componentGrowthMs, memoryBytes }
 }
 
 function createWallLocalPreservedObjectFusion(

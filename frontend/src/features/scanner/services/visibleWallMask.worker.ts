@@ -26,6 +26,7 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
         surface.geometryForeground.roughnessMillimeters.buffer,
         surface.geometryForeground.depthStepMillimeters.buffer,
         surface.geometryForeground.componentIds.buffer,
+        surface.geometryForeground.strongWallBarrier.buffer,
       )
       if (surface.wallLocalPreservedObjectFusion) transfer.push(
         surface.wallLocalPreservedObjectFusion.objectVotes.buffer,

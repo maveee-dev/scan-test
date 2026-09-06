@@ -2032,3 +2032,55 @@ RGB wall samples vetoed by geometry, and bounded component statistics. The
 analysis runs only in the existing post-scan mask worker and is reused for all
 paint swatches; capture cadence, Raw RGB, Dense Reality geometry, M7, Original
 mode, and rendering geometry remain unchanged.
+
+### M8.6.7.1 — Geometry Foreground False-Positive and Flood-Growth Fix
+
+M8.6.7 established the correct foreground veto concept, but a physical wall
+regression showed that an RGB ROI is broader than a logical wall's measured 3D
+domain. Unsigned residual seeds and marginal adjacency growth could then join
+ordinary noisy wall samples into an implausibly large foreground component.
+M8.6.7.1 corrects the evidence, without changing RGB segmentation or disabling
+foreground protection:
+
+```text
+selected logical patch union
+       ↓
+trusted wall calibration
+       ↓
+WALL SAFE ZONE -> WALL_GEOMETRY barrier
+AMBIGUOUS BAND -> conservative, no foreground seed
+FOREGROUND SEED ZONE + local support -> FOREGROUND_CORE
+       ↓
+anchored, bounded foreground-connected growth
+```
+
+Geometry analysis now admits only samples that both have a valid selected RGB
+observation and lie in the selected logical wall's observed patch union (with
+a small edge tolerance). Trusted M7-associated wall members establish the
+calibration distribution; RGB wall samples are only a bounded fallback when
+that support is sparse. The diagnostics retain signed offsets and infer a
+foreground side only from sufficiently supported existing foreground evidence.
+Without that evidence, offset alone cannot seed foreground growth.
+
+The calibrated wall envelope is a safe zone. A separate ambiguous band absorbs
+normal reconstruction spread but remains unable to seed a component. A core
+requires either supported existing foreground evidence, a signed foreground-
+side offset well beyond the seed zone with neighboring offset support, or a
+locally normal-coherent folded surface with offset/depth/roughness support.
+An isolated bad normal is never enough.
+
+Growth stops at strong wall barriers: multiple local wall-like neighbors with
+low residual, wall-compatible normals, and low roughness cannot be converted
+to foreground. Every connected sample needs multiple same-component neighbors,
+compatible local normal and offset steps, continuing foreground shape/offset
+evidence or two nearby core anchors, and a bounded geodesic path from a core.
+Large mostly-connected, near-plane, wall-contact-heavy components are returned
+to conservative uncertainty rather than becoming a wall-wide foreground veto.
+
+Diagnostics now make final geometry counts mutually exclusive and expose the
+selected-wall domain count, calibration count, signed-offset distribution,
+safe/ambiguous/seed thresholds, foreground side, RGB wall entry/veto counts,
+component core/connected fractions, wall-contact ratio, and strong-wall-
+barrier/growth-frontier/core-reason views. This remains local bounded worker
+work. It does not change captured RGB, Dense Reality geometry, M7 geometry,
+Original mode, or the visual-object envelope path used by near-coplanar art.
