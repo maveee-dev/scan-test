@@ -2084,3 +2084,52 @@ component core/connected fractions, wall-contact ratio, and strong-wall-
 barrier/growth-frontier/core-reason views. This remains local bounded worker
 work. It does not change captured RGB, Dense Reality geometry, M7 geometry,
 Original mode, or the visual-object envelope path used by near-coplanar art.
+
+### M8.6.7.2 — Logical-Wall Dense Reality Domain Alignment
+
+M8.6.7.1 correctly made foreground geometry a veto, but a physical regression
+showed that using the exact clean M7.4 patch union as its 3D admission gate was
+too restrictive. A patch is a conservative structural support shape, not a
+pixel-perfect copy of every observed Dense Reality sample on the same wall.
+M8.6.7.2 separates that concern from foreground classification:
+
+```text
+M7 logical wall
+       ↓
+M7_PATCH_CORE anchors
+       ↓
+connected OBSERVED_WALL_EXTENSION
+       ↓
+bounded logical-wall Reality domain
+       ↓
+existing geometry wall / foreground gate
+       ↓
+RGB + preserved-object evidence
+       ↓
+final Dense Reality triangle paint
+```
+
+The member-patch union remains the trusted anchor. It is projected into the
+logical wall's stable U/V basis along with Dense Reality samples. Only samples
+with an already-valid RGB wall observation, calibrated plane compatibility,
+wall-compatible normals, no explicit foreground/object conflict, and a bounded
+U/V continuation can enter the derived domain. Breadth is earned through
+actual spatial connectivity to an M7 patch core; no empty space is filled and
+no structural polygon is rendered.
+
+The continuation stops at a normal/plane break, adjacency limit, conflicting
+logical surface, explicit foreground evidence, or the bounded U/V expansion
+envelope. This prevents propagation around a corner into an adjacent wall or
+ceiling, and prevents towels, curtains, furniture, and other known foreground
+from entering merely because RGB is wall-like. The existing M8.6.7.1 WALL SAFE
+ZONE, AMBIGUOUS BAND, FOREGROUND SEED ZONE, and strong-wall barriers are
+unchanged; they now operate on a correctly aligned Reality wall domain.
+
+Development views expose **M7 Patch Core Domain**, **Observed Wall Extension**,
+**Final Logical Wall Reality Domain**, and **Domain Rejection Reasons**. Per
+wall diagnostics report RGB-projected candidates, patch core and extension
+counts, near-patch candidates, bounds/plane/normal/foreground rejections, U/V
+bounds, expansion distance, domain components, and post-domain geometry state
+counts. Domain construction remains compact, local, and post-scan; it changes
+neither XR capture nor RGB-D registration, Dense Reality geometry, M7
+measurements, Original mode, or paint renderer geometry.

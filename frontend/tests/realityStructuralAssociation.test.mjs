@@ -1224,3 +1224,25 @@ test('73. Noisy p95 38 mm planar wall does not form a giant foreground component
   assert.equal(geometry.foregroundConnectedSampleCount, 0)
   assert.equal(geometry.geometryWallLikeSampleCount + geometry.foregroundCoreSampleCount + geometry.foregroundConnectedSampleCount + geometry.geometryUncertainSampleCount, geometry.geometryDomainSampleCount)
 })
+
+// 74. A conservative M7 support polygon is a seed, not a pixel-perfect gate:
+// connected observed RGB wall outside the patch must enter the bounded domain.
+test('74. Connected observed wall extends beyond a partial M7 patch without filling gaps', () => {
+  const wall = patch('wall-partial-domain', { offsetX: -0.32, offsetZ: -1, planeConstant: -1, width: 0.64, height: 0.7 })
+  const samples = []
+  let id = 920
+  for (let row = 0; row < 9; row++) for (let column = 0; column < 18; column++) {
+    samples.push(surfel(id++, -0.7 + column * 0.08, 0.05 + row * 0.075, -1 + ((row + column) % 3) * 0.006))
+  }
+  const table = rgbMaskTable(samples, wall)
+  table.memberships = new Uint8Array(samples.map((sample) => sample.position.x >= -0.32 && sample.position.x <= 0.32 ? 1 : 0))
+  table.logicalSurfaceIndices = new Int32Array(samples.map((sample) => sample.position.x >= -0.32 && sample.position.x <= 0.32 ? 0 : -1))
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, table, keyframeSnapshot([testKeyframe(1, 64, 40, false)]))
+  assert.ok(result)
+  const surface = result.surfaces[0], domain = surface.realityWallDomain
+  assert.ok(domain.patchCoreSampleCount > 0)
+  assert.ok(domain.observedWallExtensionSampleCount > 0, 'connected Reality beyond the M7 support must be admitted as observed extension')
+  assert.ok(surface.geometryForeground.geometryDomainSampleCount >= domain.patchCoreSampleCount + domain.observedWallExtensionSampleCount)
+  assert.ok(surface.geometryForeground.geometryWallLikeSampleCount >= 70, 'the broad planar Reality wall remains wall geometry')
+  assert.ok(domain.maxExpansionDistanceMeters <= 0.55)
+})

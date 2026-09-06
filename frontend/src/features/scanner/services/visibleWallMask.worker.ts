@@ -19,6 +19,7 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
         surface.threeDSampleWallConfidence.buffer,
         surface.threeDSampleTerminalReasons.buffer,
         surface.threeDCompletedEnvelopeSampleMask.buffer,
+        surface.realityWallDomain.states.buffer,
         surface.geometryForeground.classifications.buffer,
         surface.geometryForeground.reasons.buffer,
         surface.geometryForeground.signedResidualMeters.buffer,

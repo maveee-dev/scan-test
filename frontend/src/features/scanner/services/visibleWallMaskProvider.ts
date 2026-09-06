@@ -66,6 +66,39 @@ export const GeometryForegroundReason = {
   GEOMETRY_UNCERTAIN: 7,
 } as const
 
+/**
+ * A bounded 3D admission domain for a logical wall. M7 patches are trusted
+ * anchors, while connected observed Reality can extend beyond their clean
+ * support polygons without inventing any geometry.
+ */
+export const RealityWallDomainCode = {
+  OUTSIDE_LOGICAL_WALL_DOMAIN: 0,
+  M7_PATCH_CORE: 1,
+  OBSERVED_WALL_EXTENSION: 2,
+} as const
+
+export interface RealityWallDomainAnalysis {
+  readonly states: Uint8Array
+  readonly patchCoreSampleCount: number
+  readonly nearPatchSampleCount: number
+  readonly observedWallExtensionSampleCount: number
+  readonly outsideDomainSampleCount: number
+  readonly rgbWallProjectedCandidateCount: number
+  readonly rejectedByBoundsCount: number
+  readonly rejectedByPlaneCount: number
+  readonly rejectedByNormalCount: number
+  readonly rejectedByForegroundCount: number
+  readonly domainComponentCount: number
+  readonly patchUvBounds: { readonly minU: number; readonly maxU: number; readonly minV: number; readonly maxV: number } | null
+  readonly expandedUvBounds: { readonly minU: number; readonly maxU: number; readonly minV: number; readonly maxV: number } | null
+  readonly planeEnvelopeMeters: number
+  readonly patchEdgeToleranceMeters: number
+  readonly maxExpansionDistanceMeters: number
+  readonly seedClassificationMs: number
+  readonly extensionGrowthMs: number
+  readonly memoryBytes: number
+}
+
 export interface PreservedVisualIsland {
   readonly pixelCount: number
   readonly boundaryClosureScore: number
@@ -242,6 +275,7 @@ export interface VisibleWallMaskSurfaceResult {
   readonly threeDCompletedEnvelopeSampleMask: Uint8Array
   readonly completedEnvelopeSampleCount: number
   readonly wallLocalPreservedObjectFusion: WallLocalPreservedObjectFusion | null
+  readonly realityWallDomain: RealityWallDomainAnalysis
   readonly geometryForeground: GeometryForegroundAnalysis
 }
 
@@ -264,6 +298,7 @@ export interface VisibleWallMaskResult {
   readonly interiorFillMs: number
   readonly wallLocalFusionMs: number
   readonly objectProjectionMs: number
+  readonly wallDomainMs: number
   readonly geometryForegroundMs: number
   readonly memoryBytes: number
 }
@@ -319,6 +354,11 @@ const FOREGROUND_DEPTH_STEP_METERS = 0.028
 const FOREGROUND_COMPONENT_MAX_GEODESIC_METERS = 0.45
 const FOREGROUND_SIDE_MINIMUM_SUPPORT = 4
 const STRONG_WALL_BARRIER_NEIGHBORS = 3
+const WALL_DOMAIN_NEIGHBOR_RADIUS_METERS = 0.09
+const WALL_DOMAIN_MAX_NEIGHBORS = 24
+const WALL_DOMAIN_MIN_PLANE_ENVELOPE_METERS = 0.055
+const WALL_DOMAIN_MAX_PLANE_ENVELOPE_METERS = 0.12
+const WALL_DOMAIN_MAX_EXTENSION_METERS = 0.55
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -1012,11 +1052,145 @@ function foregroundNeighbors(
   return candidates.slice(0, FOREGROUND_MAX_NEIGHBORS).map((candidate) => candidate.index)
 }
 
+function wallDomainNeighbors(
+  point: SpatialPoint,
+  cells: ReadonlyMap<string, readonly number[]>,
+  surfels: readonly FinalizedRealitySurfel[],
+): number[] {
+  const originX = Math.floor(point.x / FOREGROUND_GRID_CELL_METERS), originY = Math.floor(point.y / FOREGROUND_GRID_CELL_METERS), originZ = Math.floor(point.z / FOREGROUND_GRID_CELL_METERS)
+  const candidates: Array<{ index: number; distanceSquared: number }> = []
+  const radiusSquared = WALL_DOMAIN_NEIGHBOR_RADIUS_METERS * WALL_DOMAIN_NEIGHBOR_RADIUS_METERS
+  for (let x = originX - 2; x <= originX + 2; x++) for (let y = originY - 2; y <= originY + 2; y++) for (let z = originZ - 2; z <= originZ + 2; z++) {
+    for (const index of cells.get(`${x},${y},${z}`) ?? []) {
+      const candidate = surfels[index].position, dx = candidate.x - point.x, dy = candidate.y - point.y, dz = candidate.z - point.z
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      if (distanceSquared > EPSILON && distanceSquared <= radiusSquared) candidates.push({ index, distanceSquared })
+    }
+  }
+  candidates.sort((left, right) => left.distanceSquared - right.distanceSquared)
+  return candidates.slice(0, WALL_DOMAIN_MAX_NEIGHBORS).map((candidate) => candidate.index)
+}
+
+function normalCompatibility(first: SpatialPoint | undefined, second: SpatialPoint | undefined): number {
+  if (!first || !second) return 1
+  return Math.abs((first.x * second.x + first.y * second.y + first.z * second.z) / Math.max(EPSILON, Math.hypot(first.x, first.y, first.z) * Math.hypot(second.x, second.y, second.z)))
+}
+
+/**
+ * Builds a physical Reality domain before foreground classification. The
+ * structural patch union starts the domain, but only connected RGB-supported
+ * and wall-compatible observed samples can extend it.
+ */
+function buildRealityWallDomain(
+  surfels: readonly FinalizedRealitySurfel[],
+  table: RealityStructuralAssociationTable,
+  logicalIndex: number,
+  rgbClassifications: Uint8Array,
+): RealityWallDomainAnalysis {
+  const seedStarted = timestamp()
+  const logical = table.logicalSurfaces[logicalIndex]
+  const diagnostics = table.perLogicalSurface?.find((entry) => entry.logicalSurfaceId === logical.id)
+  const planeConstant = logical.representativePlaneConstant + (diagnostics?.membershipReferenceOffsetMeters ?? 0)
+  const memberPatches = logical.memberPatchIds.map((id) => table.patches.find((patch) => patch.id === id)).filter((patch): patch is RealityStructuralAssociationTable['patches'][number] => Boolean(patch))
+  const referencePatch = memberPatches[0]
+  const states = new Uint8Array(surfels.length)
+  if (!referencePatch || memberPatches.length === 0) return {
+    states, patchCoreSampleCount: 0, nearPatchSampleCount: 0, observedWallExtensionSampleCount: 0, outsideDomainSampleCount: surfels.length,
+    rgbWallProjectedCandidateCount: 0, rejectedByBoundsCount: 0, rejectedByPlaneCount: 0, rejectedByNormalCount: 0, rejectedByForegroundCount: 0,
+    domainComponentCount: 0, patchUvBounds: null, expandedUvBounds: null, planeEnvelopeMeters: 0, patchEdgeToleranceMeters: 0,
+    maxExpansionDistanceMeters: 0, seedClassificationMs: timestamp() - seedStarted, extensionGrowthMs: 0, memoryBytes: states.byteLength,
+  }
+  const patchLocals = memberPatches.flatMap((patch) => patch.vertices3D.map((point) => wallLocalCoordinate(point, referencePatch.basis)))
+  const patchUvBounds = {
+    minU: Math.min(...patchLocals.map((point) => point.u)), maxU: Math.max(...patchLocals.map((point) => point.u)),
+    minV: Math.min(...patchLocals.map((point) => point.v)), maxV: Math.max(...patchLocals.map((point) => point.v)),
+  }
+  const trustedResiduals: number[] = []
+  for (let index = 0; index < surfels.length; index++) {
+    const membership = table.memberships?.[index] ?? RealityMembershipCode.NON_WALL
+    if (table.logicalSurfaceIndices[index] === logicalIndex && (membership === RealityMembershipCode.CORE_WALL_MEMBER || membership === RealityMembershipCode.EXPANDED_WALL_MEMBER)) {
+      trustedResiduals.push(Math.abs(signedPlaneResidual(surfels[index].position, logical.representativeNormal, planeConstant)))
+    }
+  }
+  const residualP95 = quantile(trustedResiduals, 0.95) ?? 0.035
+  const planeEnvelopeMeters = Math.max(WALL_DOMAIN_MIN_PLANE_ENVELOPE_METERS, Math.min(WALL_DOMAIN_MAX_PLANE_ENVELOPE_METERS, residualP95 + 0.025))
+  const spacing = median(surfels.map((surfel) => surfel.radius * 2)) ?? 0.025
+  const patchEdgeToleranceMeters = Math.max(0.06, Math.min(0.16, spacing * 2 + residualP95))
+  const maxExpansionDistanceMeters = Math.max(0.25, Math.min(WALL_DOMAIN_MAX_EXTENSION_METERS, patchEdgeToleranceMeters * 6))
+  const expandedUvBounds = {
+    minU: patchUvBounds.minU - maxExpansionDistanceMeters, maxU: patchUvBounds.maxU + maxExpansionDistanceMeters,
+    minV: patchUvBounds.minV - maxExpansionDistanceMeters, maxV: patchUvBounds.maxV + maxExpansionDistanceMeters,
+  }
+  const candidates = new Uint8Array(surfels.length)
+  const cells = new Map<string, number[]>()
+  let patchCoreSampleCount = 0, nearPatchSampleCount = 0, rgbWallProjectedCandidateCount = 0
+  let rejectedByBoundsCount = 0, rejectedByPlaneCount = 0, rejectedByNormalCount = 0, rejectedByForegroundCount = 0
+  for (let index = 0; index < surfels.length; index++) {
+    if (rgbClassifications[index] !== VisibleWallMask3dCode.WALL) continue
+    rgbWallProjectedCandidateCount++
+    if ((table.foregroundMask?.[index] ?? 0) > 0 || (table.logicalSurfaceIndices[index] >= 0 && table.logicalSurfaceIndices[index] !== logicalIndex)) { rejectedByForegroundCount++; continue }
+    const exactPatch = memberPatches.some((patch) => pointInsidePatchDomain(surfels[index].position, patch, 0))
+    const nearPatch = !exactPatch && memberPatches.some((patch) => pointInsidePatchDomain(surfels[index].position, patch, patchEdgeToleranceMeters))
+    const residual = Math.abs(signedPlaneResidual(surfels[index].position, logical.representativeNormal, planeConstant))
+    // A patch-core pixel may be a true foreground object hanging in front of
+    // the wall. Admit it only for the existing geometry veto; it can never
+    // become an observed-wall extension from this relaxed probe path.
+    const foregroundProbe = (exactPatch || nearPatch) && residual <= 0.14
+    if (residual > planeEnvelopeMeters && !foregroundProbe) { rejectedByPlaneCount++; continue }
+    if (absoluteNormalDeviationDegrees(surfels[index].normal, logical.representativeNormal) > 38 && !foregroundProbe) { rejectedByNormalCount++; continue }
+    const local = wallLocalCoordinate(surfels[index].position, referencePatch.basis)
+    if (local.u < expandedUvBounds.minU || local.u > expandedUvBounds.maxU || local.v < expandedUvBounds.minV || local.v > expandedUvBounds.maxV) { rejectedByBoundsCount++; continue }
+    candidates[index] = 1
+    const key = foregroundGridKey(surfels[index].position), cell = cells.get(key)
+    if (cell) cell.push(index); else cells.set(key, [index])
+    if (exactPatch) { states[index] = RealityWallDomainCode.M7_PATCH_CORE; patchCoreSampleCount++ }
+    else if (nearPatch) nearPatchSampleCount++
+  }
+  const seedClassificationMs = timestamp() - seedStarted
+  const growthStarted = timestamp()
+  const queue: number[] = []
+  for (let index = 0; index < states.length; index++) if (states[index] === RealityWallDomainCode.M7_PATCH_CORE) queue.push(index)
+  let observedWallExtensionSampleCount = 0
+  const visitedRoots = new Uint8Array(surfels.length)
+  for (const seed of queue) if (!visitedRoots[seed]) {
+    const componentQueue = [seed]; visitedRoots[seed] = 1
+    for (let cursor = 0; cursor < componentQueue.length; cursor++) {
+      const current = componentQueue[cursor]
+      for (const neighbor of wallDomainNeighbors(surfels[current].position, cells, surfels)) {
+        if (!candidates[neighbor] || states[neighbor] !== RealityWallDomainCode.OUTSIDE_LOGICAL_WALL_DOMAIN) continue
+        const residualStep = Math.abs(signedPlaneResidual(surfels[current].position, logical.representativeNormal, planeConstant) - signedPlaneResidual(surfels[neighbor].position, logical.representativeNormal, planeConstant))
+        if (residualStep > 0.045 || normalCompatibility(surfels[current].normal, surfels[neighbor].normal) < 0.64) continue
+        states[neighbor] = RealityWallDomainCode.OBSERVED_WALL_EXTENSION
+        observedWallExtensionSampleCount++
+        if (!visitedRoots[neighbor]) { visitedRoots[neighbor] = 1; componentQueue.push(neighbor) }
+      }
+    }
+  }
+  let domainComponentCount = 0
+  const visitedDomain = new Uint8Array(surfels.length)
+  for (let start = 0; start < states.length; start++) {
+    if (states[start] === RealityWallDomainCode.OUTSIDE_LOGICAL_WALL_DOMAIN || visitedDomain[start]) continue
+    domainComponentCount++
+    const componentQueue = [start]; visitedDomain[start] = 1
+    for (let cursor = 0; cursor < componentQueue.length; cursor++) for (const neighbor of wallDomainNeighbors(surfels[componentQueue[cursor]].position, cells, surfels)) {
+      if (states[neighbor] !== RealityWallDomainCode.OUTSIDE_LOGICAL_WALL_DOMAIN && !visitedDomain[neighbor]) { visitedDomain[neighbor] = 1; componentQueue.push(neighbor) }
+    }
+  }
+  const extensionGrowthMs = timestamp() - growthStarted
+  return {
+    states, patchCoreSampleCount, nearPatchSampleCount, observedWallExtensionSampleCount, outsideDomainSampleCount: surfels.length - patchCoreSampleCount - observedWallExtensionSampleCount,
+    rgbWallProjectedCandidateCount, rejectedByBoundsCount, rejectedByPlaneCount, rejectedByNormalCount, rejectedByForegroundCount, domainComponentCount,
+    patchUvBounds, expandedUvBounds, planeEnvelopeMeters, patchEdgeToleranceMeters, maxExpansionDistanceMeters, seedClassificationMs, extensionGrowthMs,
+    memoryBytes: states.byteLength + candidates.byteLength + visitedRoots.byteLength + visitedDomain.byteLength,
+  }
+}
+
 function analyzeGeometryForeground(
   surfels: readonly FinalizedRealitySurfel[],
   table: RealityStructuralAssociationTable,
   logicalIndex: number,
   rgbClassifications: Uint8Array,
+  wallDomain: RealityWallDomainAnalysis,
 ): GeometryForegroundAnalysis {
   const calibrationStarted = timestamp()
   const logical = table.logicalSurfaces[logicalIndex]
@@ -1031,18 +1205,16 @@ function analyzeGeometryForeground(
   const componentIds = new Int32Array(surfels.length).fill(-1)
   const domain = new Uint8Array(surfels.length)
   const stableWallResiduals: number[] = []
-  const memberPatches = logical.memberPatchIds.map((id) => table.patches.find((patch) => patch.id === id)).filter((patch): patch is RealityStructuralAssociationTable['patches'][number] => Boolean(patch))
   let geometryDomainSampleCount = 0, rgbWallEnteringGeometryCount = 0
   for (let index = 0; index < surfels.length; index++) {
     const signed = signedPlaneResidual(surfels[index].position, logical.representativeNormal, calibratedPlaneConstant)
     signedResidualMeters[index] = signed
     const visuallyObserved = rgbClassifications[index] !== VisibleWallMask3dCode.OUTSIDE_DOMAIN
     const structurallyRelated = table.logicalSurfaceIndices[index] === logicalIndex
-    const insideLogicalDomain = structurallyRelated || memberPatches.some((patch) => Math.abs(signedPlaneResidual(surfels[index].position, patch.normal, patch.planeConstant)) <= 0.12 && pointInsidePatchDomain(surfels[index].position, patch))
-    // An RGB ROI is a visual search prior, not a 3D wall domain. Geometry
-    // analysis must never pull adjacent surfaces into this logical wall merely
-    // because their image projection overlaps the ROI.
-    if (!visuallyObserved || !insideLogicalDomain) continue
+    // M8.6.7.2 separates bounded wall-domain admission from foreground
+    // classification. This classifier consumes only M7-patch core plus its
+    // connected, observed Reality extension; it never uses the RGB ROI alone.
+    if (!visuallyObserved || wallDomain.states[index] === RealityWallDomainCode.OUTSIDE_LOGICAL_WALL_DOMAIN) continue
     domain[index] = 1
     geometryDomainSampleCount++
     if (rgbClassifications[index] === VisibleWallMask3dCode.WALL) rgbWallEnteringGeometryCount++
@@ -1283,7 +1455,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
     // first deterministic logical surface rather than oscillating by loop order.
     const sampleVoteStrength = new Uint8Array(surfels.length)
     const surfaces: VisibleWallMaskSurfaceResult[] = []
-    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, fragmentExtractionMs = 0, componentMergeMs = 0, enclosureAnalysisMs = 0, clusterFormationMs = 0, outerBoundaryAnalysisMs = 0, gapCompletionMs = 0, interiorFillMs = 0, wallLocalFusionMs = 0, objectProjectionMs = 0, geometryForegroundMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
+    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, fragmentExtractionMs = 0, componentMergeMs = 0, enclosureAnalysisMs = 0, clusterFormationMs = 0, outerBoundaryAnalysisMs = 0, gapCompletionMs = 0, interiorFillMs = 0, wallLocalFusionMs = 0, objectProjectionMs = 0, wallDomainMs = 0, geometryForegroundMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
     const projection = { u: 0, v: 0 }, pixel = { x: 0, y: 0 }
     for (let logicalIndex = 0; logicalIndex < table.logicalSurfaces.length; logicalIndex++) {
       const vertices = surfaceVertices(table, logicalIndex)
@@ -1480,8 +1652,11 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         wallConfirmed--; nonWall++
       }
       objectProjectionMs += timestamp() - objectProjectionStarted
+      const wallDomainStarted = timestamp()
+      const realityWallDomain = buildRealityWallDomain(surfels, table, logicalIndex, threeDSampleClassifications)
+      wallDomainMs += timestamp() - wallDomainStarted
       const geometryForegroundStarted = timestamp()
-      const geometryForeground = analyzeGeometryForeground(surfels, table, logicalIndex, threeDSampleClassifications)
+      const geometryForeground = analyzeGeometryForeground(surfels, table, logicalIndex, threeDSampleClassifications, realityWallDomain)
       for (let index = 0; index < surfels.length; index++) {
         if (threeDSampleClassifications[index] !== VisibleWallMask3dCode.WALL) continue
         const geometry = geometryForeground.classifications[index]
@@ -1500,7 +1675,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
       const threeDCompletedEnvelopeSampleMask = new Uint8Array(surfels.length)
       let completedEnvelopeSampleCount = 0
       for (let index = 0; index < surfels.length; index++) if (threeDSampleClassifications[index] === VisibleWallMask3dCode.NON_WALL && threeDSampleCompletedEnvelopeKeyframeBits[index]) { threeDCompletedEnvelopeSampleMask[index] = 1; completedEnvelopeSampleCount++ }
-      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength + threeDSampleObjectKeyframeBits.byteLength + threeDSampleCompletedEnvelopeKeyframeBits.byteLength + threeDCompletedEnvelopeSampleMask.byteLength + geometryForeground.memoryBytes + (wallLocalPreservedObjectFusion ? wallLocalPreservedObjectFusion.objectVotes.byteLength + wallLocalPreservedObjectFusion.wallVotes.byteLength + wallLocalPreservedObjectFusion.protectedCells.byteLength + wallLocalPreservedObjectFusion.keyframeSupport.byteLength + wallLocalPreservedObjectFusion.protectedSampleMask.byteLength : 0)
+      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength + threeDSampleObjectKeyframeBits.byteLength + threeDSampleCompletedEnvelopeKeyframeBits.byteLength + threeDCompletedEnvelopeSampleMask.byteLength + realityWallDomain.memoryBytes + geometryForeground.memoryBytes + (wallLocalPreservedObjectFusion ? wallLocalPreservedObjectFusion.objectVotes.byteLength + wallLocalPreservedObjectFusion.wallVotes.byteLength + wallLocalPreservedObjectFusion.protectedCells.byteLength + wallLocalPreservedObjectFusion.keyframeSupport.byteLength + wallLocalPreservedObjectFusion.protectedSampleMask.byteLength : 0)
       surfaces.push({
         logicalSurfaceId: table.logicalSurfaces[logicalIndex].id,
         selectedKeyframeIds: masks.map((mask) => mask.keyframeId),
@@ -1536,9 +1711,10 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         threeDCompletedEnvelopeSampleMask,
         completedEnvelopeSampleCount,
         wallLocalPreservedObjectFusion,
+        realityWallDomain,
         geometryForeground,
       })
     }
-    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs, clusterFormationMs, outerBoundaryAnalysisMs, gapCompletionMs, interiorFillMs, wallLocalFusionMs, objectProjectionMs, geometryForegroundMs, memoryBytes }
+    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs, clusterFormationMs, outerBoundaryAnalysisMs, gapCompletionMs, interiorFillMs, wallLocalFusionMs, objectProjectionMs, wallDomainMs, geometryForegroundMs, memoryBytes }
   }
 }
