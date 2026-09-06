@@ -42,6 +42,28 @@ export const VisibleWallMask3dTerminalReason = {
   VISIBILITY_OCCLUSION_UNCERTAINTY: 9,
   LOGICAL_SURFACE_MISMATCH: 10,
   OTHER: 11,
+  GEOMETRY_FOREGROUND: 12,
+  GEOMETRY_UNCERTAIN: 13,
+} as const
+
+/** Geometry-first post-scan veto for non-planar/foreground Reality surfaces. */
+export const GeometryForegroundCode = {
+  OUTSIDE_DOMAIN: 0,
+  WALL_GEOMETRY: 1,
+  FOREGROUND_CORE: 2,
+  FOREGROUND_CONNECTED: 3,
+  GEOMETRY_UNCERTAIN: 4,
+} as const
+
+export const GeometryForegroundReason = {
+  NONE: 0,
+  EXISTING_FOREGROUND: 1,
+  PLANE_OFFSET: 2,
+  NORMAL_DISAGREEMENT: 3,
+  SURFACE_ROUGHNESS: 4,
+  DEPTH_DISCONTINUITY: 5,
+  CONNECTED_FOREGROUND: 6,
+  GEOMETRY_UNCERTAIN: 7,
 } as const
 
 export interface PreservedVisualIsland {
@@ -109,6 +131,41 @@ export interface WallLocalPreservedObjectFusion {
   readonly protectedSampleCount: number
 }
 
+export interface GeometryForegroundComponent {
+  readonly id: number
+  readonly sampleCount: number
+  readonly estimatedAreaMetersSquared: number
+  readonly offsetMedianMeters: number | null
+  readonly offsetP90Meters: number | null
+  readonly normalDeviationMedianDegrees: number | null
+  readonly roughnessMedianMeters: number | null
+  readonly boundarySampleCount: number
+  readonly confidence: number
+}
+
+export interface GeometryForegroundAnalysis {
+  readonly classifications: Uint8Array
+  readonly reasons: Uint8Array
+  readonly signedResidualMeters: Float32Array
+  readonly normalDeviationDegrees: Uint8Array
+  readonly roughnessMillimeters: Uint8Array
+  readonly depthStepMillimeters: Uint8Array
+  readonly componentIds: Int32Array
+  readonly wallResidualMeters: { readonly median: number | null; readonly p75: number | null; readonly p90: number | null; readonly p95: number | null }
+  readonly wallEnvelopeMeters: number
+  readonly geometryWallLikeSampleCount: number
+  readonly foregroundCoreSampleCount: number
+  readonly foregroundConnectedSampleCount: number
+  readonly geometryUncertainSampleCount: number
+  readonly rgbWallRejectedByGeometryCount: number
+  readonly foregroundReasonCounts: Readonly<Record<string, number>>
+  readonly components: readonly GeometryForegroundComponent[]
+  readonly calibrationMs: number
+  readonly localAnalysisMs: number
+  readonly componentGrowthMs: number
+  readonly memoryBytes: number
+}
+
 export interface VisibleWallMaskKeyframe {
   readonly keyframeId: number
   readonly roi: { x: number; y: number; width: number; height: number }
@@ -174,6 +231,7 @@ export interface VisibleWallMaskSurfaceResult {
   readonly threeDCompletedEnvelopeSampleMask: Uint8Array
   readonly completedEnvelopeSampleCount: number
   readonly wallLocalPreservedObjectFusion: WallLocalPreservedObjectFusion | null
+  readonly geometryForeground: GeometryForegroundAnalysis
 }
 
 export interface VisibleWallMaskResult {
@@ -195,6 +253,7 @@ export interface VisibleWallMaskResult {
   readonly interiorFillMs: number
   readonly wallLocalFusionMs: number
   readonly objectProjectionMs: number
+  readonly geometryForegroundMs: number
   readonly memoryBytes: number
 }
 
@@ -237,6 +296,17 @@ const OUTER_OBJECT_MIN_VERTICAL_OVERLAP = 0.42
 const OUTER_OBJECT_MIN_MEMBER_REGIONS = 2
 const OUTER_OBJECT_MIN_CLOSURE_SCORE = 0.32
 const OUTER_OBJECT_MAX_ROI_FRACTION = 0.45
+const FOREGROUND_GRID_CELL_METERS = 0.06
+const FOREGROUND_NEIGHBOR_RADIUS_METERS = 0.075
+const FOREGROUND_MAX_NEIGHBORS = 20
+const FOREGROUND_MIN_COMPONENT_SUPPORT = 2
+const FOREGROUND_MIN_WALL_ENVELOPE_METERS = 0.025
+const FOREGROUND_MAX_WALL_ENVELOPE_METERS = 0.06
+const FOREGROUND_OFFSET_MARGIN_METERS = 0.018
+const FOREGROUND_STRONG_OFFSET_MARGIN_METERS = 0.035
+const FOREGROUND_NORMAL_DEVIATION_DEGREES = 28
+const FOREGROUND_ROUGHNESS_METERS = 0.014
+const FOREGROUND_DEPTH_STEP_METERS = 0.028
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -871,6 +941,187 @@ function wallLocalCoordinate(point: SpatialPoint, basis: { origin: SpatialPoint;
   return { u: x * basis.axisU.x + y * basis.axisU.y + z * basis.axisU.z, v: x * basis.axisV.x + y * basis.axisV.y + z * basis.axisV.z }
 }
 
+function quantile(values: readonly number[], fraction: number): number | null {
+  if (values.length === 0) return null
+  const ordered = [...values].sort((left, right) => left - right)
+  const position = clampUnit(fraction) * (ordered.length - 1), lower = Math.floor(position), upper = Math.ceil(position)
+  return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+}
+
+function signedPlaneResidual(point: SpatialPoint, normal: SpatialPoint, planeConstant: number): number {
+  return point.x * normal.x + point.y * normal.y + point.z * normal.z - planeConstant
+}
+
+function absoluteNormalDeviationDegrees(normal: SpatialPoint | undefined, wallNormal: SpatialPoint): number {
+  if (!normal) return 0
+  const length = Math.hypot(normal.x, normal.y, normal.z) * Math.hypot(wallNormal.x, wallNormal.y, wallNormal.z)
+  if (length <= EPSILON) return 0
+  const dot = Math.min(1, Math.max(-1, Math.abs((normal.x * wallNormal.x + normal.y * wallNormal.y + normal.z * wallNormal.z) / length)))
+  return Math.acos(dot) * 180 / Math.PI
+}
+
+function foregroundGridKey(point: SpatialPoint): string {
+  return `${Math.floor(point.x / FOREGROUND_GRID_CELL_METERS)},${Math.floor(point.y / FOREGROUND_GRID_CELL_METERS)},${Math.floor(point.z / FOREGROUND_GRID_CELL_METERS)}`
+}
+
+function foregroundNeighbors(
+  point: SpatialPoint,
+  cells: ReadonlyMap<string, readonly number[]>,
+  surfels: readonly FinalizedRealitySurfel[],
+): number[] {
+  const originX = Math.floor(point.x / FOREGROUND_GRID_CELL_METERS), originY = Math.floor(point.y / FOREGROUND_GRID_CELL_METERS), originZ = Math.floor(point.z / FOREGROUND_GRID_CELL_METERS)
+  const candidates: Array<{ index: number; distanceSquared: number }> = []
+  const radiusSquared = FOREGROUND_NEIGHBOR_RADIUS_METERS * FOREGROUND_NEIGHBOR_RADIUS_METERS
+  for (let x = originX - 1; x <= originX + 1; x++) for (let y = originY - 1; y <= originY + 1; y++) for (let z = originZ - 1; z <= originZ + 1; z++) {
+    for (const index of cells.get(`${x},${y},${z}`) ?? []) {
+      const candidate = surfels[index].position, dx = candidate.x - point.x, dy = candidate.y - point.y, dz = candidate.z - point.z
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      if (distanceSquared > EPSILON && distanceSquared <= radiusSquared) candidates.push({ index, distanceSquared })
+    }
+  }
+  candidates.sort((left, right) => left.distanceSquared - right.distanceSquared)
+  return candidates.slice(0, FOREGROUND_MAX_NEIGHBORS).map((candidate) => candidate.index)
+}
+
+function analyzeGeometryForeground(
+  surfels: readonly FinalizedRealitySurfel[],
+  table: RealityStructuralAssociationTable,
+  logicalIndex: number,
+  rgbClassifications: Uint8Array,
+): GeometryForegroundAnalysis {
+  const calibrationStarted = timestamp()
+  const logical = table.logicalSurfaces[logicalIndex]
+  const diagnostics = table.perLogicalSurface?.find((entry) => entry.logicalSurfaceId === logical.id)
+  const calibratedPlaneConstant = logical.representativePlaneConstant + (diagnostics?.membershipReferenceOffsetMeters ?? 0)
+  const classifications = new Uint8Array(surfels.length)
+  const reasons = new Uint8Array(surfels.length)
+  const signedResidualMeters = new Float32Array(surfels.length)
+  const normalDeviationDegrees = new Uint8Array(surfels.length)
+  const roughnessMillimeters = new Uint8Array(surfels.length)
+  const depthStepMillimeters = new Uint8Array(surfels.length)
+  const componentIds = new Int32Array(surfels.length).fill(-1)
+  const domain = new Uint8Array(surfels.length)
+  const stableWallResiduals: number[] = []
+  for (let index = 0; index < surfels.length; index++) {
+    const signed = signedPlaneResidual(surfels[index].position, logical.representativeNormal, calibratedPlaneConstant)
+    signedResidualMeters[index] = signed
+    const visuallyObserved = rgbClassifications[index] !== VisibleWallMask3dCode.OUTSIDE_DOMAIN
+    const structurallyRelated = table.logicalSurfaceIndices[index] === logicalIndex
+    if (!visuallyObserved && !structurallyRelated) continue
+    domain[index] = 1
+    const membership = table.memberships?.[index] ?? RealityMembershipCode.NON_WALL
+    if (structurallyRelated && (membership === RealityMembershipCode.CORE_WALL_MEMBER || membership === RealityMembershipCode.EXPANDED_WALL_MEMBER)) stableWallResiduals.push(Math.abs(signed))
+  }
+  if (stableWallResiduals.length < 8) for (let index = 0; index < surfels.length; index++) {
+    if (!domain[index] || rgbClassifications[index] !== VisibleWallMask3dCode.WALL) continue
+    const deviation = absoluteNormalDeviationDegrees(surfels[index].normal, logical.representativeNormal)
+    if (deviation <= 16 && Math.abs(signedResidualMeters[index]) <= 0.04) stableWallResiduals.push(Math.abs(signedResidualMeters[index]))
+  }
+  const residualMedian = quantile(stableWallResiduals, 0.5)
+  const residualP75 = quantile(stableWallResiduals, 0.75)
+  const residualP90 = quantile(stableWallResiduals, 0.9)
+  const residualP95 = quantile(stableWallResiduals, 0.95)
+  const wallEnvelopeMeters = Math.max(FOREGROUND_MIN_WALL_ENVELOPE_METERS, Math.min(FOREGROUND_MAX_WALL_ENVELOPE_METERS, (residualP90 ?? residualMedian ?? 0.018) + 0.012))
+  const calibrationMs = timestamp() - calibrationStarted
+
+  const localStarted = timestamp()
+  const cells = new Map<string, number[]>()
+  for (let index = 0; index < surfels.length; index++) if (domain[index]) {
+    const key = foregroundGridKey(surfels[index].position), cell = cells.get(key)
+    if (cell) cell.push(index); else cells.set(key, [index])
+  }
+  const neighborLists: number[][] = Array.from({ length: surfels.length }, () => [])
+  const localNormalDeviation: number[] = Array(surfels.length).fill(0)
+  const localRoughness: number[] = Array(surfels.length).fill(0)
+  const localDepthStep: number[] = Array(surfels.length).fill(0)
+  for (let index = 0; index < surfels.length; index++) if (domain[index]) {
+    const neighbors = foregroundNeighbors(surfels[index].position, cells, surfels)
+    neighborLists[index] = neighbors
+    const offsets = neighbors.map((neighbor) => signedResidualMeters[neighbor])
+    const offsetCenter = median(offsets)
+    if (offsetCenter !== null && offsets.length > 0) {
+      localRoughness[index] = Math.sqrt(offsets.reduce((sum, value) => sum + (value - offsetCenter) * (value - offsetCenter), 0) / offsets.length)
+      localDepthStep[index] = Math.max(...offsets.map((value) => Math.abs(value - signedResidualMeters[index])))
+    }
+    localNormalDeviation[index] = absoluteNormalDeviationDegrees(surfels[index].normal, logical.representativeNormal)
+    normalDeviationDegrees[index] = Math.min(255, Math.round(localNormalDeviation[index]))
+    roughnessMillimeters[index] = Math.min(255, Math.round(localRoughness[index] * 1000))
+    depthStepMillimeters[index] = Math.min(255, Math.round(localDepthStep[index] * 1000))
+  }
+  const localAnalysisMs = timestamp() - localStarted
+
+  const reasonCounts: Record<string, number> = { 'existing foreground': 0, 'plane offset': 0, 'normal disagreement': 0, roughness: 0, 'depth discontinuity': 0, 'connected foreground': 0, 'geometry uncertain': 0 }
+  const coreQueue: number[] = []
+  let geometryWallLikeSampleCount = 0, foregroundCoreSampleCount = 0, geometryUncertainSampleCount = 0
+  for (let index = 0; index < surfels.length; index++) if (domain[index]) {
+    const offset = Math.abs(signedResidualMeters[index]), normal = localNormalDeviation[index], roughness = localRoughness[index], depthStep = localDepthStep[index]
+    const existingForeground = (table.foregroundMask?.[index] ?? 0) > 0
+    const strongOffset = offset > wallEnvelopeMeters + FOREGROUND_STRONG_OFFSET_MARGIN_METERS
+    const offsetWithShape = offset > wallEnvelopeMeters + FOREGROUND_OFFSET_MARGIN_METERS && (normal > 20 || roughness > FOREGROUND_ROUGHNESS_METERS * 0.7 || depthStep > FOREGROUND_DEPTH_STEP_METERS * 0.7)
+    const foldedSurface = normal > FOREGROUND_NORMAL_DEVIATION_DEGREES && (roughness > FOREGROUND_ROUGHNESS_METERS * 0.65 || depthStep > FOREGROUND_DEPTH_STEP_METERS * 0.65)
+    if (existingForeground || strongOffset || offsetWithShape || foldedSurface) {
+      classifications[index] = GeometryForegroundCode.FOREGROUND_CORE
+      reasons[index] = existingForeground ? GeometryForegroundReason.EXISTING_FOREGROUND : strongOffset || offsetWithShape ? GeometryForegroundReason.PLANE_OFFSET : normal > FOREGROUND_NORMAL_DEVIATION_DEGREES ? GeometryForegroundReason.NORMAL_DISAGREEMENT : roughness > FOREGROUND_ROUGHNESS_METERS ? GeometryForegroundReason.SURFACE_ROUGHNESS : GeometryForegroundReason.DEPTH_DISCONTINUITY
+      reasonCounts[reasons[index] === GeometryForegroundReason.EXISTING_FOREGROUND ? 'existing foreground' : reasons[index] === GeometryForegroundReason.PLANE_OFFSET ? 'plane offset' : reasons[index] === GeometryForegroundReason.NORMAL_DISAGREEMENT ? 'normal disagreement' : reasons[index] === GeometryForegroundReason.SURFACE_ROUGHNESS ? 'roughness' : 'depth discontinuity']++
+      foregroundCoreSampleCount++; coreQueue.push(index)
+    } else if (offset <= wallEnvelopeMeters && normal <= 22 && roughness <= FOREGROUND_ROUGHNESS_METERS && depthStep <= FOREGROUND_DEPTH_STEP_METERS) {
+      classifications[index] = GeometryForegroundCode.WALL_GEOMETRY
+      geometryWallLikeSampleCount++
+    } else {
+      classifications[index] = GeometryForegroundCode.GEOMETRY_UNCERTAIN
+      reasons[index] = GeometryForegroundReason.GEOMETRY_UNCERTAIN
+      geometryUncertainSampleCount++; reasonCounts['geometry uncertain']++
+    }
+  }
+
+  const growthStarted = timestamp()
+  const components: GeometryForegroundComponent[] = []
+  let foregroundConnectedSampleCount = 0, nextComponentId = 0
+  for (let seed = 0; seed < surfels.length; seed++) {
+    if (classifications[seed] !== GeometryForegroundCode.FOREGROUND_CORE || componentIds[seed] >= 0) continue
+    const componentId = nextComponentId++, queue = [seed], members: number[] = []
+    componentIds[seed] = componentId
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const current = queue[cursor]
+      members.push(current)
+      for (const neighbor of neighborLists[current]) {
+        if (!domain[neighbor] || componentIds[neighbor] >= 0 || rgbClassifications[neighbor] === VisibleWallMask3dCode.NON_WALL) continue
+        const stableStructuralWall = table.logicalSurfaceIndices[neighbor] === logicalIndex &&
+          ((table.memberships?.[neighbor] ?? RealityMembershipCode.NON_WALL) === RealityMembershipCode.CORE_WALL_MEMBER || (table.memberships?.[neighbor] ?? RealityMembershipCode.NON_WALL) === RealityMembershipCode.EXPANDED_WALL_MEMBER) &&
+          Math.abs(signedResidualMeters[neighbor]) <= wallEnvelopeMeters && localNormalDeviation[neighbor] <= 18 && localRoughness[neighbor] <= 0.01
+        if (stableStructuralWall) continue
+        const predecessorNormal = surfels[current].normal, neighborNormal = surfels[neighbor].normal
+        const normalCompatibility = !predecessorNormal || !neighborNormal ? 1 : Math.abs((predecessorNormal.x * neighborNormal.x + predecessorNormal.y * neighborNormal.y + predecessorNormal.z * neighborNormal.z) / Math.max(EPSILON, Math.hypot(predecessorNormal.x, predecessorNormal.y, predecessorNormal.z) * Math.hypot(neighborNormal.x, neighborNormal.y, neighborNormal.z)))
+        const offsetStep = Math.abs(signedResidualMeters[current] - signedResidualMeters[neighbor])
+        const foregroundNeighbors = neighborLists[neighbor].filter((candidate) => componentIds[candidate] === componentId).length
+        const nearForegroundShape = localNormalDeviation[neighbor] >= 16 || localRoughness[neighbor] >= 0.007 || Math.abs(signedResidualMeters[neighbor]) > wallEnvelopeMeters * 0.8
+        if (normalCompatibility < 0.52 || offsetStep > 0.035 || (foregroundNeighbors < FOREGROUND_MIN_COMPONENT_SUPPORT && !(members.length === 1 && nearForegroundShape))) continue
+        if (classifications[neighbor] !== GeometryForegroundCode.FOREGROUND_CORE) {
+          const wasWallGeometry = classifications[neighbor] === GeometryForegroundCode.WALL_GEOMETRY
+          const wasGeometryUncertain = classifications[neighbor] === GeometryForegroundCode.GEOMETRY_UNCERTAIN
+          classifications[neighbor] = GeometryForegroundCode.FOREGROUND_CONNECTED
+          reasons[neighbor] = GeometryForegroundReason.CONNECTED_FOREGROUND
+          foregroundConnectedSampleCount++; if (wasWallGeometry) geometryWallLikeSampleCount--; if (wasGeometryUncertain) geometryUncertainSampleCount--
+          reasonCounts['connected foreground']++
+        }
+        componentIds[neighbor] = componentId
+        queue.push(neighbor)
+      }
+    }
+    const offsets = members.map((index) => Math.abs(signedResidualMeters[index]))
+    const normals = members.map((index) => localNormalDeviation[index])
+    const roughness = members.map((index) => localRoughness[index])
+    let boundarySampleCount = 0
+    for (const member of members) if (neighborLists[member].some((neighbor) => classifications[neighbor] === GeometryForegroundCode.WALL_GEOMETRY)) boundarySampleCount++
+    components.push({ id: componentId, sampleCount: members.length, estimatedAreaMetersSquared: members.length * 0.000625, offsetMedianMeters: median(offsets), offsetP90Meters: quantile(offsets, 0.9), normalDeviationMedianDegrees: median(normals), roughnessMedianMeters: median(roughness), boundarySampleCount, confidence: clampUnit(Math.min(1, members.length / 12) * 0.45 + Math.min(1, (quantile(offsets, 0.9) ?? 0) / Math.max(EPSILON, wallEnvelopeMeters + FOREGROUND_OFFSET_MARGIN_METERS)) * 0.35 + Math.min(1, (median(normals) ?? 0) / 40) * 0.2) })
+  }
+  const componentGrowthMs = timestamp() - growthStarted
+  let rgbWallRejectedByGeometryCount = 0
+  for (let index = 0; index < surfels.length; index++) if (rgbClassifications[index] === VisibleWallMask3dCode.WALL && (classifications[index] === GeometryForegroundCode.FOREGROUND_CORE || classifications[index] === GeometryForegroundCode.FOREGROUND_CONNECTED || classifications[index] === GeometryForegroundCode.GEOMETRY_UNCERTAIN)) rgbWallRejectedByGeometryCount++
+  const memoryBytes = classifications.byteLength + reasons.byteLength + signedResidualMeters.byteLength + normalDeviationDegrees.byteLength + roughnessMillimeters.byteLength + depthStepMillimeters.byteLength + componentIds.byteLength
+  return { classifications, reasons, signedResidualMeters, normalDeviationDegrees, roughnessMillimeters, depthStepMillimeters, componentIds, wallResidualMeters: { median: residualMedian, p75: residualP75, p90: residualP90, p95: residualP95 }, wallEnvelopeMeters, geometryWallLikeSampleCount, foregroundCoreSampleCount, foregroundConnectedSampleCount, geometryUncertainSampleCount, rgbWallRejectedByGeometryCount, foregroundReasonCounts: reasonCounts, components, calibrationMs, localAnalysisMs, componentGrowthMs, memoryBytes }
+}
+
 function createWallLocalPreservedObjectFusion(
   surfels: readonly FinalizedRealitySurfel[],
   table: RealityStructuralAssociationTable,
@@ -953,7 +1204,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
     // first deterministic logical surface rather than oscillating by loop order.
     const sampleVoteStrength = new Uint8Array(surfels.length)
     const surfaces: VisibleWallMaskSurfaceResult[] = []
-    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, fragmentExtractionMs = 0, componentMergeMs = 0, enclosureAnalysisMs = 0, clusterFormationMs = 0, outerBoundaryAnalysisMs = 0, gapCompletionMs = 0, interiorFillMs = 0, wallLocalFusionMs = 0, objectProjectionMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
+    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, fragmentExtractionMs = 0, componentMergeMs = 0, enclosureAnalysisMs = 0, clusterFormationMs = 0, outerBoundaryAnalysisMs = 0, gapCompletionMs = 0, interiorFillMs = 0, wallLocalFusionMs = 0, objectProjectionMs = 0, geometryForegroundMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
     const projection = { u: 0, v: 0 }, pixel = { x: 0, y: 0 }
     for (let logicalIndex = 0; logicalIndex < table.logicalSurfaces.length; logicalIndex++) {
       const vertices = surfaceVertices(table, logicalIndex)
@@ -1150,10 +1401,27 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         wallConfirmed--; nonWall++
       }
       objectProjectionMs += timestamp() - objectProjectionStarted
+      const geometryForegroundStarted = timestamp()
+      const geometryForeground = analyzeGeometryForeground(surfels, table, logicalIndex, threeDSampleClassifications)
+      for (let index = 0; index < surfels.length; index++) {
+        if (threeDSampleClassifications[index] !== VisibleWallMask3dCode.WALL) continue
+        const geometry = geometryForeground.classifications[index]
+        if (geometry === GeometryForegroundCode.WALL_GEOMETRY) continue
+        // Geometry is a safety gate after the validated M8.6.3 RGB fusion:
+        // RGB may establish visible wall likelihood, but cannot paint an
+        // offset/folded foreground surface or a geometry-uncertain boundary.
+        threeDSampleClassifications[index] = VisibleWallMask3dCode.NON_WALL
+        threeDSampleTerminalReasons[index] = geometry === GeometryForegroundCode.GEOMETRY_UNCERTAIN
+          ? VisibleWallMask3dTerminalReason.GEOMETRY_UNCERTAIN
+          : VisibleWallMask3dTerminalReason.GEOMETRY_FOREGROUND
+        if (sampleLogicalSurfaceIndices[index] === logicalIndex) sampleLogicalSurfaceIndices[index] = -1
+        wallConfirmed--; nonWall++
+      }
+      geometryForegroundMs += timestamp() - geometryForegroundStarted
       const threeDCompletedEnvelopeSampleMask = new Uint8Array(surfels.length)
       let completedEnvelopeSampleCount = 0
       for (let index = 0; index < surfels.length; index++) if (threeDSampleClassifications[index] === VisibleWallMask3dCode.NON_WALL && threeDSampleCompletedEnvelopeKeyframeBits[index]) { threeDCompletedEnvelopeSampleMask[index] = 1; completedEnvelopeSampleCount++ }
-      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength + threeDSampleObjectKeyframeBits.byteLength + threeDSampleCompletedEnvelopeKeyframeBits.byteLength + threeDCompletedEnvelopeSampleMask.byteLength + (wallLocalPreservedObjectFusion ? wallLocalPreservedObjectFusion.objectVotes.byteLength + wallLocalPreservedObjectFusion.wallVotes.byteLength + wallLocalPreservedObjectFusion.protectedCells.byteLength + wallLocalPreservedObjectFusion.keyframeSupport.byteLength + wallLocalPreservedObjectFusion.protectedSampleMask.byteLength : 0)
+      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength + threeDSampleObjectKeyframeBits.byteLength + threeDSampleCompletedEnvelopeKeyframeBits.byteLength + threeDCompletedEnvelopeSampleMask.byteLength + geometryForeground.memoryBytes + (wallLocalPreservedObjectFusion ? wallLocalPreservedObjectFusion.objectVotes.byteLength + wallLocalPreservedObjectFusion.wallVotes.byteLength + wallLocalPreservedObjectFusion.protectedCells.byteLength + wallLocalPreservedObjectFusion.keyframeSupport.byteLength + wallLocalPreservedObjectFusion.protectedSampleMask.byteLength : 0)
       surfaces.push({
         logicalSurfaceId: table.logicalSurfaces[logicalIndex].id,
         selectedKeyframeIds: masks.map((mask) => mask.keyframeId),
@@ -1189,8 +1457,9 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         threeDCompletedEnvelopeSampleMask,
         completedEnvelopeSampleCount,
         wallLocalPreservedObjectFusion,
+        geometryForeground,
       })
     }
-    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs, clusterFormationMs, outerBoundaryAnalysisMs, gapCompletionMs, interiorFillMs, wallLocalFusionMs, objectProjectionMs, memoryBytes }
+    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs, clusterFormationMs, outerBoundaryAnalysisMs, gapCompletionMs, interiorFillMs, wallLocalFusionMs, objectProjectionMs, geometryForegroundMs, memoryBytes }
   }
 }

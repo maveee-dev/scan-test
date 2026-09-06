@@ -19,6 +19,13 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
         surface.threeDSampleWallConfidence.buffer,
         surface.threeDSampleTerminalReasons.buffer,
         surface.threeDCompletedEnvelopeSampleMask.buffer,
+        surface.geometryForeground.classifications.buffer,
+        surface.geometryForeground.reasons.buffer,
+        surface.geometryForeground.signedResidualMeters.buffer,
+        surface.geometryForeground.normalDeviationDegrees.buffer,
+        surface.geometryForeground.roughnessMillimeters.buffer,
+        surface.geometryForeground.depthStepMillimeters.buffer,
+        surface.geometryForeground.componentIds.buffer,
       )
       if (surface.wallLocalPreservedObjectFusion) transfer.push(
         surface.wallLocalPreservedObjectFusion.objectVotes.buffer,

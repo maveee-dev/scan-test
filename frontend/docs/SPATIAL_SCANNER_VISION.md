@@ -1986,3 +1986,49 @@ surround, depth offset/variance, cross-view support, foreground penalty, final
 score, and decision. Ranking and completed-envelope application remain local,
 bounded post-scan work; capture, original RGB, Dense Reality geometry, M7, and
 the Design renderer remain unchanged.
+
+### M8.6.7 — Geometry-First Foreground Exclusion
+
+RGB wall likelihood cannot establish that a visible Dense Reality sample is
+physically the wall. A hanging towel or folded curtain can share the wall's
+colour and be broadly accepted by the M8.6 RGB mask, while its measured
+geometry is clearly offset, folded, and non-planar. M8.6.7 adds a separate
+post-scan Dense Reality foreground gate after the locked M8.6.3 RGB fusion:
+
+```text
+M7 logical wall
+       ↓
+RGB visible-wall evidence
+       +-- visual preserved-object envelopes (near-coplanar artwork)
+       +-- Dense Reality foreground geometry (towel / curtain / furniture)
+       ↓
+final triangle paintability
+```
+
+For each selected logical wall, trusted M7-associated Reality samples establish
+a calibrated residual distribution and a tightly bounded wall-like envelope.
+Every visually observed Dense Reality sample then records signed calibrated
+plane residual, wall-normal deviation, neighborhood residual roughness, and
+local depth-step evidence. Clear offset or folded samples form
+`FOREGROUND_CORE`; bounded shared-neighbor growth can retain their flatter,
+near-wall folds as `FOREGROUND_CONNECTED`. Stable planar samples are
+`WALL_GEOMETRY`; unresolved geometric evidence is conservative and preserves
+the original RGB rather than being painted.
+
+Foreground geometry has higher precedence than RGB wall votes. Completed
+visual-object envelopes retain their existing precedence for near-coplanar
+paintings, mirrors, and posters. Thus neither geometry nor RGB alone is the
+paint authority: RGB determines visible wall likelihood, object envelopes
+protect shallow mounted content, and measured geometry rejects foreground
+surfaces. A triangle touching protected foreground/object evidence remains
+original to avoid paint bleed at the boundary. M7 continues only as semantic
+identity and the calibrated geometric reference; no M7 polygon is rendered.
+
+Development views expose wall-plane residual, foreground core, connected
+foreground components, normal deviation, roughness, depth discontinuity,
+geometry wall/foreground classification, and final paintability. Diagnostics
+report residual distribution and envelope, geometry states, rejection reasons,
+RGB wall samples vetoed by geometry, and bounded component statistics. The
+analysis runs only in the existing post-scan mask worker and is reused for all
+paint swatches; capture cadence, Raw RGB, Dense Reality geometry, M7, Original
+mode, and rendering geometry remain unchanged.

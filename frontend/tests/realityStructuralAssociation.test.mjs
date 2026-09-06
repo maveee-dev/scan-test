@@ -1165,3 +1165,43 @@ test('70. Lower foreground shelf candidate loses wall-mounted envelope ranking',
   assert.equal(lower.decision, 'preserved-non-dominant')
   assert.ok(lower.foregroundPenalty > upper.foregroundPenalty)
 })
+
+// 71. RGB similarity cannot repaint a folded foreground cloth. Farther folds
+// seed a foreground component and its close-to-wall connected folds follow.
+test('71. Folded towel foreground geometry overrides an RGB wall vote', () => {
+  const wall = patch('wall-towel-foreground', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 0.8 })
+  const samples = [
+    surfel(841, -0.65, 0.12, -1), surfel(842, -0.25, 0.32, -1), surfel(843, 0.55, 0.58, -1),
+    surfel(844, -0.08, 0.28, -0.93, { x: 0.38, y: 0.18, z: 0.91 }),
+    surfel(845, -0.04, 0.28, -0.955, { x: 0.24, y: 0.30, z: 0.92 }),
+    surfel(846, 0, 0.28, -0.985, { x: 0.12, y: 0.18, z: 0.98 }),
+    surfel(847, -0.08, 0.33, -0.925, { x: 0.46, y: 0.12, z: 0.88 }),
+    surfel(848, -0.04, 0.33, -0.95, { x: 0.28, y: 0.20, z: 0.94 }),
+    surfel(849, 0, 0.33, -0.98, { x: 0.14, y: 0.12, z: 0.98 }),
+  ]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1, 24, 24, false)]))
+  assert.ok(result)
+  const surface = result.surfaces[0], geometry = surface.geometryForeground
+  assert.equal(geometry.classifications[3], visibleWallMask.GeometryForegroundCode.FOREGROUND_CORE)
+  assert.equal(geometry.classifications[5], visibleWallMask.GeometryForegroundCode.FOREGROUND_CONNECTED)
+  assert.equal(surface.threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.NON_WALL)
+  assert.equal(surface.threeDSampleClassifications[5], visibleWallMask.VisibleWallMask3dCode.NON_WALL)
+  assert.ok(geometry.foregroundConnectedSampleCount > 0)
+  assert.ok(geometry.rgbWallRejectedByGeometryCount >= 3)
+})
+
+// 72. Small isolated depth jitter on a flat wall must not become a foreground
+// component or sacrifice ordinary wall coverage.
+test('72. Isolated wall depth noise remains wall geometry', () => {
+  const wall = patch('wall-noise-foreground', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 0.8 })
+  const samples = [
+    surfel(851, -0.65, 0.12, -1), surfel(852, -0.25, 0.32, -1), surfel(853, 0.55, 0.58, -1),
+    surfel(854, 0.05, 0.42, -0.98, { x: 0.08, y: 0.03, z: 0.996 }),
+  ]
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([testKeyframe(1, 24, 24, false)]))
+  assert.ok(result)
+  const surface = result.surfaces[0]
+  assert.equal(surface.geometryForeground.classifications[3], visibleWallMask.GeometryForegroundCode.WALL_GEOMETRY)
+  assert.equal(surface.threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.WALL)
+  assert.equal(surface.geometryForeground.foregroundCoreSampleCount, 0)
+})
