@@ -1112,8 +1112,30 @@ test('68. Two separated paintings remain two preserved regions', () => {
   const wall = patch('wall-two-pictures', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
   const samples = [surfel(811, -0.55, 0.2, -1), surfel(812, -0.35, 0.4, -1), surfel(813, 0.5, 0.55, -1)]
   const frame = testKeyframe(1, 24, 24, false)
-  for (const startX of [2, 15]) for (let y = 10; y <= 14; y++) for (let x = startX; x < startX + 5; x++) if ((x + y) % 2 === 0) frame.rgb.set([10, 10, 10], (y * frame.width + x) * 3)
+  for (const startX of [2, 18]) for (let y = 10; y <= 14; y++) for (let x = startX; x < startX + 5; x++) if ((x + y) % 2 === 0) frame.rgb.set([10, 10, 10], (y * frame.width + x) * 3)
   const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
   assert.ok(result)
   assert.equal(result.surfaces[0].masks[0].preservedVisualRegions.length, 2)
+  assert.equal(result.surfaces[0].masks[0].preservedVisualObjectClusters.filter((cluster) => cluster.accepted).length, 0)
+})
+
+// 69. A framed object may contain dramatically different internal regions. The
+// outer aligned evidence, rather than that internal texture, owns its interior.
+test('69. Aligned black and gold painting regions complete one protected outer envelope', () => {
+  const wall = patch('wall-outer-envelope', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(821, -0.7, 0, -1), surfel(822, -0.1, 0, -1), surfel(823, 0.6, 0, -1), surfel(824, 0, 0, -1)]
+  const frame = testKeyframe(1, 80, 16, false)
+  for (let y = 6; y <= 9; y++) for (let x = 18; x <= 22; x++) frame.rgb.set([8, 8, 8], (y * frame.width + x) * 3)
+  for (let y = 6; y <= 9; y++) for (let x = 43; x <= 47; x++) frame.rgb.set([212, 138, 28], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  const mask = result.surfaces[0].masks[0]
+  const cluster = mask.preservedVisualObjectClusters.find((candidate) => candidate.accepted)
+  assert.ok(cluster)
+  assert.equal(cluster.memberRegionIds.length, 2)
+  assert.ok(cluster.filledInteriorPixelCount > cluster.memberAreaPixels)
+  const interior = 7 * frame.width + 32
+  assert.equal(mask.mask[interior], visibleWallMask.VisibleWallMaskCode.NON_WALL)
+  assert.equal(mask.mask[7 * frame.width + 12], visibleWallMask.VisibleWallMaskCode.WALL)
+  assert.equal(result.surfaces[0].threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.NON_WALL, 'completed object interior must project back to Dense Reality protection')
 })

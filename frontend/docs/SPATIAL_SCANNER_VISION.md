@@ -1877,3 +1877,65 @@ majority to tint their object vertex. Debug views expose raw fragments, merged
 regions, protected interiors, the wall-local fusion grid, boundary protection,
 and 3D protected assignment. All work remains bounded, local, post-scan, and
 reused for paint-swatch changes.
+
+### M8.6.5 — Preserved Object Outer-Boundary Completion
+
+M8.6.4 can establish several valid preserved regions on one framed painting,
+but its individual interiors intentionally stop at texture-dependent gaps. A
+black/gold artwork, reflection, or glare is internal appearance, not evidence
+of multiple physical objects. M8.6.5 therefore adds a conservative layer above
+`PreservedVisualRegion`:
+
+```text
+raw object evidence
+       ↓
+PreservedVisualRegion
+       ↓
+aligned object-region cluster
+       ↓
+outer-boundary / surrounding-wall validation
+       ↓
+completed protected object envelope
+       ↓
+full interior protection
+       ↓
+wall-local multi-view fusion
+       ↓
+3D protected Dense Reality samples
+       ↓
+Design
+```
+
+Only two or more already accepted regions can form a `PreservedVisualObjectCluster`.
+They must be horizontally aligned, separated by a bounded gap, remain inside
+the projected ROI, have bounded combined area, and have credible surrounding
+wall support. The completed image-space envelope records top/right/bottom/left
+outside-edge support, closure score, largest bridged gap, inferred weak sides,
+and its member region IDs. Its outer contour follows the extreme member-region
+edges as a bounded quadrilateral, so modest camera perspective does not force a
+strict axis-aligned fill. At least three supported outer sides and sufficient
+wall surround are required. This prevents arbitrary dark wall texture from
+becoming a large protected rectangle and keeps distinct, sufficiently separated
+paintings separate.
+
+Once accepted, the outer envelope owns its entire interior: internal black,
+gold, bright glare, and small missing fragment holes remain preserved rather
+than being reconsidered as paintable wall. A small resolution-aware boundary
+band remains around the envelope to prevent triangle paint bleed. The completed
+pixels participate in the existing M8.6.3 visibility-aware observation path
+and M8.6.4 bounded 3 cm wall-local fusion; no new camera/depth input or M7
+visible polygon is created. Explicit or completed object evidence continues to
+override ordinary wall evidence, and any Dense Reality triangle touching a
+protected sample remains fully original.
+
+Development views expose **Object Clusters**, **Outer Boundary Candidates**,
+**Completed Object Envelope**, **Filled Object Interior**, and the
+**Wall-Local Object Envelope** in addition to the prior region and 3D views.
+Per-cluster diagnostics report members, extent, boundary-side scores, closure,
+surround, inferred sides, filled pixels, confidence, and rejection reasons.
+Cluster formation, boundary analysis, gap completion, and interior-fill timings
+run only in the cancellable post-scan worker. Source RGB, Dense Reality
+geometry, M7 structural geometry, Original mode, and swatch-change reuse remain
+immutable. This is deterministic geometric/RGB evidence, not semantic AI;
+unframed or extremely weakly bounded near-coplanar content remains an honest
+limitation for a future replaceable mask provider.
