@@ -66,6 +66,7 @@ function getErrorMessage(error: unknown, fallbackMessage: string): string {
 }
 
 export interface ScannerSessionController {
+  liveMap: XRSessionService['liveMap']
   sessionState: ScannerSessionState
   startScan: () => void
   cancelScan: () => void
@@ -376,6 +377,7 @@ export function useScannerSession(
   }, [])
 
   return {
+    liveMap: service.liveMap,
     sessionState,
     startScan,
     cancelScan,

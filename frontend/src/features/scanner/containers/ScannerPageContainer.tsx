@@ -27,6 +27,7 @@ function ScannerPageContainer() {
       onStartNewScan={sessionController.startNewScan}
       onDiscardScan={sessionController.discardScan}
       sessionState={sessionController.sessionState}
+      liveMap={sessionController.liveMap}
     />
   )
 }

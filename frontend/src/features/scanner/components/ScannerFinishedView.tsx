@@ -24,6 +24,7 @@ import type {
   StructuralSurfaceRole,
 } from '../../room-analysis/types'
 import FinalizedSpatialScanPreview from './FinalizedSpatialScanPreview'
+import RealityQualityPreview from './RealityQualityPreview'
 
 interface ScannerFinishedViewProps {
   scan: FinalizedSpatialScan
@@ -818,6 +819,7 @@ function ScannerFinishedView({
   scan,
 }: ScannerFinishedViewProps) {
   const [analysisService] = useState(() => new PlaneExtractionService())
+  const [legacyPreviewOpen, setLegacyPreviewOpen] = useState(false)
   const [boundaryService] = useState(() => new RoomBoundaryReconstructionService())
   const [interpretationService] = useState(() => new StructuralSurfaceInterpretationService())
   const [intersectionService] = useState(() => new StructuralIntersectionService())
@@ -959,8 +961,12 @@ function ScannerFinishedView({
         </button>
       </div>
       {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
+      <button type="button" className="scan-button scan-button-secondary" onClick={() => setLegacyPreviewOpen(!legacyPreviewOpen)}>
+        {legacyPreviewOpen ? 'Return to M8.7 Quality Preview' : 'Open frozen structural / customization preview'}
+      </button>
+      {!legacyPreviewOpen && denseRealityReconstruction && denseRealityReconstruction.surfels.length > 0 && <RealityQualityPreview source={denseRealityReconstruction} />}
 
-      {scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
+      {(legacyPreviewOpen || !denseRealityReconstruction?.surfels.length) && (scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
     <FinalizedSpatialScanPreview
           analysisResult={analysisResult}
           denseRealityReconstruction={denseRealityReconstruction}
@@ -979,7 +985,7 @@ function ScannerFinishedView({
             Start another scan and move slowly across physical surfaces before finishing.
           </span>
         </div>
-      )}
+      ))}
 
       {analysisResult ? (
         <>

@@ -36,6 +36,8 @@ function createDiagnostics(): RealityRgbKeyframeDiagnostics {
 
 /** Owns a small, local-only set of camera RGB/pose snapshots for post-scan visual masks. */
 export class RealityRgbKeyframeService {
+  private readonly appearance: boolean
+  public constructor(appearance = false) { this.appearance = appearance; this.diagnostics = { ...createDiagnostics(), capacity: appearance ? 8 : MAX_KEYFRAMES } }
   private keyframes: RealityRgbKeyframe[] = []
   private diagnostics = createDiagnostics()
   private lastPosition: ViewerPosition | null = null
@@ -50,16 +52,36 @@ export class RealityRgbKeyframeService {
     direction: ViewerDirection | null,
     validDepthCount: number,
     rawCamera: XRRawCameraService,
+    motion?: { translationMetersPerSecond: number; rotationDegreesPerSecond: number },
   ): void {
-    if (!position || !direction || validDepthCount <= 0 || this.keyframes.length >= MAX_KEYFRAMES) return
+    const capacity = this.appearance ? 8 : MAX_KEYFRAMES
+    // Pose velocity is only a blur proxy; no image processing in XR frames.
+    if (this.appearance && motion && (motion.translationMetersPerSecond > 1.2 || motion.rotationDegreesPerSecond > 55)) return
+    if (!position || !direction || validDepthCount <= 0 || (!this.appearance && this.keyframes.length >= capacity)) return
     const translation = this.lastPosition ? Math.hypot(position.x - this.lastPosition.x, position.y - this.lastPosition.y, position.z - this.lastPosition.z) : Infinity
     const rotation = this.lastDirection ? Math.acos(directionDot(direction, this.lastDirection)) * 180 / Math.PI : Infinity
-    if (timestamp - this.lastTimestamp < MIN_CAPTURE_INTERVAL_MS || (translation < MIN_TRANSLATION_METERS && rotation < MIN_ROTATION_DEGREES)) {
+    const duplicate = this.appearance && this.keyframes.some((keyframe) => {
+      const m = keyframe.cameraTransform
+      return Math.hypot(position.x - m[12], position.y - m[13], position.z - m[14]) < 0.18 && directionDot(direction, { x: -m[8], y: -m[9], z: -m[10] }) > 0.97
+    })
+    if (duplicate || timestamp - this.lastTimestamp < (this.appearance ? 1500 : MIN_CAPTURE_INTERVAL_MS) || (translation < MIN_TRANSLATION_METERS && rotation < MIN_ROTATION_DEGREES)) {
       this.diagnostics = { ...this.diagnostics, rejectedDuplicateCount: this.diagnostics.rejectedDuplicateCount + 1 }
       return
     }
+    let replaceIndex = -1
+    if (this.keyframes.length >= capacity) {
+      const novelty = (a: RealityRgbKeyframe, b: RealityRgbKeyframe) => Math.hypot(a.cameraTransform[12] - b.cameraTransform[12], a.cameraTransform[13] - b.cameraTransform[13], a.cameraTransform[14] - b.cameraTransform[14]) + (1 - directionDot({ x: -a.cameraTransform[8], y: -a.cameraTransform[9], z: -a.cameraTransform[10] }, { x: -b.cameraTransform[8], y: -b.cameraTransform[9], z: -b.cameraTransform[10] }))
+      let redundancy = Infinity
+      this.keyframes.forEach((a, i) => this.keyframes.forEach((b, j) => {
+        if (i >= j) return
+        const score = novelty(a, b)
+        if (score < redundancy) { redundancy = score; replaceIndex = a.qualityScore < b.qualityScore ? i : j }
+      }))
+      const newNovelty = Math.min(...this.keyframes.map((a) => Math.hypot(position.x - a.cameraTransform[12], position.y - a.cameraTransform[13], position.z - a.cameraTransform[14]) + (1 - directionDot(direction, { x: -a.cameraTransform[8], y: -a.cameraTransform[9], z: -a.cameraTransform[10] }))))
+      if (newNovelty <= redundancy || validDepthCount / 3600 < .4) return
+    }
     const started = now()
-    const copy = rawCamera.copyKeyframe(frame, view, timestamp)
+    const copy = rawCamera.copyKeyframe(frame, view, timestamp, this.appearance ? 640 : 320)
     if (!copy) return
     const qualityScore = Math.min(1, validDepthCount / 3600) * 0.55 + Math.min(1, translation / 0.45) * 0.25 + Math.min(1, rotation / 35) * 0.20
     const keyframe: RealityRgbKeyframe = {
@@ -77,13 +99,14 @@ export class RealityRgbKeyframeService {
       rotationDeltaDegrees: Number.isFinite(rotation) ? rotation : 0,
       validDepthFraction: Math.min(1, validDepthCount / 3600),
     }
-    this.keyframes.push(keyframe)
+    if (replaceIndex >= 0) this.keyframes[replaceIndex] = keyframe
+    else this.keyframes.push(keyframe)
     this.lastPosition = { ...position }
     this.lastDirection = { ...direction }
     this.lastTimestamp = timestamp
     const bytes = keyframe.rgb.byteLength + keyframe.cameraTransform.byteLength + keyframe.inverseCameraTransform.byteLength + keyframe.projectionMatrix.byteLength
     this.diagnostics = {
-      status: 'active', retainedCount: this.keyframes.length, capacity: MAX_KEYFRAMES,
+      status: 'active', retainedCount: this.keyframes.length, capacity,
       width: keyframe.width, height: keyframe.height, bytesPerKeyframe: bytes,
       totalBytes: this.keyframes.reduce((sum, item) => sum + item.rgb.byteLength + item.cameraTransform.byteLength + item.inverseCameraTransform.byteLength + item.projectionMatrix.byteLength, 0),
       captureCount: this.diagnostics.captureCount + 1,
@@ -104,7 +127,7 @@ export class RealityRgbKeyframeService {
 
   public reset(): void {
     this.keyframes = []
-    this.diagnostics = createDiagnostics()
+    this.diagnostics = { ...createDiagnostics(), capacity: this.appearance ? 8 : MAX_KEYFRAMES }
     this.lastPosition = null
     this.lastDirection = null
     this.lastTimestamp = Number.NEGATIVE_INFINITY

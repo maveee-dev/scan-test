@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
+import LiveRealityMapView from './LiveRealityMapView'
 import type {
   CoverageRenderStatus,
   CoverageGuidance,
@@ -17,6 +18,7 @@ import type {
 } from '../types'
 
 interface ScannerDomOverlayProps {
+  liveMap: import('../services/liveRealityMap').LiveRealityMap
   onCancelScan: () => void
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onDebugGeometryToggle: (visible: boolean) => void
@@ -236,6 +238,7 @@ function ScannerDomOverlay({
   onFinishScan,
   pointPreviewCanvasRef,
   sessionState,
+  liveMap,
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
@@ -340,6 +343,9 @@ function ScannerDomOverlay({
   return (
     <>
       <section className="xr-scanner-hud" aria-label="Spatial Scanner controls">
+        {!isStarting && !isFinishing && !isCancelling && <LiveRealityMapView bridge={liveMap} />}
+        {sessionState.debug.quality && <small>Depth tier {sessionState.debug.quality.tier} · phase {sessionState.debug.quality.phase + 1}/4 · {sessionState.debug.quality.distanceWalkedMeters.toFixed(1)} m walked · {sessionState.debug.denseReality.createdThisTick ?? 0} new / {sessionState.debug.denseReality.fusedThisTick ?? 0} fused</small>}
+        {sessionState.debug.denseReality.capacityUtilizationPercentage > 95 && <p role="status">Measured map nearly full. Stable surfaces are retained; new-area coverage may be limited. Finish before starting a separate scan of the extension.</p>}
         <div className="xr-scanner-hud-header">
           <div className="xr-scanner-hud-session">
             <span className="xr-dom-overlay-dot" aria-hidden="true" />

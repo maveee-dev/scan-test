@@ -10,6 +10,7 @@ import type {
   XRDepthException,
   XRDepthSessionDiagnostics,
 } from '../types'
+import { DEPTH_PHASES } from './realityQualityPolicy'
 
 const DEPTH_PROBE_FRAME_LIMIT = 30
 export const DEPTH_GRID_COLUMNS = 16
@@ -372,6 +373,7 @@ export class XRDepthService {
     view: XRView,
     columns: number,
     rows: number,
+    phase = 0,
   ): DenseDepthFrameObservation | null {
     if (
       this.diagnostics.session.usage !== 'cpu-optimized' ||
@@ -400,19 +402,17 @@ export class XRDepthService {
       this.denseNormalizedX = new Float32Array(attemptedSampleCount)
       this.denseNormalizedY = new Float32Array(attemptedSampleCount)
       this.denseDistancesMeters = new Float32Array(attemptedSampleCount)
-      for (let row = 0; row < rows; row += 1) {
-        const y = (row + 0.5) / rows
-        for (let column = 0; column < columns; column += 1) {
-          const index = row * columns + column
-          this.denseNormalizedX[index] = (column + 0.5) / columns
-          this.denseNormalizedY[index] = y
-        }
-      }
     }
     const valid = this.denseValid
     const normalizedX = this.denseNormalizedX
     const normalizedY = this.denseNormalizedY
     const distancesMeters = this.denseDistancesMeters
+    const subgrid = DEPTH_PHASES[((phase % DEPTH_PHASES.length) + DEPTH_PHASES.length) % DEPTH_PHASES.length]
+    for (let row = 0; row < rows; row++) for (let column = 0; column < columns; column++) {
+      const index = row * columns + column
+      normalizedX[index] = (column + subgrid[0]) / columns
+      normalizedY[index] = (row + subgrid[1]) / rows
+    }
     valid.fill(0)
     let validSampleCount = 0
     let rejectedSampleCount = 0

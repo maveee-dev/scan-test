@@ -589,6 +589,7 @@ export class XRRawCameraService {
     frame: XRFrame,
     view: XRView,
     timestamp: number,
+    longEdge = KEYFRAME_MAX_COPY_DIMENSION,
   ): RawCameraKeyframeCopyFrame | null {
     if (!this.session || !this.gl || !this.binding || !this.program || !this.fullscreenBuffer || frame.session !== this.session) return null
     const camera = view.camera
@@ -598,7 +599,8 @@ export class XRRawCameraService {
     try {
       cameraTexture = this.binding.getCameraImage(camera)
       if (!cameraTexture) return null
-      const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, KEYFRAME_MAX_COPY_DIMENSION, KEYFRAME_MAX_COPY_PIXELS)
+      const boundedEdge = Math.min(640, Math.max(KEYFRAME_MAX_COPY_DIMENSION, longEdge))
+      const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, boundedEdge, KEYFRAME_MAX_COPY_PIXELS * (boundedEdge / KEYFRAME_MAX_COPY_DIMENSION) ** 2)
       this.ensureKeyframeResources(width, height)
       if (!this.keyframeFramebuffer) return null
       previousState = this.captureGlState()

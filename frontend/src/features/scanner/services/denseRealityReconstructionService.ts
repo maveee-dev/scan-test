@@ -346,8 +346,10 @@ export class DenseRealityReconstructionService {
   private readonly colorObservationCounts = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
 
   private readonly geometryObservationCounts = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly viewMasks = new Uint16Array(DENSE_REALITY_CONFIG.maxSamples)
 
   private readonly lastObservedAt = new Float64Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly createdAt = new Float64Array(DENSE_REALITY_CONFIG.maxSamples)
 
   private readonly active = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
 
@@ -372,6 +374,9 @@ export class DenseRealityReconstructionService {
   private stableSampleCount = 0
 
   private capacityReached = false
+  private reclaimCursor = 0
+  private reclaimedSamples = 0
+  private capacityRejected = 0
 
   private totalCreatedSampleCount = 0
 
@@ -394,7 +399,7 @@ export class DenseRealityReconstructionService {
   }
 
   public process(
-    registration: RgbDepthRegistrationResult,
+    registration: RgbDepthRegistrationResult | null,
     denseFrame: DenseSpatialPointFrame,
     persistentSurfaceService: PersistentLiveSurfaceService,
     cameraPosition: ViewerPosition | null,
@@ -402,8 +407,8 @@ export class DenseRealityReconstructionService {
   ): void {
     const startedAt = getTimestamp()
     this.totalInputSampleCount += denseFrame.validPointCount
-    this.totalInputColorSampleCount += registration.coloredSampleCount
-    if (registration.cameraCopySequence >= 0 && registration.cameraCopySequence !== this.lastCameraSequence) {
+    this.totalInputColorSampleCount += registration?.coloredSampleCount ?? 0
+    if (registration && registration.cameraCopySequence >= 0 && registration.cameraCopySequence !== this.lastCameraSequence) {
       this.lastCameraSequence = registration.cameraCopySequence
       this.cameraCapturesUsed += 1
     }
@@ -411,8 +416,8 @@ export class DenseRealityReconstructionService {
     let createdCount = 0
     let fusedCount = 0
     let rejectedCount = 0
-    for (let observationIndex = 0; observationIndex < registration.coloredSampleCount; observationIndex += 1) {
-      const sourceIndex = registration.sourceSampleIndices[observationIndex]
+    for (let observationIndex = 0; observationIndex < (registration?.coloredSampleCount ?? denseFrame.valid.length); observationIndex += 1) {
+      const sourceIndex = registration ? registration.sourceSampleIndices[observationIndex] : observationIndex
       if (
         sourceIndex < 0 ||
         sourceIndex >= denseFrame.valid.length ||
@@ -437,9 +442,9 @@ export class DenseRealityReconstructionService {
       }
 
       const colorOffset = observationIndex * 3
-      const red = srgbToLinear(registration.srgbColors[colorOffset])
-      const green = srgbToLinear(registration.srgbColors[colorOffset + 1])
-      const blue = srgbToLinear(registration.srgbColors[colorOffset + 2])
+      const red = registration ? srgbToLinear(registration.srgbColors[colorOffset]) : 0
+      const green = registration ? srgbToLinear(registration.srgbColors[colorOffset + 1]) : 0
+      const blue = registration ? srgbToLinear(registration.srgbColors[colorOffset + 2]) : 0
       if (!Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)) {
         rejectedCount += 1
         continue
@@ -447,7 +452,8 @@ export class DenseRealityReconstructionService {
 
       const matchIndex = this.findCompatibleSample(this.samplePoint, this.sampleNormal)
       if (matchIndex >= 0) {
-        if (this.fuseSample(matchIndex, this.bestMatchDistance, red, green, blue, cameraPosition, timestamp)) {
+        this.recordView(matchIndex, cameraPosition)
+        if (this.fuseSample(matchIndex, this.bestMatchDistance, red, green, blue, cameraPosition, timestamp, registration !== null)) {
           fusedCount += 1
         } else {
           rejectedCount += 1
@@ -457,11 +463,22 @@ export class DenseRealityReconstructionService {
 
       if (this.activeSampleCount >= DENSE_REALITY_CONFIG.maxSamples) {
         this.capacityReached = true
-        rejectedCount += 1
-        continue
+        // Keep confirmed geometry. Reuse only a stale, never-confirmed slot,
+        // examining a fixed budget so entering a new extension stays bounded.
+        let reclaimed = -1
+        for (let attempt = 0; attempt < 16; attempt++) {
+          const slot = this.reclaimCursor++ % DENSE_REALITY_CONFIG.maxSamples
+          if (this.geometryObservationCounts[slot] < 2 && timestamp - this.lastObservedAt[slot] > 8000) { reclaimed = slot; break }
+        }
+        if (reclaimed < 0) { this.capacityRejected++; rejectedCount++; continue }
+        this.unlinkCell(reclaimed)
+        this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, reclaimed, registration !== null)
+        this.recordView(reclaimed, cameraPosition)
+        this.reclaimedSamples++; createdCount++; continue
       }
 
-      this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp)
+      this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, undefined, registration !== null)
+      this.recordView(this.activeSampleCount - 1, cameraPosition)
       createdCount += 1
     }
 
@@ -485,11 +502,30 @@ export class DenseRealityReconstructionService {
       lastCaptureTimestamp: timestamp,
       lastCameraSequence: this.lastCameraSequence,
       cameraCapturesUsed: this.cameraCapturesUsed,
+      reclaimedSampleCount: this.reclaimedSamples,
+      capacityRejectedSampleCount: this.capacityRejected,
+      numericMemoryBytes: DENSE_REALITY_CONFIG.maxSamples * 71,
+      createdThisTick: createdCount,
+      fusedThisTick: fusedCount,
+      newGeometryRatio: createdCount / Math.max(1, createdCount + fusedCount),
     }
   }
 
   public getDiagnostics(): DenseRealityFusionDebug {
     return { ...this.diagnostics }
+  }
+
+  /** Bounded presentation copy; never exposes writable fusion arrays. */
+  public copyLiveMap(positions: Float32Array, colors: Float32Array): number {
+    const limit = positions.length / 3, stride = Math.max(1, Math.ceil(this.activeSampleCount / limit))
+    let count = 0
+    for (let index = 0; index < this.activeSampleCount && count < limit; index += stride) {
+      if (!this.active[index] || this.geometryObservationCounts[index] < 2 || this.colorWeights[index] === 0) continue
+      positions.set(this.positions.subarray(index * 3, index * 3 + 3), count * 3)
+      colors.set(this.linearColors.subarray(index * 3, index * 3 + 3), count * 3)
+      count++
+    }
+    return count
   }
 
   public createSnapshot(
@@ -550,6 +586,10 @@ export class DenseRealityReconstructionService {
         colorRgb,
         colorSpace: 'srgb' as const,
         geometryConfidence: clamp(this.geometryObservationCounts[index] / 4, 0, 1),
+        geometryObservationCount: this.geometryObservationCounts[index],
+        viewObservationCount: this.viewMasks[index].toString(2).replaceAll('0', '').length,
+        firstObservedAt: this.createdAt[index],
+        lastObservedAt: this.lastObservedAt[index],
         colorConfidence,
         colorObservationCount: this.colorObservationCounts[index],
       })
@@ -592,7 +632,7 @@ export class DenseRealityReconstructionService {
       surfels: frozenSurfels,
       bounds: calculateBounds(frozenSurfels),
       captureSummary,
-      fusionDiagnostics: Object.freeze({ ...this.diagnostics }),
+      fusionDiagnostics: Object.freeze({ ...this.diagnostics, multiLayerBucketCount: [...this.cellHeads.values()].filter((index) => this.nextInCell[index] >= 0).length }),
       colorStatistics: calculateColorStatistics(frozenSurfels),
       colorSamples: Object.freeze(colorSamples),
     })
@@ -605,13 +645,16 @@ export class DenseRealityReconstructionService {
     this.colorWeights.fill(0)
     this.colorObservationCounts.fill(0)
     this.geometryObservationCounts.fill(0)
+    this.viewMasks.fill(0)
     this.lastObservedAt.fill(0)
+    this.createdAt.fill(0)
     this.active.fill(0)
     this.nextInCell.fill(-1)
     this.cellHeads.clear()
     this.activeSampleCount = 0
     this.stableSampleCount = 0
     this.capacityReached = false
+    this.reclaimCursor = 0; this.reclaimedSamples = 0; this.capacityRejected = 0
     this.totalCreatedSampleCount = 0
     this.totalFusedSampleCount = 0
     this.totalRejectedSampleCount = 0
@@ -685,8 +728,10 @@ export class DenseRealityReconstructionService {
     green: number,
     blue: number,
     timestamp: number,
+    reusedIndex?: number,
+    hasColor = true,
   ): void {
-    const index = this.activeSampleCount
+    const index = reusedIndex ?? this.activeSampleCount
     const offset = index * 3
     this.positions[offset] = point.x
     this.positions[offset + 1] = point.y
@@ -697,15 +742,39 @@ export class DenseRealityReconstructionService {
     this.linearColors[offset] = red
     this.linearColors[offset + 1] = green
     this.linearColors[offset + 2] = blue
-    this.colorWeights[index] = 1
-    this.colorObservationCounts[index] = 1
+    this.colorWeights[index] = hasColor ? 1 : 0
+    this.colorObservationCounts[index] = hasColor ? 1 : 0
+    this.viewMasks[index] = 0
     this.geometryObservationCounts[index] = 1
     this.lastObservedAt[index] = timestamp
+    this.createdAt[index] = timestamp
     this.active[index] = 1
     const key = getPointCellKey(point)
     this.nextInCell[index] = this.cellHeads.get(key) ?? -1
     this.cellHeads.set(key, index)
-    this.activeSampleCount += 1
+    if (reusedIndex === undefined) this.activeSampleCount += 1
+  }
+
+  private unlinkCell(index: number): void {
+    const offset = index * 3
+    const key = getCellKey(getCellCoordinate(this.positions[offset]), getCellCoordinate(this.positions[offset + 1]), getCellCoordinate(this.positions[offset + 2]))
+    let current = this.cellHeads.get(key) ?? -1, previous = -1
+    while (current >= 0) {
+      if (current === index) {
+        if (previous < 0) { if (this.nextInCell[current] < 0) this.cellHeads.delete(key); else this.cellHeads.set(key, this.nextInCell[current]) }
+        else this.nextInCell[previous] = this.nextInCell[current]
+        this.nextInCell[index] = -1; return
+      }
+      previous = current; current = this.nextInCell[current]
+    }
+  }
+
+  private recordView(index: number, camera: ViewerPosition | null): void {
+    if (!camera) return
+    const offset = index * 3, x = camera.x - this.positions[offset], y = camera.y - this.positions[offset + 1], z = camera.z - this.positions[offset + 2]
+    const azimuth = Math.min(7, Math.floor((Math.atan2(x, z) + Math.PI) / (Math.PI * 2) * 8))
+    const elevation = y > Math.hypot(x, z) * .35 ? 1 : 0
+    this.viewMasks[index] |= 1 << (azimuth + elevation * 8)
   }
 
   private fuseSample(
@@ -716,6 +785,7 @@ export class DenseRealityReconstructionService {
     blue: number,
     cameraPosition: ViewerPosition | null,
     timestamp: number,
+    hasColor = true,
   ): boolean {
     const index = matchIndex
     const offset = index * 3
@@ -749,22 +819,28 @@ export class DenseRealityReconstructionService {
       if (colorDistance > COLOR_OUTLIER_DISTANCE) {
         observationWeight *= 0.1
         if (observationWeight < 0.08) {
-          return false
+          observationWeight = 0
         }
       } else {
         observationWeight *= clamp(1 - colorDistance * 0.45, 0.7, 1)
       }
     }
 
+    if (!hasColor) observationWeight = 0
     const boundedWeight = Math.max(0.05, observationWeight)
     const nextWeight = Math.min(MAX_COLOR_WEIGHT, priorWeight + boundedWeight)
     const blend = boundedWeight / Math.max(Number.EPSILON, priorWeight + boundedWeight)
-    this.positions[offset] += (this.samplePoint.x - this.positions[offset]) * Math.min(0.35, blend)
-    this.positions[offset + 1] += (this.samplePoint.y - this.positions[offset + 1]) * Math.min(0.35, blend)
-    this.positions[offset + 2] += (this.samplePoint.z - this.positions[offset + 2]) * Math.min(0.35, blend)
-    this.normals[offset] += (this.sampleNormal.x - this.normals[offset]) * Math.min(0.35, blend)
-    this.normals[offset + 1] += (this.sampleNormal.y - this.normals[offset + 1]) * Math.min(0.35, blend)
-    this.normals[offset + 2] += (this.sampleNormal.z - this.normals[offset + 2]) * Math.min(0.35, blend)
+    // Fusion accepts normal orientation up to sign; align before averaging.
+    const sign = this.sampleNormal.x * this.normals[offset] + this.sampleNormal.y * this.normals[offset + 1] + this.sampleNormal.z * this.normals[offset + 2] < 0 ? -1 : 1
+    this.sampleNormal.x *= sign; this.sampleNormal.y *= sign; this.sampleNormal.z *= sign
+    this.unlinkCell(index)
+    const geometryBlend = 1 / Math.min(16, this.geometryObservationCounts[index] + 1)
+    this.positions[offset] += (this.samplePoint.x - this.positions[offset]) * geometryBlend
+    this.positions[offset + 1] += (this.samplePoint.y - this.positions[offset + 1]) * geometryBlend
+    this.positions[offset + 2] += (this.samplePoint.z - this.positions[offset + 2]) * geometryBlend
+    this.normals[offset] += (this.sampleNormal.x - this.normals[offset]) * geometryBlend
+    this.normals[offset + 1] += (this.sampleNormal.y - this.normals[offset + 1]) * geometryBlend
+    this.normals[offset + 2] += (this.sampleNormal.z - this.normals[offset + 2]) * geometryBlend
     this.normalScratch.x = this.normals[offset]
     this.normalScratch.y = this.normals[offset + 1]
     this.normalScratch.z = this.normals[offset + 2]
@@ -773,11 +849,17 @@ export class DenseRealityReconstructionService {
       this.normals[offset + 1] = this.sampleNormal.y
       this.normals[offset + 2] = this.sampleNormal.z
     }
-    this.linearColors[offset] += (red - this.linearColors[offset]) * blend
-    this.linearColors[offset + 1] += (green - this.linearColors[offset + 1]) * blend
-    this.linearColors[offset + 2] += (blue - this.linearColors[offset + 2]) * blend
-    this.colorWeights[index] = nextWeight
-    this.colorObservationCounts[index] += 1
+    const newCell = getCellKey(getCellCoordinate(this.positions[offset]), getCellCoordinate(this.positions[offset + 1]), getCellCoordinate(this.positions[offset + 2]))
+    // Even within the same bucket relink explicitly after unlinking.
+    this.nextInCell[index] = this.cellHeads.get(newCell) ?? -1
+    this.cellHeads.set(newCell, index)
+    if (observationWeight > 0) {
+      this.linearColors[offset] += (red - this.linearColors[offset]) * blend
+      this.linearColors[offset + 1] += (green - this.linearColors[offset + 1]) * blend
+      this.linearColors[offset + 2] += (blue - this.linearColors[offset + 2]) * blend
+      this.colorWeights[index] = nextWeight
+      this.colorObservationCounts[index] += 1
+    }
     if (
       this.geometryObservationCounts[index] < DENSE_REALITY_CONFIG.minimumStableObservations &&
       this.geometryObservationCounts[index] + 1 >= DENSE_REALITY_CONFIG.minimumStableObservations

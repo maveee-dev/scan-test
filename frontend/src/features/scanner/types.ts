@@ -711,6 +711,10 @@ export interface FinalizedSpatialScan {
 }
 
 export interface FinalizedRealitySurfel {
+  readonly geometryObservationCount?: number
+  readonly viewObservationCount?: number
+  readonly firstObservedAt?: number
+  readonly lastObservedAt?: number
   readonly id: number
   readonly position: SpatialPoint
   readonly normal: SpatialPoint
@@ -750,6 +754,13 @@ export interface FinalizedRealityReconstruction {
 }
 
 export interface DenseRealityFusionDebug {
+  readonly reclaimedSampleCount?: number
+  readonly capacityRejectedSampleCount?: number
+  readonly numericMemoryBytes?: number
+  readonly createdThisTick?: number
+  readonly fusedThisTick?: number
+  readonly newGeometryRatio?: number
+  readonly multiLayerBucketCount?: number
   readonly status: 'idle' | 'active' | 'empty'
   readonly inputSampleCount: number
   readonly inputColorSampleCount: number
@@ -768,6 +779,10 @@ export interface DenseRealityFusionDebug {
 }
 
 export interface FinalizedDenseRealityReconstruction {
+  readonly appearanceKeyframes?: FinalizedRealityRgbKeyframes
+  readonly qualityTelemetry?: import('./services/realityQualityPolicy').RealityQualityTelemetry
+  readonly depthSource?: { width: number | null; height: number | null; scale: number | null }
+  readonly liveRgbDimensions?: { width: number | null; height: number | null }
   readonly scanId: string
   readonly referenceSpaceType: ScannerReferenceSpaceType
   readonly status: RealityReconstructionStatus
@@ -825,6 +840,7 @@ export interface FinalizedScannerCapture {
 }
 
 export interface ViewerPoseDebug {
+  quality?: import('./services/realityQualityPolicy').RealityQualityTelemetry
   sessionActive: boolean
   glContextStatus: XRPresentationStatus
   baseLayerStatus: XRPresentationStatus

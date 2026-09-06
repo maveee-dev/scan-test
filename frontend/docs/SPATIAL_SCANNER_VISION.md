@@ -1,5 +1,10 @@
 # Spatial Scanner Vision
 
+Current implementation: **Scanner Build M8.7**. Reconstruction and walkable
+inspection are the active milestone. M8.6.7.2 customization is frozen pending
+physical reconstruction validation; see the M8.7 section below and
+[implementation report](M8_7_IMPLEMENTATION_REPORT.md).
+
 ## Product vision
 
 The goal is to build a browser-based spatial room scanner for a hardware-store room customization system.
@@ -2133,3 +2138,155 @@ bounds, expansion distance, domain components, and post-domain geometry state
 counts. Domain construction remains compact, local, and post-scan; it changes
 neither XR capture nor RGB-D registration, Dense Reality geometry, M7
 measurements, Original mode, or paint renderer geometry.
+
+### M8.7 — High-Quality Walkable RGB-D Reality Reconstruction
+
+The physical scan pipeline is:
+
+```text
+real device translation + rotation
+              |
+XR pose + measured depth + current captured RGB
+              |
+persistent multi-view WORLD-SPACE reconstruction
+              |
+immutable raw finalized measured Reality
+              |
+worker: local display refinement + captured appearance reprojection
+              |
+derived Reality Quality Preview
+```
+
+M7 remains a separate structural/semantic representation. It is not an input to
+M8.7 display refinement or appearance selection. Reality must not be snapped to
+M7, made rectangular, closed across an unobserved opening, or filled using AI.
+Customization masks, domains, object envelopes and paint shaders are unchanged.
+The frozen preview receives raw Reality, never the derived quality surface.
+
+#### Depth and world-space fusion
+
+Depth still comes from the current XR CPU depth sampler, with the validated
+projection/transform preference and meter conversion. There is no cached old
+depth substituted into a new pose. Four deterministic quarter-cell sampling
+phases replace the repeated central lattice. Each phase lasts two processing
+ticks, so every phase reaches the every-second-tick live RGB copy too.
+
+Timing tiers use 80×45, 96×54 and 120×68 attempt budgets per processing tick,
+redistributed to the XR view projection's aspect
+(for example approximately 40×90 for a portrait 0.45 aspect at the lowest tier).
+Raw camera/depth texture orientation is not used to invent another mapping.
+They start low, upgrade after sustained measured headroom and downgrade on slow processing
+or poor XR frame intervals. These are testable operating bounds, not a claim
+that POCO can sustain the highest tier. Stationary observation is throttled after
+an initial phase cycle; meaningful physical translation/rotation resumes work.
+Live RGB remains 160 px long edge (typically 72×160), with no stale color reuse.
+Geometry-only ticks now contribute measurements even without a camera copy.
+Uncolored measurements stay uncolored until actual captured RGB is available.
+
+The existing 3D spatial hash already permits multiple incompatible samples in
+one bucket. Euclidean, point-to-plane and normal checks retain separate depth
+layers; no screen pixel owns a persistent sample. Fusion now relinks a sample
+when its measured position crosses a cell boundary, aligns opposite compatible
+normal signs before averaging, and separates geometry confidence from RGB
+outlier acceptance. The 2.5 cm cells and 60,000 slots remain: neither a 1.5 cm
+cell nor a larger capacity is justified by desktop timing alone.
+
+At pressure, a bounded search can reclaim only stale, never-confirmed samples.
+Stable measured geometry is not silently evicted. If all slots are stable, new
+geometry can still be rejected; the UI warns about this limit rather than
+pretending a newly entered extension was captured. This is not unlimited room
+mapping. A bounded trajectory and angular view-support bins distinguish repeated
+ticks from differing physical viewpoints. `local-floor` remains preferred, with
+the existing `local` fallback; virtual controls never recenter either space.
+
+#### Appearance and derived display geometry
+
+A separate local-only appearance reservoir retains at most eight application-
+owned RGB frames, with a 640 px long edge and a 230,400-pixel ceiling per frame.
+POCO's demonstrated portrait aspect would produce 288×640: 0.527 MiB RGB/frame,
+4.219 MiB for eight. The existing 320 px mask-keyframe branch is unchanged.
+Appearance captures are sparse, pose-diverse, reject fast-motion proxies and
+near-duplicates, and can replace the most redundant retained viewpoint when a
+more novel area is observed. No browser-owned texture or video is retained.
+
+Worker color refinement calls the existing world→keyframe projection helper.
+It uses a bounded, one-keyframe-at-a-time measured-surfel visibility raster,
+view angle, range, edge safety and keyframe quality. The best valid captured
+observation supplies color; similarly strong conflicting views retain original
+fused RGB rather than averaging incompatible appearances. No measured keyframe
+depth snapshots were added. The derived raster cannot prove visibility of
+dynamic objects at a historical instant: uncertain/edge observations keep their
+existing color. Resolution remains limited by actual surfel spacing and capture
+quality, not magically by the larger RGB image alone.
+
+Display smoothing is local and edge-preserving: compatible measured neighbors,
+a 12 mm local tangent envelope, strong normal agreement, balanced support, and
+at most 4 mm displacement. Silhouettes and one-sided neighborhoods are retained.
+There is no wall-wide plane fit, no added samples, and no explicit hole filler.
+Existing measured-neighbor triangulation can cover supported small gaps but
+rejects unsupported spans, discontinuities and incompatible surfaces. Recess
+front, side and back remain different geometry. Raw finalized positions/RGB
+remain immutable; derived geometry/colors are cached separately in the worker.
+
+Quality preview uses sRGB output, antialiasing, a 0.04 m near plane, and capped
+adaptive DPR (initially at most 2, reducing under sustained low FPS). Only one
+of the quality and legacy/customization previews is mounted at a time.
+
+#### Live map and independent controls
+
+```text
+PHONE physical movement -> XR pose -> depth/RGB registration -> measured map
+                             |
+                      one-way pose copy
+                             v
+                     physical scanner marker
+
+joystick + touch look -> VIRTUAL inspection pose -> separate map camera ONLY
+```
+
+Live 3D Map is an optional DOM-overlay canvas with its own WebGL context and
+Three camera. Its update is driven by XR rAF (not a second window rAF that may
+be suspended in immersive mode). Fusion continues while the map is open. The
+map copies at most 12,000 confirmed colored samples every 350 ms and renders
+at most about 30 FPS, independently of XR capture. It does not reconstruct a
+second mesh in the XR callback. Follow Scanner copies the physical camera pose;
+Free Look uses only the virtual joystick/drag pose. A gold physical scanner
+marker remains distinct from the inspection camera. The optional trajectory
+line is disabled by default. Reset View returns to Follow Scanner, not to a
+new XR origin.
+
+Free-look movement has a coarse measured-point occupancy check, not a complete
+human-body collision solver. Unknown space remains empty/traversable; no M7 or
+unobserved walls are inserted. Controls capture touch only inside the map.
+Finish/Cancel and Return to AR remain outside the map control area. Users must
+watch their physical surroundings while walking; the virtual map is not a
+physical obstacle-warning system.
+
+This requires a browser that composites an independent canvas in WebXR DOM
+overlay. If the extra GL context/render fails, a visible message directs the
+user back to AR; the XR session and measured map are not reset. Devices without
+DOM overlay cannot use the live-map UI. Simultaneous rendering, walking drift,
+thermal performance and follow/free-look behavior require physical POCO tests.
+
+#### Diagnostics and acceptance
+
+Comparison modes: Raw Reality, measured sample density, Refined Geometry,
+High-Resolution Color, combined refinement, and Final M8.7. Depth diagnostics
+include range bands from the first scanner pose, local discontinuities, latest
+sample-creation tick, angular view-support count, first-observed-time reveal,
+and trajectory. Range bands are not semantic depth-layer labels; reveal time
+is not semantic recess detection. No unsupported geometry is shown.
+
+Telemetry reports runtime depth dimensions/scale, attempted/valid samples,
+phase/tier, created/fused counts, capacity pressure, shared multi-sample buckets,
+keyframe dimensions/memory, refinement/mesh times, local noise proxy, spacing,
+triangle/fallback counts, canvas/DPR/FPS, and distance/trajectory. Numeric buffer
+budgets are separate from JS heap/GPU overhead; see the implementation report
+for desktop measurements and limitations.
+
+All keyframes, trajectories and derived worker state are scan-session-only,
+local data. New Scan/Discard clears them; workers, GL resources and listeners
+are disposed. No upload, backend persistence, semantic AI, hole inpainting or
+M7 visible paint surface is introduced. Stop customization development here
+and physically evaluate detail, recess depth, walking, live map, joystick,
+follow/free-look and unknown-space preservation before any further milestone.

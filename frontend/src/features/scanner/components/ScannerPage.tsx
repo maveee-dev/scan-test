@@ -12,6 +12,7 @@ import ScannerDomOverlay from './ScannerDomOverlay'
 import ScannerFinishedView from './ScannerFinishedView'
 
 interface ScannerPageProps {
+  liveMap: import('../services/liveRealityMap').LiveRealityMap
   status: ScannerCheckStatus
   capabilities: ScannerCapabilities | null
   canStartScan: boolean
@@ -129,6 +130,7 @@ function ScannerPage({
   overlayRootRef,
   pointPreviewCanvasRef,
   sessionState,
+  liveMap,
   status,
 }: ScannerPageProps) {
   const isChecking = status === 'checking'
@@ -189,6 +191,7 @@ function ScannerPage({
         className={`xr-dom-overlay ${isDomOverlayActive ? 'is-visible' : ''}`}
       >
         <ScannerDomOverlay
+          liveMap={liveMap}
           onCancelScan={onCancelScan}
           onDebugGeometryToggle={onDebugGeometryToggle}
           onPersistentSurfelDebugToggle={onPersistentSurfelDebugToggle}
