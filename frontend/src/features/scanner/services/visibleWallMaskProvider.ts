@@ -50,6 +50,34 @@ export interface PreservedVisualIsland {
   readonly wallSurroundScore: number
 }
 
+/** A bounded, derived 2D object region. It never changes captured RGB. */
+export interface PreservedVisualRegion {
+  readonly id: string
+  readonly sourceKeyframeId: number
+  readonly pixelIndices: Uint32Array
+  readonly boundingBox: { x: number; y: number; width: number; height: number }
+  readonly rawFragmentPixelCount: number
+  readonly enclosureScore: number
+  readonly wallSurroundScore: number
+  readonly appearanceDistinctness: number
+  readonly confidence: number
+}
+
+export interface WallLocalPreservedObjectFusion {
+  readonly width: number
+  readonly height: number
+  readonly objectVotes: Uint8Array
+  readonly wallVotes: Uint8Array
+  readonly protectedCells: Uint8Array
+  readonly keyframeSupport: Uint8Array
+  readonly protectedSampleMask: Uint8Array
+  readonly objectSupportedCellCount: number
+  readonly wallSupportedCellCount: number
+  readonly uncertainCellCount: number
+  readonly regionCount: number
+  readonly protectedSampleCount: number
+}
+
 export interface VisibleWallMaskKeyframe {
   readonly keyframeId: number
   readonly roi: { x: number; y: number; width: number; height: number }
@@ -68,6 +96,10 @@ export interface VisibleWallMaskKeyframe {
   readonly enclosedVisualObjectPixelCount: number
   readonly secondaryExpandedWallPixelCount: number
   readonly preservedIslands: readonly PreservedVisualIsland[]
+  readonly rawObjectFragmentPixelCount: number
+  readonly rawObjectFragmentCount: number
+  readonly rawObjectFragmentPixels: Uint32Array
+  readonly preservedVisualRegions: readonly PreservedVisualRegion[]
   readonly projectedAreaPixels: number
   readonly qualityScore: number
 }
@@ -104,6 +136,7 @@ export interface VisibleWallMaskSurfaceResult {
   readonly threeDSampleObservationCounts: Uint8Array
   readonly threeDSampleWallConfidence: Uint8Array
   readonly threeDSampleTerminalReasons: Uint8Array
+  readonly wallLocalPreservedObjectFusion: WallLocalPreservedObjectFusion | null
 }
 
 export interface VisibleWallMaskResult {
@@ -116,6 +149,11 @@ export interface VisibleWallMaskResult {
   readonly maskMs: number
   readonly componentAnalysisMs: number
   readonly secondaryExpansionMs: number
+  readonly fragmentExtractionMs: number
+  readonly componentMergeMs: number
+  readonly enclosureAnalysisMs: number
+  readonly wallLocalFusionMs: number
+  readonly objectProjectionMs: number
   readonly memoryBytes: number
 }
 
@@ -141,6 +179,14 @@ const COMPONENT_EDGE_LUMINANCE_DISTANCE = 0.14
 const SECONDARY_WALL_CHROMA_DISTANCE = 0.17
 const SECONDARY_WALL_LUMINANCE_DISTANCE = 0.34
 const MIN_LOCAL_WALL_OBSERVATION_CONFIDENCE = 0.58
+const MAX_OBJECT_FRAGMENT_MERGE_GAP_PIXELS = 8
+const OBJECT_REGION_MIN_RAW_PIXELS = 4
+const OBJECT_REGION_MIN_DENSITY = 0.045
+const OBJECT_REGION_MAX_ROI_FRACTION = 0.42
+const OBJECT_PROTECTION_BAND_PIXELS = 1
+const WALL_LOCAL_CELL_METERS = 0.03
+const WALL_LOCAL_MAX_AXIS_CELLS = 96
+const WALL_LOCAL_OBJECT_MERGE_CELLS = 2
 
 function timestamp(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
 
@@ -366,6 +412,214 @@ function preserveEnclosedVisualObjects(
   return islands
 }
 
+interface ObjectPixelComponent {
+  readonly pixels: readonly number[]
+  readonly minX: number
+  readonly minY: number
+  readonly maxX: number
+  readonly maxY: number
+}
+
+function collectActivePixelComponents(active: Uint8Array, frame: RealityRgbKeyframe, roi: { x: number; y: number; width: number; height: number }): ObjectPixelComponent[] {
+  const visited = new Uint8Array(active.length), queue: number[] = [], pixels: number[] = [], components: ObjectPixelComponent[] = []
+  for (let y = roi.y; y < roi.y + roi.height; y++) for (let x = roi.x; x < roi.x + roi.width; x++) {
+    const start = y * frame.width + x
+    if (!active[start] || visited[start]) continue
+    let minX = x, minY = y, maxX = x, maxY = y
+    queue.length = 0; pixels.length = 0; queue.push(start); visited[start] = 1
+    while (queue.length) {
+      const current = queue.pop() as number, currentX = current % frame.width, currentY = Math.floor(current / frame.width)
+      pixels.push(current); minX = Math.min(minX, currentX); minY = Math.min(minY, currentY); maxX = Math.max(maxX, currentX); maxY = Math.max(maxY, currentY)
+      forEachRoiNeighbor(currentX, currentY, roi, (nextX, nextY) => {
+        const next = nextY * frame.width + nextX
+        if (active[next] && !visited[next]) { visited[next] = 1; queue.push(next) }
+      })
+    }
+    components.push({ pixels: [...pixels], minX, minY, maxX, maxY })
+  }
+  return components
+}
+
+function wallSurroundForBox(mask: Uint8Array, frame: RealityRgbKeyframe, roi: { x: number; y: number; width: number; height: number }, minX: number, minY: number, maxX: number, maxY: number): number {
+  let wall = 0, total = 0
+  const startX = Math.max(roi.x, minX - 1), endX = Math.min(roi.x + roi.width - 1, maxX + 1)
+  const startY = Math.max(roi.y, minY - 1), endY = Math.min(roi.y + roi.height - 1, maxY + 1)
+  for (let x = startX; x <= endX; x++) for (const y of [startY, endY]) {
+    total++; if (mask[y * frame.width + x] === VisibleWallMaskCode.WALL) wall++
+  }
+  for (let y = startY + 1; y < endY; y++) for (const x of [startX, endX]) {
+    total++; if (mask[y * frame.width + x] === VisibleWallMaskCode.WALL) wall++
+  }
+  return wall / Math.max(1, total)
+}
+
+function consolidatePreservedObjectRegions(
+  frame: RealityRgbKeyframe,
+  roi: { x: number; y: number; width: number; height: number },
+  mask: Uint8Array,
+  evidence: Uint8Array,
+  terminalReasons: Uint8Array,
+  wallMean: readonly number[],
+): { rawFragmentPixelCount: number; rawFragmentCount: number; rawFragmentPixels: Uint32Array; regions: readonly PreservedVisualRegion[]; fragmentExtractionMs: number; componentMergeMs: number; enclosureAnalysisMs: number } {
+  const extractionStarted = timestamp()
+  const raw = new Uint8Array(mask.length)
+  let rawPixelCount = 0
+  for (let y = roi.y; y < roi.y + roi.height; y++) for (let x = roi.x; x < roi.x + roi.width; x++) {
+    const index = y * frame.width + x
+    if (mask[index] === VisibleWallMaskCode.NON_WALL) { raw[index] = 1; rawPixelCount++ }
+  }
+  const rawFragments = collectActivePixelComponents(raw, frame, roi)
+  const fragmentExtractionMs = timestamp() - extractionStarted
+  if (rawPixelCount === 0) return { rawFragmentPixelCount: 0, rawFragmentCount: 0, rawFragmentPixels: new Uint32Array(), regions: [], fragmentExtractionMs, componentMergeMs: 0, enclosureAnalysisMs: 0 }
+  const mergeStarted = timestamp()
+  const bridged = new Uint8Array(mask.length)
+  const mergeGap = Math.min(MAX_OBJECT_FRAGMENT_MERGE_GAP_PIXELS, Math.max(3, Math.round(Math.min(roi.width, roi.height) * 0.12)))
+  for (let y = roi.y; y < roi.y + roi.height; y++) for (let x = roi.x; x < roi.x + roi.width; x++) {
+    if (!raw[y * frame.width + x]) continue
+    for (let offsetY = -mergeGap; offsetY <= mergeGap; offsetY++) for (let offsetX = -mergeGap; offsetX <= mergeGap; offsetX++) {
+      if (offsetX * offsetX + offsetY * offsetY > mergeGap * mergeGap) continue
+      const targetX = x + offsetX, targetY = y + offsetY
+      if (targetX >= roi.x && targetX < roi.x + roi.width && targetY >= roi.y && targetY < roi.y + roi.height) bridged[targetY * frame.width + targetX] = 1
+    }
+  }
+  const mergedComponents = collectActivePixelComponents(bridged, frame, roi)
+  const componentMergeMs = timestamp() - mergeStarted
+  const enclosureStarted = timestamp()
+  const regions: PreservedVisualRegion[] = []
+  for (const component of mergedComponents) {
+    const rawPixels = component.pixels.filter((pixel) => raw[pixel])
+    const rawMinX = Math.min(...rawPixels.map((pixel) => pixel % frame.width)), rawMaxX = Math.max(...rawPixels.map((pixel) => pixel % frame.width))
+    const rawMinY = Math.min(...rawPixels.map((pixel) => Math.floor(pixel / frame.width))), rawMaxY = Math.max(...rawPixels.map((pixel) => Math.floor(pixel / frame.width)))
+    const boxWidth = rawMaxX - rawMinX + 1, boxHeight = rawMaxY - rawMinY + 1, boxArea = boxWidth * boxHeight
+    const touchesRoi = rawMinX <= roi.x || rawMaxX >= roi.x + roi.width - 1 || rawMinY <= roi.y || rawMaxY >= roi.y + roi.height - 1
+    const surround = wallSurroundForBox(mask, frame, roi, rawMinX, rawMinY, rawMaxX, rawMaxY)
+    const mean = [0, 0, 0]
+    for (const pixel of rawPixels) {
+      const color = rgb(frame, pixel % frame.width, Math.floor(pixel / frame.width))
+      mean[0] += color[0]; mean[1] += color[1]; mean[2] += color[2]
+    }
+    mean[0] /= Math.max(1, rawPixels.length); mean[1] /= Math.max(1, rawPixels.length); mean[2] /= Math.max(1, rawPixels.length)
+    const distinctness = Math.max(chromaDistance(mean, wallMean), Math.abs(luminance(mean) - luminance(wallMean)))
+    const density = rawPixels.length / Math.max(1, boxArea)
+    const enclosure = surround * (touchesRoi ? 0.25 : 1)
+    const accepted = !touchesRoi && rawPixels.length >= OBJECT_REGION_MIN_RAW_PIXELS && density >= OBJECT_REGION_MIN_DENSITY &&
+      boxArea <= roi.width * roi.height * OBJECT_REGION_MAX_ROI_FRACTION && surround >= 0.24 && distinctness >= ENCLOSED_OBJECT_BOUNDARY_CHROMA_DISTANCE
+    if (!accepted) continue
+    // A one-pixel boundary band prevents paint bleed at the production
+    // keyframe scale. In intentionally tiny ROIs it would cover too much
+    // physical wall, so keep the band resolution-aware.
+    const protectionBand = Math.min(OBJECT_PROTECTION_BAND_PIXELS, Math.floor(Math.min(roi.width, roi.height) / 24))
+    const protectedPixels: number[] = []
+    for (let y = Math.max(roi.y, rawMinY - protectionBand); y <= Math.min(roi.y + roi.height - 1, rawMaxY + protectionBand); y++) {
+      for (let x = Math.max(roi.x, rawMinX - protectionBand); x <= Math.min(roi.x + roi.width - 1, rawMaxX + protectionBand); x++) {
+        const pixel = y * frame.width + x
+        mask[pixel] = VisibleWallMaskCode.NON_WALL
+        evidence[pixel] = VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT
+        terminalReasons[pixel] = VisibleWallMaskTerminalReason.ENCLOSED_REGION
+        protectedPixels.push(pixel)
+      }
+    }
+    regions.push({
+      id: `preserved-${frame.id}-${regions.length + 1}`,
+      sourceKeyframeId: frame.id,
+      pixelIndices: new Uint32Array(protectedPixels),
+      boundingBox: { x: rawMinX, y: rawMinY, width: boxWidth, height: boxHeight },
+      rawFragmentPixelCount: rawPixels.length,
+      enclosureScore: enclosure,
+      wallSurroundScore: surround,
+      appearanceDistinctness: distinctness,
+      confidence: Math.min(1, 0.35 + surround * 0.35 + Math.min(0.3, density)),
+    })
+  }
+  const rawFragmentPixels = new Uint32Array(rawPixelCount)
+  let rawIndex = 0
+  for (let pixel = 0; pixel < raw.length; pixel++) if (raw[pixel]) rawFragmentPixels[rawIndex++] = pixel
+  return { rawFragmentPixelCount: rawPixelCount, rawFragmentCount: rawFragments.length, rawFragmentPixels, regions, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs: timestamp() - enclosureStarted }
+}
+
+function bitCount(value: number): number {
+  let count = 0, remaining = value
+  while (remaining) { count += remaining & 1; remaining >>>= 1 }
+  return count
+}
+
+function wallLocalCoordinate(point: SpatialPoint, basis: { origin: SpatialPoint; axisU: SpatialPoint; axisV: SpatialPoint }): { u: number; v: number } {
+  const x = point.x - basis.origin.x, y = point.y - basis.origin.y, z = point.z - basis.origin.z
+  return { u: x * basis.axisU.x + y * basis.axisU.y + z * basis.axisU.z, v: x * basis.axisV.x + y * basis.axisV.y + z * basis.axisV.z }
+}
+
+function createWallLocalPreservedObjectFusion(
+  surfels: readonly FinalizedRealitySurfel[],
+  table: RealityStructuralAssociationTable,
+  logicalIndex: number,
+  classifications: Uint8Array,
+  objectKeyframeBits: Uint8Array,
+): WallLocalPreservedObjectFusion | null {
+  const logical = table.logicalSurfaces[logicalIndex], referencePatch = logical && table.patches.find((patch) => logical.memberPatchIds.includes(patch.id))
+  if (!referencePatch) return null
+  const basis = referencePatch.basis
+  const localVertices = logical.memberPatchIds.flatMap((id) => table.patches.find((patch) => patch.id === id)?.vertices3D ?? []).map((point) => wallLocalCoordinate(point, basis))
+  if (localVertices.length === 0) return null
+  const minU = Math.min(...localVertices.map((point) => point.u)), maxU = Math.max(...localVertices.map((point) => point.u))
+  const minV = Math.min(...localVertices.map((point) => point.v)), maxV = Math.max(...localVertices.map((point) => point.v))
+  const width = Math.max(8, Math.min(WALL_LOCAL_MAX_AXIS_CELLS, Math.ceil((maxU - minU) / WALL_LOCAL_CELL_METERS) + 1))
+  const height = Math.max(8, Math.min(WALL_LOCAL_MAX_AXIS_CELLS, Math.ceil((maxV - minV) / WALL_LOCAL_CELL_METERS) + 1))
+  const count = width * height, objectVotes = new Uint8Array(count), wallVotes = new Uint8Array(count), uncertainVotes = new Uint8Array(count), keyframeSupport = new Uint8Array(count)
+  const cellFor = (point: SpatialPoint): number => {
+    const local = wallLocalCoordinate(point, basis)
+    const x = Math.floor((local.u - minU) / Math.max(EPSILON, maxU - minU) * width), y = Math.floor((local.v - minV) / Math.max(EPSILON, maxV - minV) * height)
+    return x < 0 || y < 0 || x >= width || y >= height ? -1 : y * width + x
+  }
+  for (let index = 0; index < surfels.length; index++) {
+    const cell = cellFor(surfels[index].position); if (cell < 0) continue
+    const classification = classifications[index]
+    if (classification === VisibleWallMask3dCode.NON_WALL) {
+      objectVotes[cell] = Math.min(255, objectVotes[cell] + 1)
+      keyframeSupport[cell] |= objectKeyframeBits[index]
+    } else if (classification === VisibleWallMask3dCode.WALL) wallVotes[cell] = Math.min(255, wallVotes[cell] + 1)
+    else if (classification === VisibleWallMask3dCode.UNCERTAIN) uncertainVotes[cell] = Math.min(255, uncertainVotes[cell] + 1)
+  }
+  const bridged = new Uint8Array(count)
+  for (let cell = 0; cell < count; cell++) if (objectVotes[cell] > 0) {
+    const x = cell % width, y = Math.floor(cell / width)
+    for (let offsetY = -WALL_LOCAL_OBJECT_MERGE_CELLS; offsetY <= WALL_LOCAL_OBJECT_MERGE_CELLS; offsetY++) for (let offsetX = -WALL_LOCAL_OBJECT_MERGE_CELLS; offsetX <= WALL_LOCAL_OBJECT_MERGE_CELLS; offsetX++) {
+      const targetX = x + offsetX, targetY = y + offsetY
+      if (targetX >= 0 && targetY >= 0 && targetX < width && targetY < height && offsetX * offsetX + offsetY * offsetY <= WALL_LOCAL_OBJECT_MERGE_CELLS * WALL_LOCAL_OBJECT_MERGE_CELLS) bridged[targetY * width + targetX] = 1
+    }
+  }
+  const protectedCells = new Uint8Array(count), visited = new Uint8Array(count), queue: number[] = []
+  let regionCount = 0
+  for (let start = 0; start < count; start++) {
+    if (!bridged[start] || visited[start]) continue
+    let minX = start % width, maxX = minX, minY = Math.floor(start / width), maxY = minY, coreCount = 0, supportBits = 0
+    queue.length = 0; queue.push(start); visited[start] = 1
+    while (queue.length) {
+      const cell = queue.pop() as number, x = cell % width, y = Math.floor(cell / width)
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+      if (objectVotes[cell] > 0) { coreCount++; supportBits |= keyframeSupport[cell] }
+      for (const [nextX, nextY] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue
+        const next = nextY * width + nextX
+        if (bridged[next] && !visited[next]) { visited[next] = 1; queue.push(next) }
+      }
+    }
+    const boxArea = (maxX - minX + 1) * (maxY - minY + 1)
+    let surroundWall = 0, surroundTotal = 0
+    for (let x = Math.max(0, minX - 1); x <= Math.min(width - 1, maxX + 1); x++) for (const y of [Math.max(0, minY - 1), Math.min(height - 1, maxY + 1)]) { surroundTotal++; if (wallVotes[y * width + x] > 0) surroundWall++ }
+    for (let y = Math.max(0, minY); y <= Math.min(height - 1, maxY); y++) for (const x of [Math.max(0, minX - 1), Math.min(width - 1, maxX + 1)]) { surroundTotal++; if (wallVotes[y * width + x] > 0) surroundWall++ }
+    const touchesBoundary = minX === 0 || minY === 0 || maxX === width - 1 || maxY === height - 1
+    const accepted = !touchesBoundary && coreCount >= 3 && bitCount(supportBits) >= 2 && coreCount / Math.max(1, boxArea) >= 0.035 && surroundWall / Math.max(1, surroundTotal) >= 0.16
+    if (!accepted) continue
+    regionCount++
+    for (let y = Math.max(0, minY - 1); y <= Math.min(height - 1, maxY + 1); y++) for (let x = Math.max(0, minX - 1); x <= Math.min(width - 1, maxX + 1); x++) protectedCells[y * width + x] = 1
+  }
+  let objectSupportedCellCount = 0, wallSupportedCellCount = 0, uncertainCellCount = 0, protectedSampleCount = 0
+  for (let cell = 0; cell < count; cell++) { if (objectVotes[cell] > 0) objectSupportedCellCount++; if (wallVotes[cell] > 0) wallSupportedCellCount++; if (uncertainVotes[cell] > 0) uncertainCellCount++ }
+  const protectedSampleMask = new Uint8Array(surfels.length)
+  for (let index = 0; index < surfels.length; index++) if (protectedCells[cellFor(surfels[index].position)] > 0) { protectedSampleMask[index] = 1; protectedSampleCount++ }
+  return { width, height, objectVotes, wallVotes, protectedCells, keyframeSupport, protectedSampleMask, objectSupportedCellCount, wallSupportedCellCount, uncertainCellCount, regionCount, protectedSampleCount }
+}
+
 /** Local deterministic seed-and-grow mask provider; replaceable by future semantic providers. */
 export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvider {
   public build(surfels: readonly FinalizedRealitySurfel[], table: RealityStructuralAssociationTable, keyframes: FinalizedRealityRgbKeyframes): VisibleWallMaskResult | null {
@@ -376,7 +630,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
     // first deterministic logical surface rather than oscillating by loop order.
     const sampleVoteStrength = new Uint8Array(surfels.length)
     const surfaces: VisibleWallMaskSurfaceResult[] = []
-    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
+    let projectionMs = 0, maskMs = 0, componentAnalysisMs = 0, secondaryExpansionMs = 0, fragmentExtractionMs = 0, componentMergeMs = 0, enclosureAnalysisMs = 0, wallLocalFusionMs = 0, objectProjectionMs = 0, memoryBytes = sampleLogicalSurfaceIndices.byteLength + sampleConfidence.byteLength + sampleVoteStrength.byteLength
     const projection = { u: 0, v: 0 }, pixel = { x: 0, y: 0 }
     for (let logicalIndex = 0; logicalIndex < table.logicalSurfaces.length; logicalIndex++) {
       const vertices = surfaceVertices(table, logicalIndex)
@@ -437,6 +691,10 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         const componentStarted = timestamp()
         const islands = preserveEnclosedVisualObjects(entry.frame, entry.roi, mask, evidence, terminalReasons, mean)
         componentAnalysisMs += timestamp() - componentStarted
+        const consolidatedObjects = consolidatePreservedObjectRegions(entry.frame, entry.roi, mask, evidence, terminalReasons, mean)
+        fragmentExtractionMs += consolidatedObjects.fragmentExtractionMs
+        componentMergeMs += consolidatedObjects.componentMergeMs
+        enclosureAnalysisMs += consolidatedObjects.enclosureAnalysisMs
         let wall = 0, nonWall = 0, uncertain = 0, seedWall = 0, grownWall = 0, secondaryWall = 0, strongObject = 0, enclosedObject = 0
         for (let y = entry.roi.y; y < entry.roi.y + entry.roi.height; y++) for (let x = entry.roi.x; x < entry.roi.x + entry.roi.width; x++) {
           const cell = y * entry.frame.width + x, value = mask[cell], reason = evidence[cell]
@@ -448,14 +706,15 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
           else if (reason === VisibleWallMaskEvidenceCode.ENCLOSED_VISUAL_OBJECT) enclosedObject++
         }
         const seedPixelArray = new Uint32Array(seedPixels)
-        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + terminalReasons.byteLength + seedPixelArray.byteLength
-        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, terminalReasons, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, secondaryExpandedWallPixelCount: secondaryWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, preservedIslands: islands, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
+        maskMs += timestamp() - maskStarted; memoryBytes += mask.byteLength + evidence.byteLength + terminalReasons.byteLength + seedPixelArray.byteLength + consolidatedObjects.rawFragmentPixels.byteLength + consolidatedObjects.regions.reduce((sum, region) => sum + region.pixelIndices.byteLength, 0)
+        masks.push({ keyframeId: entry.frame.id, roi: entry.roi, mask, evidence, terminalReasons, seedPixels: seedPixelArray, seedPixelCount: seedColors.length, wallPixelCount: wall, nonWallPixelCount: nonWall, uncertainPixelCount: uncertain, seedWallPixelCount: seedWall, grownWallPixelCount: grownWall, secondaryExpandedWallPixelCount: secondaryWall, strongVisualObjectPixelCount: strongObject, enclosedVisualObjectPixelCount: enclosedObject, preservedIslands: islands, rawObjectFragmentPixelCount: consolidatedObjects.rawFragmentPixelCount, rawObjectFragmentCount: consolidatedObjects.rawFragmentCount, rawObjectFragmentPixels: consolidatedObjects.rawFragmentPixels, preservedVisualRegions: consolidatedObjects.regions, projectedAreaPixels: entry.roi.area, qualityScore: entry.frame.qualityScore })
       }
       let wallConfirmed = 0, nonWall = 0, uncertain = 0
       const threeDSampleClassifications = new Uint8Array(surfels.length)
       const threeDSampleObservationCounts = new Uint8Array(surfels.length)
       const threeDSampleWallConfidence = new Uint8Array(surfels.length)
       const threeDSampleTerminalReasons = new Uint8Array(surfels.length)
+      const threeDSampleObjectKeyframeBits = new Uint8Array(surfels.length)
       const threeDUncertainReasonCounts: Record<string, number> = {
         'mask pixel uncertain': 0,
         'one good wall vote quality failed': 0,
@@ -472,7 +731,8 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
       const projectionStarted = timestamp()
       for (let index = 0; index < surfels.length; index++) {
         let wallVotes = 0, nonWallVotes = 0, uncertainVotes = 0, validObservations = 0, imageProjectable = false, strongestWallConfidence = 0
-        for (const mask of masks) {
+        for (let maskIndex = 0; maskIndex < masks.length; maskIndex++) {
+          const mask = masks[maskIndex]
           const frame = frameById.get(mask.keyframeId)
           if (!frame || !project(surfels[index].position, frame, projection) || !mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, pixel)) continue
           imageProjectable = true
@@ -486,7 +746,7 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
             wallVotes++; wallMaskObservations++
             strongestWallConfidence = Math.max(strongestWallConfidence, localWallObservationConfidence(surfels[index], frame, mask, pixel))
           } else if (value === VisibleWallMaskCode.NON_WALL) {
-            nonWallVotes++; objectMaskObservations++
+            nonWallVotes++; objectMaskObservations++; threeDSampleObjectKeyframeBits[index] |= 1 << maskIndex
           } else {
             uncertainVotes++; uncertainMaskObservations++
           }
@@ -545,7 +805,18 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         }
       }
       projectionMs += timestamp() - projectionStarted
-      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength
+      const fusionStarted = timestamp()
+      const wallLocalPreservedObjectFusion = createWallLocalPreservedObjectFusion(surfels, table, logicalIndex, threeDSampleClassifications, threeDSampleObjectKeyframeBits)
+      wallLocalFusionMs += timestamp() - fusionStarted
+      const objectProjectionStarted = timestamp()
+      if (wallLocalPreservedObjectFusion) for (let index = 0; index < surfels.length; index++) {
+        if (!wallLocalPreservedObjectFusion.protectedSampleMask[index] || threeDSampleClassifications[index] !== VisibleWallMask3dCode.WALL) continue
+        threeDSampleClassifications[index] = VisibleWallMask3dCode.NON_WALL
+        if (sampleLogicalSurfaceIndices[index] === logicalIndex) sampleLogicalSurfaceIndices[index] = -1
+        wallConfirmed--; nonWall++
+      }
+      objectProjectionMs += timestamp() - objectProjectionStarted
+      memoryBytes += threeDSampleClassifications.byteLength + threeDSampleObservationCounts.byteLength + threeDSampleWallConfidence.byteLength + threeDSampleTerminalReasons.byteLength + threeDSampleObjectKeyframeBits.byteLength + (wallLocalPreservedObjectFusion ? wallLocalPreservedObjectFusion.objectVotes.byteLength + wallLocalPreservedObjectFusion.wallVotes.byteLength + wallLocalPreservedObjectFusion.protectedCells.byteLength + wallLocalPreservedObjectFusion.keyframeSupport.byteLength + wallLocalPreservedObjectFusion.protectedSampleMask.byteLength : 0)
       surfaces.push({
         logicalSurfaceId: table.logicalSurfaces[logicalIndex].id,
         selectedKeyframeIds: masks.map((mask) => mask.keyframeId),
@@ -578,8 +849,9 @@ export class GeometricRgbVisibleWallMaskProvider implements VisibleWallMaskProvi
         threeDSampleObservationCounts,
         threeDSampleWallConfidence,
         threeDSampleTerminalReasons,
+        wallLocalPreservedObjectFusion,
       })
     }
-    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, memoryBytes }
+    return { provider: 'geometric-rgb', sampleLogicalSurfaceIndices, sampleConfidence, surfaces, preparationMs: timestamp() - started, projectionMs, maskMs, componentAnalysisMs, secondaryExpansionMs, fragmentExtractionMs, componentMergeMs, enclosureAnalysisMs, wallLocalFusionMs, objectProjectionMs, memoryBytes }
   }
 }

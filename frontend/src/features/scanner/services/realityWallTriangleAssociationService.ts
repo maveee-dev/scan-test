@@ -421,6 +421,7 @@ export function applyRealityTrianglePaint(
   selectedOnly = false,
   visibleOwnerships: readonly VisibleRealitySurfaceOwnership[] = [],
   visualSampleLogicalSurfaceIndices?: Int32Array,
+  visualObjectSampleMask?: Uint8Array,
 ): void {
   const sampleById = new Map(samples.map((sample) => [sample.id, sample]))
   const sampleIndexById = new Map(samples.map((sample, index) => [sample.id, index]))
@@ -438,10 +439,12 @@ export function applyRealityTrianglePaint(
   for (let triangle = 0; triangle < topology.triangleCount; triangle++) {
     const automaticLogicalIndex = triangleAssociation.logicalSurfaceIndices[triangle]
     let visualLogicalIndex = -1
+    let hasProtectedObjectVertex = false
     if (visualSampleLogicalSurfaceIndices) {
       const votes = new Map<number, number>()
       for (let vertex = 0; vertex < 3; vertex++) {
         const sampleIndex = sampleIndexById.get(topology.vertexSurfelIds[triangle * 3 + vertex])
+        if (sampleIndex !== undefined && visualObjectSampleMask?.[sampleIndex]) hasProtectedObjectVertex = true
         const visualIndex = sampleIndex === undefined ? -1 : visualSampleLogicalSurfaceIndices[sampleIndex]
         if (visualIndex >= 0) votes.set(visualIndex, (votes.get(visualIndex) ?? 0) + 1)
       }
@@ -452,7 +455,9 @@ export function applyRealityTrianglePaint(
     const logicalIndex = visualSampleLogicalSurfaceIndices
       ? visualLogicalIndex
       : manualTriangleLogicalIndices.get(triangle) ?? (manualLogicalIndices.has(automaticLogicalIndex) ? -1 : automaticLogicalIndex)
-    if (logicalIndex < 0) continue
+    // A duplicated render triangle cannot safely split a paint boundary at a
+    // preserved object vertex. Keep the complete mixed triangle original.
+    if (logicalIndex < 0 || hasProtectedObjectVertex) continue
     const logical = table.logicalSurfaces[logicalIndex]
     let paint = paintBySurface.get(logical.id) ?? null
     if (!paint) for (const patchId of logical.memberPatchIds) { paint = paintBySurface.get(patchId) ?? null; if (paint) break }

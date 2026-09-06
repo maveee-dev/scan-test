@@ -105,7 +105,7 @@ const ROOM_BOUNDARY_COLORS = {
 type PreviewMode = 'coverage' | 'fused' | 'reality-preview' | 'planes' | 'structural' | 'intersections' | 'boundary' | 'room-surfaces' | 'first-person-room'
 type RealityRenderSource = 'dense' | 'structural'
 type RealityAppearanceMode = 'original' | 'design'
-type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes'
+type RealityKeyframeDebugMode = 'best-keyframe' | 'structural-roi' | 'rgb-wall-seeds' | 'rgb-wall-mask' | 'preserved-object-evidence' | 'preserved-visual-islands' | 'paintability-evidence' | 'secondary-wall-expansion' | 'uncertain-terminal-reasons' | 'non-wall-uncertain' | 'projected-3d-mask' | '3d-observation-count' | '3d-wall-vote-confidence' | '3d-uncertain-terminal-reason' | '3d-object-votes' | 'raw-object-fragments' | 'merged-object-regions' | 'preserved-region-interior' | 'wall-local-object-fusion' | 'object-boundary-band' | '3d-preserved-object-assignment'
 const EMPTY_ROOM_SURFACES: readonly RoomSurfacePatch[] = []
 const EMPTY_DESIGN_INPUTS: readonly RealityDesignColorInput[] = []
 const EMPTY_VISIBLE_REALITY_OWNERSHIPS: readonly VisibleRealitySurfaceOwnership[] = []
@@ -565,6 +565,15 @@ function applyRealityDesignTriangleAppearance(
   if (!triangleLayer) return
   const color = resources.geometries[triangleLayer.geometry]?.getAttribute('color')
   if (!color || !(color.array instanceof Float32Array)) return
+  const visualObjectSampleMask = visibleWallMask
+    ? (() => {
+        const objectMask = new Uint8Array(source.surfels.length)
+        for (const surface of visibleWallMask.surfaces) for (let index = 0; index < objectMask.length; index++) {
+          if (surface.threeDSampleClassifications[index] === VisibleWallMask3dCode.NON_WALL) objectMask[index] = 1
+        }
+        return objectMask
+      })()
+    : undefined
   if (compositeMode === 'reality-wall-components' || compositeMode === 'all-reality-components' || compositeMode === 'logical-wall-owned-components') {
     applyRealityTrianglePaint(color.array, source.surfels, topology, triangleAssociation, association, inputs, true, false, visibleOwnerships)
   } else if (compositeMode === 'composite' || compositeMode === 'selected-wall-triangles' || compositeMode === 'hit-component') {
@@ -579,6 +588,7 @@ function applyRealityDesignTriangleAppearance(
       compositeMode === 'selected-wall-triangles',
       visibleOwnerships,
       visibleWallMask?.sampleLogicalSurfaceIndices,
+      visualObjectSampleMask,
     )
   } else if (compositeMode === 'object-non-wall-triangles' || compositeMode === 'rejected-nearby-components') {
     // Diagnostic isolation: dim confirmed wall components while all preserved
@@ -833,16 +843,20 @@ function FinalizedSpatialScanPreview({
     const logicalIndex = table.logicalSurfaces.findIndex((surface) => surface.id === selectedLogicalSurface.id)
     if (logicalIndex < 0) return null
     const sampleIndexById = new Map(preferredRealityReconstruction.surfels.map((sample, index) => [sample.id, index]))
-    let three = 0, two = 0, one = 0, zero = 0
+    let three = 0, two = 0, one = 0, zero = 0, objectThree = 0, objectTwo = 0, objectOne = 0, objectZero = 0, mixed = 0
     for (let triangle = 0; triangle < topology.triangleCount; triangle++) {
-      let votes = 0
+      let votes = 0, objectVotes = 0
       for (let vertex = 0; vertex < 3; vertex++) {
         const sampleIndex = sampleIndexById.get(topology.vertexSurfelIds[triangle * 3 + vertex])
-        if (sampleIndex !== undefined && selectedVisibleWallMaskSurface.threeDSampleClassifications[sampleIndex] === VisibleWallMask3dCode.WALL && visibleWallMask.result?.sampleLogicalSurfaceIndices[sampleIndex] === logicalIndex) votes++
+        if (sampleIndex === undefined) continue
+        if (selectedVisibleWallMaskSurface.threeDSampleClassifications[sampleIndex] === VisibleWallMask3dCode.WALL && visibleWallMask.result?.sampleLogicalSurfaceIndices[sampleIndex] === logicalIndex) votes++
+        if (selectedVisibleWallMaskSurface.threeDSampleClassifications[sampleIndex] === VisibleWallMask3dCode.NON_WALL) objectVotes++
       }
       if (votes === 3) three++; else if (votes === 2) two++; else if (votes === 1) one++; else zero++
+      if (objectVotes === 3) objectThree++; else if (objectVotes === 2) objectTwo++; else if (objectVotes === 1) objectOne++; else objectZero++
+      if (votes > 0 && objectVotes > 0) mixed++
     }
-    return { three, two, one, zero, painted: three + two }
+    return { three, two, one, zero, painted: three + two, objectThree, objectTwo, objectOne, objectZero, mixed }
   }, [preferredRealityReconstruction, preparedReality?.triangleTopology, realityAssociation.table, selectedLogicalSurface, selectedVisibleWallMaskSurface, visibleWallMask.result])
 
   useEffect(() => {
@@ -851,17 +865,35 @@ function FinalizedSpatialScanPreview({
     const mask = maskSurface?.masks[0]
     const frame = mask && applicableRgbKeyframes?.keyframes.find((candidate) => candidate.id === mask.keyframeId)
     if (!canvas || !mask || !frame) return
+    const wallLocalFusion = maskSurface.wallLocalPreservedObjectFusion
+    if (realityKeyframeDebugMode === 'wall-local-object-fusion' && wallLocalFusion) {
+      canvas.width = wallLocalFusion.width; canvas.height = wallLocalFusion.height
+      const context = canvas.getContext('2d')
+      if (!context) return
+      const image = context.createImageData(wallLocalFusion.width, wallLocalFusion.height)
+      for (let cell = 0; cell < wallLocalFusion.protectedCells.length; cell++) {
+        const offset = cell * 4
+        if (wallLocalFusion.protectedCells[cell]) { image.data[offset] = 232; image.data[offset + 1] = 67; image.data[offset + 2] = 181 }
+        else if (wallLocalFusion.objectVotes[cell]) { image.data[offset] = 255; image.data[offset + 1] = 114; image.data[offset + 2] = 64 }
+        else if (wallLocalFusion.wallVotes[cell]) { image.data[offset] = 34; image.data[offset + 1] = 184; image.data[offset + 2] = 255 }
+        else { image.data[offset] = 70; image.data[offset + 1] = 70; image.data[offset + 2] = 70 }
+        image.data[offset + 3] = 255
+      }
+      context.putImageData(image, 0, 0)
+      return
+    }
     canvas.width = frame.width
     canvas.height = frame.height
     const context = canvas.getContext('2d')
     if (!context) return
     const image = context.createImageData(frame.width, frame.height)
-    const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes'
+    const threeDDebug = realityKeyframeDebugMode === 'projected-3d-mask' || realityKeyframeDebugMode === '3d-observation-count' || realityKeyframeDebugMode === '3d-wall-vote-confidence' || realityKeyframeDebugMode === '3d-uncertain-terminal-reason' || realityKeyframeDebugMode === '3d-object-votes' || realityKeyframeDebugMode === '3d-preserved-object-assignment'
+    const objectRegionDebug = realityKeyframeDebugMode === 'raw-object-fragments' || realityKeyframeDebugMode === 'merged-object-regions' || realityKeyframeDebugMode === 'preserved-region-interior' || realityKeyframeDebugMode === 'object-boundary-band'
     for (let pixel = 0; pixel < frame.width * frame.height; pixel++) {
       const offset = pixel * 4, maskValue = mask.mask[pixel]
       const sourceOffset = pixel * 3
       const sourceR = frame.rgb[sourceOffset], sourceG = frame.rgb[sourceOffset + 1], sourceB = frame.rgb[sourceOffset + 2]
-      if (threeDDebug) {
+      if (objectRegionDebug || threeDDebug) {
         image.data[offset] = sourceR * 0.08
         image.data[offset + 1] = sourceG * 0.08
         image.data[offset + 2] = sourceB * 0.08
@@ -915,6 +947,13 @@ function FinalizedSpatialScanPreview({
       }
       image.data[offset + 3] = 255
     }
+    if (objectRegionDebug) {
+      const paintPixels = (pixels: Iterable<number>, color: readonly number[]): void => {
+        for (const pixel of pixels) { const offset = pixel * 4; image.data[offset] = color[0]; image.data[offset + 1] = color[1]; image.data[offset + 2] = color[2]; image.data[offset + 3] = 255 }
+      }
+      if (realityKeyframeDebugMode === 'raw-object-fragments') paintPixels(mask.rawObjectFragmentPixels, [255, 114, 64])
+      else for (const region of mask.preservedVisualRegions) paintPixels(region.pixelIndices, realityKeyframeDebugMode === 'object-boundary-band' ? [255, 216, 82] : [232, 67, 181])
+    }
     if (threeDDebug && preferredRealityReconstruction) {
       const projected = { x: 0, y: 0 }
       const setPoint = (x: number, y: number, red: number, green: number, blue: number): void => {
@@ -940,7 +979,7 @@ function FinalizedSpatialScanPreview({
             : terminal === VisibleWallMask3dTerminalReason.ONE_GOOD_WALL_VOTE_QUALITY_FAILED ? [255, 112, 64]
               : terminal === VisibleWallMask3dTerminalReason.LOGICAL_SURFACE_MISMATCH ? [232, 67, 181] : [112, 112, 112]
           setPoint(projected.x, projected.y, color[0], color[1], color[2])
-        } else if (realityKeyframeDebugMode === '3d-object-votes') {
+        } else if (realityKeyframeDebugMode === '3d-object-votes' || realityKeyframeDebugMode === '3d-preserved-object-assignment') {
           if (classification === VisibleWallMask3dCode.NON_WALL) setPoint(projected.x, projected.y, 244, 75, 100)
         } else {
           const color = classification === VisibleWallMask3dCode.WALL ? [34, 184, 255]
@@ -1897,6 +1936,12 @@ function FinalizedSpatialScanPreview({
                   ['3d-wall-vote-confidence', '3D Wall Vote Confidence'],
                   ['3d-uncertain-terminal-reason', '3D Uncertain Reason'],
                   ['3d-object-votes', '3D Object Votes'],
+                  ['raw-object-fragments', 'Raw Object Fragments'],
+                  ['merged-object-regions', 'Merged Object Regions'],
+                  ['preserved-region-interior', 'Preserved Region Interior'],
+                  ['wall-local-object-fusion', 'Wall-Local Object Fusion'],
+                  ['object-boundary-band', 'Object Boundary Band'],
+                  ['3d-preserved-object-assignment', '3D Preserved Object Assignment'],
                 ] as const).map(([debugMode, label]) => (
                   <button
                     key={debugMode}
@@ -1930,6 +1975,12 @@ function FinalizedSpatialScanPreview({
                       KF {mask.keyframeId}: ROI {mask.roi.width} × {mask.roi.height}, wall seed/primary/secondary {mask.seedWallPixelCount}/{mask.grownWallPixelCount}/{mask.secondaryExpandedWallPixelCount}; preserved strong/enclosed {mask.strongVisualObjectPixelCount}/{mask.enclosedVisualObjectPixelCount}; uncertain {mask.uncertainPixelCount}; islands {mask.preservedIslands.length}; quality {mask.qualityScore.toFixed(2)}.
                     </span>
                   ))}
+                  {selectedVisibleWallMaskSurface.masks.flatMap((mask) => mask.preservedVisualRegions.map((region) => (
+                    <span key={region.id}>Region {region.id}: {region.boundingBox.width} by {region.boundingBox.height} px, raw {region.rawFragmentPixelCount}, enclosure {region.enclosureScore.toFixed(2)}, wall surround {region.wallSurroundScore.toFixed(2)}, confidence {region.confidence.toFixed(2)}.</span>
+                  )))}
+                  {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion ? (
+                    <span>Wall-local object fusion: {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.width} by {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.height}; object/wall/uncertain cells {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.objectSupportedCellCount}/{selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.wallSupportedCellCount}/{selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.uncertainCellCount}; fused regions {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.regionCount}; protected samples {selectedVisibleWallMaskSurface.wallLocalPreservedObjectFusion.protectedSampleCount}.</span>
+                  ) : null}
                   <span>
                     3D unresolved reasons: {Object.entries(selectedVisibleWallMaskSurface.threeDUncertainReasonCounts).filter(([, count]) => count > 0).map(([reason, count]) => `${reason} ${count}`).join(' / ') || 'none'}.
                   </span>
@@ -1944,9 +1995,12 @@ function FinalizedSpatialScanPreview({
                       Triangle conversion: 3/3 {selectedRgbTriangleVoteStats.three}; 2/3 {selectedRgbTriangleVoteStats.two}; 1/3 {selectedRgbTriangleVoteStats.one}; 0/3 {selectedRgbTriangleVoteStats.zero}; painted {selectedRgbTriangleVoteStats.painted}.
                     </span>
                   ) : null}
+                  {selectedRgbTriangleVoteStats ? (
+                    <span>Object triangle protection: 3/3 {selectedRgbTriangleVoteStats.objectThree}; 2/3 {selectedRgbTriangleVoteStats.objectTwo}; 1/3 {selectedRgbTriangleVoteStats.objectOne}; 0/3 {selectedRgbTriangleVoteStats.objectZero}; mixed wall/object {selectedRgbTriangleVoteStats.mixed}. Mixed boundaries remain original.</span>
+                  ) : null}
                   {visibleWallMask.result ? (
                     <span>
-                      RGB-mask worker: preserved-island analysis {visibleWallMask.result.componentAnalysisMs.toFixed(1)} ms / secondary expansion {visibleWallMask.result.secondaryExpansionMs.toFixed(1)} ms / 3D projection {visibleWallMask.result.projectionMs.toFixed(1)} ms / total {visibleWallMask.result.preparationMs.toFixed(1)} ms / {(visibleWallMask.result.memoryBytes / 1024).toFixed(1)} KiB.
+                      RGB-mask worker: fragments {visibleWallMask.result.fragmentExtractionMs.toFixed(1)} ms / merge {visibleWallMask.result.componentMergeMs.toFixed(1)} ms / enclosure {visibleWallMask.result.enclosureAnalysisMs.toFixed(1)} ms / wall-local fusion {visibleWallMask.result.wallLocalFusionMs.toFixed(1)} ms / 3D object projection {visibleWallMask.result.objectProjectionMs.toFixed(1)} ms / total {visibleWallMask.result.preparationMs.toFixed(1)} ms / {(visibleWallMask.result.memoryBytes / 1024).toFixed(1)} KiB.
                     </span>
                   ) : null}
                 </>

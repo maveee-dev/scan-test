@@ -8,7 +8,8 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
     if (!result) { self.postMessage({ result: null }); return }
     const transfer: Transferable[] = [result.sampleLogicalSurfaceIndices.buffer, result.sampleConfidence.buffer]
     for (const surface of result.surfaces) for (const mask of surface.masks) {
-      transfer.push(mask.mask.buffer, mask.evidence.buffer, mask.terminalReasons.buffer, mask.seedPixels.buffer)
+      transfer.push(mask.mask.buffer, mask.evidence.buffer, mask.terminalReasons.buffer, mask.seedPixels.buffer, mask.rawObjectFragmentPixels.buffer)
+      for (const region of mask.preservedVisualRegions) transfer.push(region.pixelIndices.buffer)
     }
     for (const surface of result.surfaces) {
       transfer.push(
@@ -16,6 +17,13 @@ self.onmessage = (event: MessageEvent<{ surfels: readonly FinalizedRealitySurfel
         surface.threeDSampleObservationCounts.buffer,
         surface.threeDSampleWallConfidence.buffer,
         surface.threeDSampleTerminalReasons.buffer,
+      )
+      if (surface.wallLocalPreservedObjectFusion) transfer.push(
+        surface.wallLocalPreservedObjectFusion.objectVotes.buffer,
+        surface.wallLocalPreservedObjectFusion.wallVotes.buffer,
+        surface.wallLocalPreservedObjectFusion.protectedCells.buffer,
+        surface.wallLocalPreservedObjectFusion.keyframeSupport.buffer,
+        surface.wallLocalPreservedObjectFusion.protectedSampleMask.buffer,
       )
     }
     self.postMessage({ result }, { transfer })

@@ -985,6 +985,21 @@ test('59. RGB-projected triangle paint requires two agreeing source samples', ()
   assert.equal(JSON.stringify(samples), originalSamples)
 })
 
+// A painted triangle cannot be safely split at a protected object vertex.
+test('59a. Mixed wall/object triangle preserves the original object boundary', () => {
+  const wall = patch('wall-rgb-triangle-boundary')
+  const samples = [surfel(727, 0.5, 0.5, 0.006), surfel(728, 0.8, 0.5, 0.006), surfel(729, 0.5, 0.8, 0.006)]
+  const topology = triangleTopology([727, 728, 729])
+  const table = association.associateRealitySurfels(samples, [wall])
+  const automatic = triangleAssociation.associateRealityWallTriangles(samples, topology, table, new Uint8Array(samples.length))
+  const colors = new Float32Array(9).fill(0.5)
+  triangleAssociation.applyRealityTrianglePaint(
+    colors, samples, topology, automatic, table, [{ surfaceId: 'wall-rgb-triangle-boundary', paintColor: '#1565d8' }],
+    false, false, [], new Int32Array([0, 0, -1]), new Uint8Array([0, 0, 1]),
+  )
+  assert.deepEqual([...colors], Array(9).fill(0.5))
+})
+
 // 60. A visually distinct, near-coplanar enclosed wood decoration is preserved even without a large plane offset.
 test('60. Enclosed attached decoration becomes preserved-object evidence', () => {
   const wall = patch('wall-wood-decoration', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
@@ -1075,4 +1090,30 @@ test('66. Samples outside all selected wall observations remain outside the 3D m
   assert.equal(result.sampleLogicalSurfaceIndices[3], -1)
   assert.equal(result.surfaces[0].threeDSampleClassifications[3], visibleWallMask.VisibleWallMask3dCode.OUTSIDE_DOMAIN)
   assert.ok(result.surfaces[0].threeDObservationDiagnostics.observedByZeroKeyframes > 0)
+})
+
+// 67. Sparse high-contrast fragments around a rectangular mounted object are
+// consolidated into one protected interior without consuming surrounding wall.
+test('67. Fragmented rectangular painting becomes one preserved visual region', () => {
+  const wall = patch('wall-fragmented-picture', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(801, -0.55, 0.2, -1), surfel(802, -0.35, 0.4, -1), surfel(803, 0.5, 0.55, -1), surfel(804, 0, 0, -1)]
+  const frame = testKeyframe(1, 16, 16, false)
+  for (let y = 6; y <= 10; y++) for (let x = 5; x <= 11; x++) if ((x + y) % 3 === 0) frame.rgb.set([10, 10, 10], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  const mask = result.surfaces[0].masks[0]
+  assert.equal(mask.preservedVisualRegions.length, 1)
+  assert.equal(mask.mask[8 * frame.width + 8], visibleWallMask.VisibleWallMaskCode.NON_WALL, 'region interior must be protected, not just fragment pixels')
+  assert.equal(mask.mask[8 * frame.width + 2], visibleWallMask.VisibleWallMaskCode.WALL, 'wall outside painting remains paintable')
+})
+
+// 68. Distant mounted objects do not merge through normal wall between them.
+test('68. Two separated paintings remain two preserved regions', () => {
+  const wall = patch('wall-two-pictures', { offsetX: -0.8, offsetZ: -1, planeConstant: -1, width: 1.6, height: 1.6 })
+  const samples = [surfel(811, -0.55, 0.2, -1), surfel(812, -0.35, 0.4, -1), surfel(813, 0.5, 0.55, -1)]
+  const frame = testKeyframe(1, 24, 24, false)
+  for (const startX of [2, 15]) for (let y = 10; y <= 14; y++) for (let x = startX; x < startX + 5; x++) if ((x + y) % 2 === 0) frame.rgb.set([10, 10, 10], (y * frame.width + x) * 3)
+  const result = new visibleWallMask.GeometricRgbVisibleWallMaskProvider().build(samples, rgbMaskTable(samples, wall), keyframeSnapshot([frame]))
+  assert.ok(result)
+  assert.equal(result.surfaces[0].masks[0].preservedVisualRegions.length, 2)
 })

@@ -1834,3 +1834,46 @@ final-assignment views. Triangle diagnostics report 3/3, 2/3, 1/3, and 0/3
 sample support. Added data is compact typed arrays transferred from the
 existing worker; capture cadence, RGB-D registration, Dense Reality, M7,
 renderer geometry, and Reality Original remain unchanged.
+
+### M8.6.4 — Multi-View Preserved Object Region Consolidation
+
+M8.6.3 correctly transfers broad wall evidence to Dense Reality, but a real
+mounted painting can still arrive as scattered strong-object pixels, enclosed
+pieces, and neutral gaps. M8.6.4 adds a derived preserved-object branch:
+
+```
+RGB evidence
+  ↓
+raw object fragments
+  ↓
+image-space region consolidation
+  ↓
+multi-keyframe wall-local fusion
+  ↓
+preserved visual object region
+  ↓
+3D protected Reality samples
+  ↓
+Design
+```
+
+Raw `NON_WALL` fragments are connected through a small, resolution-bounded
+gap only when their merged bounding region is enclosed, visibly distinct,
+small relative to the ROI, and surrounded by confirmed wall. The accepted
+region protects its interior and a one-pixel boundary band; it becomes a hole
+in the paintable wall rather than a collection of preserved dots. Gradual
+shadows, stains, and general wall texture do not pass these combined tests.
+
+Per-keyframe protected evidence is then fused in a bounded wall-local grid at
+approximately 3 cm cells. A large expanded protected region requires object
+support from at least two selected keyframes plus local wall surround. M7 is
+only the aligned U/V reference domain; it is never rendered as a paint plane.
+Existing foreground handling remains responsible for shelves and curtains.
+
+Any Dense Reality sample in a fused protected cell remains original RGB, and
+explicit object evidence still overrides wall evidence. Mixed wall/object
+render triangles are now preserved as original instead of allowing a 2/3 wall
+majority to tint their object vertex. Debug views expose raw fragments, merged
+regions, protected interiors, the wall-local fusion grid, boundary protection,
+and 3D protected assignment. All work remains bounded, local, post-scan, and
+reused for paint-swatch changes.
