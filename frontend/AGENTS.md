@@ -509,3 +509,28 @@ The current project is successful when:
 Do not optimize for a finished hardware-store application yet.
 
 Optimize for proving this spatial scanning pipeline first.
+
+---
+
+# Automatic Codex Orchestration
+
+The currently selected main Codex model is the lead agent. It owns planning, architecture, security decisions, scope interpretation, task decomposition, integration, final review, final validation, and the final response. The user should not need to request subagents or switch models during normal work.
+
+The lead automatically decides whether delegation materially improves cost, speed, or context quality:
+
+* Handle trivial/local work directly when delegation overhead would exceed the task.
+* Use the project agent `luna-worker` (a fresh `gpt-5.6-luna` worker at `xhigh` effort) for bounded exploration, searches, test execution, documentation, repetitive work, mechanical edits, and narrow low-risk changes. Never use Luna below XHigh.
+* Use the project agent `terra-worker` (a fresh `gpt-5.6-terra` worker at `medium` effort) for substantial implementation, debugging, refactoring, and moderately difficult coding work. Raise Terra effort only when the delegated task demonstrably requires it.
+* Keep architecture-heavy diagnosis, security policy, product direction, ambiguous scope, integration, and final approval with the lead.
+
+Before delegation, the lead forms the high-level plan and identifies its immediate critical-path work. Every worker task must have explicit scope, relevant files, constraints, acceptance criteria, required validation, expected report, and a stop condition. Prefer fresh bounded context, avoid copying the full parent conversation, avoid duplicate work, and give concurrent editing workers disjoint write sets.
+
+Run independent tasks in parallel only when useful, with no more than two simultaneous workers. Avoid spawning multiple workers when one can finish efficiently. Workers must not spawn subagents unless the lead explicitly authorizes it for that task.
+
+The lead waits for required results, inspects actual worker output and repository changes, runs or verifies final validation, and re-delegates bounded fixes when review finds defects. Never accept worker summaries blindly.
+
+Terra workers must follow the lead's architecture and assigned scope, preserve unrelated changes, avoid major decisions unless authorized, run task-relevant validation, report changes, reasoning summary, files changed, validation, warnings, and limitations, then stop and return control to the lead.
+
+Luna workers must stay within low-risk assigned work, preserve unrelated changes, avoid architecture/security/scope/product decisions, report concise findings, files changed, validation, warnings, and limitations, then stop and return control to the lead.
+
+Optimize for lower lead-model usage without sacrificing correctness. Reserve the lead for planning, difficult diagnosis, architecture, consequential decisions, security-sensitive reasoning, review, integration, final validation, and the final response. Prefer Terra for safely delegable implementation and Luna XHigh for safely delegable exploration, tests, documentation, and mechanical work.

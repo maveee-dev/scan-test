@@ -18,6 +18,8 @@ import type { RealityFrameConsistency } from './realityMeasurementStabilityServi
 export interface DenseRealityMeasurementContext {
   readonly frameSequence: number
   readonly trackingQuality: number
+  /** Live-preview budget only. Full accepted packets are retained separately. */
+  readonly maxInputSamples?: number
 }
 
 export const DENSE_REALITY_CONFIG = Object.freeze({
@@ -426,6 +428,9 @@ export class DenseRealityReconstructionService {
   private matchBucketMissCount = 0
   private matchCandidateBudgetRejectCount = 0
   private readonly fusionDurations: number[] = []
+  private liveProcessedFrameCount = 0
+  private liveInputDecimatedSampleCount = 0
+  private liveMaximumSamplesPerFrame = 0
 
   private totalCreatedSampleCount = 0
 
@@ -466,9 +471,14 @@ export class DenseRealityReconstructionService {
 
     const frameSequence = context?.frameSequence ?? ++this.fallbackFrameSequence
     const trackingQuality = clamp(context?.trackingQuality ?? 1, 0, 1)
+    const maximumInputSamples = Math.max(1, Math.floor(context?.maxInputSamples ?? denseFrame.validPointCount))
+    const sourceStride = Math.max(1, Math.ceil(denseFrame.validPointCount / maximumInputSamples))
+    this.liveProcessedFrameCount += 1
+    this.liveMaximumSamplesPerFrame = maximumInputSamples
     let createdCount = 0
     let fusedCount = 0
     let rejectedCount = 0
+    let validOrdinal = 0
     if(this.colorObservationBySource.length<denseFrame.valid.length)this.colorObservationBySource=new Int32Array(denseFrame.valid.length)
     this.colorObservationBySource.fill(-1,0,denseFrame.valid.length)
     if(registration)for(let observationIndex=0;observationIndex<registration.coloredSampleCount;observationIndex++)this.colorObservationBySource[registration.sourceSampleIndices[observationIndex]]=observationIndex
@@ -479,6 +489,10 @@ export class DenseRealityReconstructionService {
         denseFrame.valid[sourceIndex] !== 1
       ) {
         rejectedCount += 1
+        continue
+      }
+      if (validOrdinal++ % sourceStride !== 0) {
+        this.liveInputDecimatedSampleCount += 1
         continue
       }
 
@@ -597,6 +611,9 @@ export class DenseRealityReconstructionService {
       fusionP50Ms: p(sortedFusion, .5),
       fusionP95Ms: p(sortedFusion, .95),
       fusionMaxMs: sortedFusion.at(-1) ?? 0,
+      liveProcessedFrameCount: this.liveProcessedFrameCount,
+      liveInputDecimatedSampleCount: this.liveInputDecimatedSampleCount,
+      liveMaximumSamplesPerFrame: this.liveMaximumSamplesPerFrame,
     }
   }
 
@@ -784,6 +801,7 @@ export class DenseRealityReconstructionService {
     this.duplicateSurfaceCandidateCount = 0;this.viewDiverseSampleCount=0;this.singleViewSampleCount=0
     this.matchDistanceRejectCount=0;this.matchNormalRejectCount=0;this.matchDepthLayerRejectCount=0;this.matchBucketMissCount=0;this.matchCandidateBudgetRejectCount=0
     this.fusionDurations.length=0
+    this.liveProcessedFrameCount=0;this.liveInputDecimatedSampleCount=0;this.liveMaximumSamplesPerFrame=0
     this.totalCreatedSampleCount = 0
     this.totalFusedSampleCount = 0
     this.totalRejectedSampleCount = 0

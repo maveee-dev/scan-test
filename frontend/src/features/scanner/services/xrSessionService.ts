@@ -39,6 +39,8 @@ import { RealitySurfelColorFusionService } from './realitySurfelColorFusionServi
 import { DenseRealityReconstructionService } from './denseRealityReconstructionService'
 import { RealityRgbKeyframeService } from './realityRgbKeyframeService'
 import { RealityMeasurementQueueService } from './realityMeasurementQueueService'
+import { RetainedRealityMeasurementService } from './retainedRealityMeasurementService'
+import { reconstructCanonicalReality } from './postScanCanonicalFusionService'
 import type { RealityFrameAcceptance, RealityMeasurementPacket } from './realityMeasurementStabilityService'
 import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
 
@@ -179,6 +181,7 @@ export class XRSessionService {
   private readonly appearanceKeyframeService = new RealityRgbKeyframeService(true)
   private readonly qualityPolicy = new RealityQualityPolicy()
   private readonly measurementStabilityService = new RealityMeasurementStabilityService()
+  private readonly retainedMeasurementService = new RetainedRealityMeasurementService()
   private readonly measurementQueue = new RealityMeasurementQueueService<QueuedRealityMeasurement>(
     (measurement) => this.processQueuedMeasurement(measurement),
   )
@@ -321,6 +324,7 @@ export class XRSessionService {
     this.denseRealityReconstructionService.reset()
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
+    this.retainedMeasurementService.reset()
     this.qualityPolicy.reset()
     this.realityCaptureEnabled = false
     this.rawCameraCopyPhase = 0
@@ -394,14 +398,36 @@ export class XRSessionService {
       )
       const depth = this.depthService.getDiagnostics()
       const liveRgb = this.rawCameraService.getDiagnostics(false)
+      const appearanceKeyframes = this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable())
+      const retainedMeasurements = this.retainedMeasurementService.createSnapshot()
+      const canonicalReality = rawDenseReality && retainedMeasurements.frames.length > 0
+        ? await reconstructCanonicalReality(retainedMeasurements)
+        : null
+      const canonicalSurfels = canonicalReality?.surfels ?? rawDenseReality?.surfels ?? []
+      const canonicalColored = canonicalSurfels.filter((surfel) => surfel.colorRgb !== null)
       const denseRealityReconstruction = rawDenseReality ? Object.freeze({ ...rawDenseReality,
-        appearanceKeyframes: this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable()),
+        status: canonicalColored.length > 0 ? 'available' as const : 'empty' as const,
+        surfels: canonicalSurfels,
+        canonicalSurfels,
+        liveLightweightSurfels: rawDenseReality.fusedRawSurfels ?? rawDenseReality.surfels,
+        bounds: canonicalReality?.bounds ?? rawDenseReality.bounds,
+        colorStatistics: canonicalReality?.colorStatistics ?? rawDenseReality.colorStatistics,
+        captureSummary: Object.freeze({ ...rawDenseReality.captureSummary,
+          totalSurfels: canonicalSurfels.length,
+          coloredSurfels: canonicalColored.length,
+          colorCoveragePercentage: canonicalSurfels.length > 0 ? canonicalColored.length / canonicalSurfels.length * 100 : 0,
+          averageColorObservations: canonicalColored.length > 0 ? canonicalColored.reduce((total, surfel) => total + surfel.colorObservationCount, 0) / canonicalColored.length : 0,
+          averageColorConfidence: canonicalColored.length > 0 ? canonicalColored.reduce((total, surfel) => total + surfel.colorConfidence, 0) / canonicalColored.length : 0,
+        }),
+        appearanceKeyframes,
         qualityTelemetry: this.qualityPolicy.snapshot(),
         depthSource: { width: depth.width, height: depth.height, scale: depth.rawValueToMeters },
         liveRgbDimensions: { width: liveRgb.copyWidth, height: liveRgb.copyHeight },
         rawMeasurements: Object.freeze(this.measurementStabilityService.createRawSnapshot()),
         measurementDiagnostics: Object.freeze(this.measurementStabilityService.getDiagnostics()),
         measurementQueueDiagnostics: Object.freeze(this.measurementQueue.getDiagnostics()),
+        retainedMeasurementDiagnostics: retainedMeasurements.diagnostics,
+        canonicalFusionDiagnostics: canonicalReality?.diagnostics,
       }) : null
 
       await this.endActiveSession(session)
@@ -760,6 +786,9 @@ export class XRSessionService {
             const queuedRegistration=currentRgbDepthResult?{...currentRgbDepthResult,
               sourceSampleIndices:new Int32Array(currentRgbDepthResult.sourceSampleIndices),
               srgbColors:new Uint8Array(currentRgbDepthResult.srgbColors)}:null
+            if (this.realityCaptureEnabled) {
+              this.retainedMeasurementService.consider(packet, acceptance.trackingQuality, queuedRegistration)
+            }
             const result=this.measurementQueue.enqueue({packet,acceptance,registration:queuedRegistration,
               cameraDirection:{...(this.viewerDirection??{x:0,y:0,z:-1})},depthReconstructionDurationMs,sampling})
             if(result==='replaced'||result==='dropped')this.measurementStabilityService.recordBackpressureSkipped()
@@ -898,13 +927,15 @@ export class XRSessionService {
     }
     if (this.realityCaptureEnabled) {
       const denseStartedAt = getPerformanceTimestamp()
+      const xrInterval = this.qualityPolicy.snapshot().xrFrameIntervalMs ?? 0
+      const liveSampleBudget = xrInterval > 45 ? 520 : xrInterval > 34 ? 680 : 900
       this.denseRealityReconstructionService.process(
         registration,
         densePointFrame,
         this.persistentLiveSurfaceService,
         cameraPosition,
         time,
-        { frameSequence: packet.sequence, trackingQuality: acceptance.trackingQuality },
+        { frameSequence: packet.sequence, trackingQuality: acceptance.trackingQuality, maxInputSamples: liveSampleBudget },
       )
       this.measurementQueue.recordStage('dense-fusion', getPerformanceTimestamp() - denseStartedAt)
       const fusion = this.denseRealityReconstructionService.getDiagnostics()
@@ -1018,6 +1049,7 @@ export class XRSessionService {
     this.appearanceKeyframeService.reset()
     this.qualityPolicy.reset()
     this.measurementStabilityService.reset()
+    this.retainedMeasurementService.reset()
     this.measurementQueue.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())

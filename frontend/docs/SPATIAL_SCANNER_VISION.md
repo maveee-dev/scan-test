@@ -1,10 +1,10 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1.1**. Real-time capture throughput
-and reliable repeat-observation fusion are the active milestone. M8.6.7.2
-customization remains frozen pending physical reconstruction validation; see
-the M8.7/M8.7.1 sections below and the
-[M8.7.1.1 implementation report](M8_7_1_1_IMPLEMENTATION_REPORT.md).
+Current implementation: **Scanner Build M8.7.1.2**. Live scanning now uses a
+bounded lightweight map while production Reality is rebuilt after Finish from
+retained accepted measurements. M8.6.7.2 customization remains frozen pending
+physical reconstruction validation; see the M8.7/M8.7.1 sections below and the
+[M8.7.1.2 implementation report](M8_7_1_2_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2490,3 +2490,110 @@ M8.7.1.1 is not physically accepted by desktop tests. The next POCO run must
 verify capture smoothness, stage p95 values, low queue latency, substantially
 higher match/view-diverse ratios, reduced churn and repeatable Raw/Fused/Final
 geometry before any resolution or customization work resumes.
+
+### M8.7.1.2 — Production Reconstruction Core
+
+Physical M8.7.1.1 screenshots isolate malformed wall and ceiling sheets in
+Fused Raw Reality. Confidence filtering retains coherent malformed sheets, and
+triangulation follows their shape. The production correction therefore
+separates the responsive live representation from final reconstruction instead
+of asking one arrival-order-sensitive map to satisfy both jobs.
+
+```text
+accepted immutable XR measurement packet
+        ├── bounded/decimated live fusion
+        │       ↓
+        │   scan guidance + Live Map
+        │
+        └── bounded retained measurement frames
+                ↓ Finish
+          dedicated reconstruction worker
+                ↓
+          deterministic frame replay
+                ↓
+          per-frame spatial consolidation
+                ↓
+          provisional surface hypotheses
+                ↓
+          robust canonical surfel fusion
+                ↓
+          false parallel-layer resolution
+                ↓
+          confidence safety filter
+                ↓
+          safe mesh + high-resolution RGB
+                ↓
+          Final M8.7.1.2 Reality
+```
+
+#### Live scan representation
+
+The live Dense map remains measured world-space geometry, but it is explicitly
+a lightweight preview. Each accepted frame has a bounded 520/680/900-sample
+fusion budget selected from measured XR pressure. Coverage and rough map
+inspection continue while the full accepted packet remains coherent and
+available for final replay. Lower-priority work still yields in this order:
+appearance capture, Live Map refresh, diagnostics, live preview density, then
+reconstruction cadence. Frame pose/depth ownership is never degraded.
+
+#### Retained accepted measurements
+
+At most 96 application-owned accepted packets are retained. Selection uses
+time, physical translation, rotation and temporal phase. At the bound,
+deterministic temporal decimation preserves the complete scan path rather than
+only its beginning. Browser-owned `XRDepthInformation` and camera textures are
+never retained. Packet arrays already belong to the application, so retention
+adds no expensive copy to the XR callback. Per-frame consolidation and
+canonical fusion occur after Finish in the worker. Diagnostics report frame and
+sample counts, viewpoint bins, temporal compactions and typed-array bytes.
+
+#### Canonical post-scan reconstruction
+
+Replay order is normalized by accepted XR frame sequence. Within each frame,
+near-identical spatial measurements are consolidated while distinct depth bins
+and discontinuities remain separate. Matching scores point-to-plane residual,
+tangent-plane distance and normal compatibility; Euclidean distance alone is
+not authoritative. A surfel update uses robust weighting, established-surface
+outlier rejection and a maximum 3 mm movement per accepted update, preventing
+one bad frame from dragging a stable wall forward.
+
+Every new hypothesis begins `PROVISIONAL`. Promotion requires support from at
+least three accepted frames over time plus local coherent support or a diverse
+viewpoint. Unsupported one/two-frame surfaces expire before Final. Spatial
+buckets have a fixed small hypothesis bound. After all views contribute,
+overlapping near-parallel hypotheses 2.8–10.5 cm apart are compared: a weaker
+same-view layer without coherent boundary or side-face evidence is removed. A
+measured second surface is retained when its own multi-view support and
+separation or measured side topology defend it.
+
+True topology remains authoritative. A 15–40 cm recess is represented by its
+front, side and back measurements; the deeper surface is not snapped to the
+front. Perpendicular wall/ceiling and corner normals do not match. Openings and
+unknown space are not filled. M7 is not an input to canonical fusion and no
+structural polygon is rendered as Reality.
+
+#### Product and diagnostic stages
+
+Finish may briefly show **Building clean 3D room…** while the dedicated worker
+replays retained measurements. The comparison sequence is:
+
+1. Raw Accepted Measurements
+2. Live Lightweight Fusion
+3. Post-Scan Canonical Fusion
+4. Confidence Filtered Canonical
+5. Canonical Triangulated
+6. High-Res Color Refined
+7. Final M8.7.1.2 Reality
+
+The existing confidence filter is now a final safety layer, not the mechanism
+expected to repair systematic live-map corruption. Triangulation and high-res
+visibility-aware RGB reprojection consume canonical geometry only. Appearance
+capture remains pressure-gated and resumes only when the queue, XR timing and
+tracking are healthy.
+
+Cell size remains 2.5 cm, live capacity remains 60,000, and the base depth
+budget remains 40×90-equivalent. M7 structural extraction and all M8.6.7.2
+wall, object-envelope and customization behavior remain frozen. Desktop
+synthetic tests cannot establish physical success; flat-wall edge-on thickness,
+a single ceiling, real protrusions, recess topology, responsive live scanning
+and three-scan repeatability must be verified on POCO F5 before further work.

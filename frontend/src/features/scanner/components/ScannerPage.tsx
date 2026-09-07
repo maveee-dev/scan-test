@@ -149,7 +149,7 @@ function ScannerPage({
   const statusLabel = isStarting
     ? 'Starting session'
     : isFinishing
-      ? 'Finishing scan'
+      ? 'Building clean 3D room…'
       : isCancelling
         ? 'Cancelling scan'
       : isActive
@@ -162,7 +162,7 @@ function ScannerPage({
   const statusDescription = isStarting
     ? 'Requesting camera and spatial tracking access.'
     : isFinishing
-      ? 'Creating an independent snapshot before cleanup.'
+      ? 'Building clean 3D room from retained measurements…'
       : isCancelling
         ? 'Discarding the active scan and ending XR.'
       : isActive
@@ -343,7 +343,7 @@ function ScannerPage({
                       disabled={isEnding}
                       onClick={onFinishScan}
                     >
-                      {isFinishing ? 'Finishing...' : 'Finish Scan'}
+                      {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
                     </button>
                   ) : null}
                 </div>

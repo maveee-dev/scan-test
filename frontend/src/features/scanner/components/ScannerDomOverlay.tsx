@@ -455,7 +455,7 @@ function ScannerDomOverlay({
               disabled={isEnding}
               onClick={handleFinishScan}
             >
-              {isFinishing ? 'Finishing...' : 'Finish Scan'}
+              {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
             </button>
           ) : null}
         </div>
@@ -1636,7 +1636,7 @@ function ScannerDomOverlay({
               disabled={isEnding}
               onClick={handleFinishScan}
             >
-              {isFinishing ? 'Finishing...' : 'Finish Scan'}
+              {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
             </button>
           ) : null}
         </div>

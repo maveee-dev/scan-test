@@ -764,6 +764,9 @@ export interface FinalizedRealityReconstruction {
 }
 
 export interface DenseRealityFusionDebug {
+  readonly liveProcessedFrameCount?: number
+  readonly liveInputDecimatedSampleCount?: number
+  readonly liveMaximumSamplesPerFrame?: number
   readonly reclaimedSampleCount?: number
   readonly capacityRejectedSampleCount?: number
   readonly numericMemoryBytes?: number
@@ -806,6 +809,12 @@ export interface DenseRealityFusionDebug {
 }
 
 export interface FinalizedDenseRealityReconstruction {
+  /** M8.7.1.2 bounded live preview fusion, retained only for stage comparison. */
+  readonly liveLightweightSurfels?: readonly FinalizedRealitySurfel[]
+  /** Deterministic post-scan worker output used by production Final Reality. */
+  readonly canonicalSurfels?: readonly FinalizedRealitySurfel[]
+  readonly retainedMeasurementDiagnostics?: import('./services/retainedRealityMeasurementService').RetainedRealityMeasurementDiagnostics
+  readonly canonicalFusionDiagnostics?: import('./services/canonicalRealityFusionService').CanonicalRealityFusionDiagnostics
   readonly fusedRawSurfels?: readonly FinalizedRealitySurfel[]
   readonly rawMeasurements?: readonly import('./services/realityMeasurementStabilityService').RawRealityMeasurement[]
   readonly measurementDiagnostics?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
