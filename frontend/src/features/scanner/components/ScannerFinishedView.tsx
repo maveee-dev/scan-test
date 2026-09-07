@@ -962,9 +962,9 @@ function ScannerFinishedView({
       </div>
       {analysisError ? <p className="session-error" role="alert">{analysisError}</p> : null}
       <button type="button" className="scan-button scan-button-secondary" onClick={() => setLegacyPreviewOpen(!legacyPreviewOpen)}>
-        {legacyPreviewOpen ? 'Return to M8.7 Quality Preview' : 'Open frozen structural / customization preview'}
+        {legacyPreviewOpen ? 'Return to M8.7.1 Quality Preview' : 'Open frozen structural / customization preview'}
       </button>
-      {!legacyPreviewOpen && denseRealityReconstruction && denseRealityReconstruction.surfels.length > 0 && <RealityQualityPreview source={denseRealityReconstruction} />}
+      {!legacyPreviewOpen && denseRealityReconstruction && (denseRealityReconstruction.fusedRawSurfels?.length ?? denseRealityReconstruction.surfels.length) > 0 && <RealityQualityPreview source={denseRealityReconstruction} />}
 
       {(legacyPreviewOpen || !denseRealityReconstruction?.surfels.length) && (scan.coverage.length > 0 || scan.fusedSurface.length > 0 ? (
     <FinalizedSpatialScanPreview

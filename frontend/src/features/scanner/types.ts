@@ -715,6 +715,12 @@ export interface FinalizedRealitySurfel {
   readonly viewObservationCount?: number
   readonly firstObservedAt?: number
   readonly lastObservedAt?: number
+  readonly positionVarianceMetersSquared?: number
+  readonly depthVarianceMetersSquared?: number
+  readonly normalVariance?: number
+  readonly trackingQuality?: number
+  readonly duplicateSurfaceCandidate?: boolean
+  readonly stabilityClass?: 'high' | 'low' | 'provisional'
   readonly id: number
   readonly position: SpatialPoint
   readonly normal: SpatialPoint
@@ -761,6 +767,10 @@ export interface DenseRealityFusionDebug {
   readonly fusedThisTick?: number
   readonly newGeometryRatio?: number
   readonly multiLayerBucketCount?: number
+  readonly sameFrameDuplicateCount?: number
+  readonly duplicateSurfaceCandidateCount?: number
+  readonly viewDiverseSampleCount?: number
+  readonly singleViewSampleCount?: number
   readonly status: 'idle' | 'active' | 'empty'
   readonly inputSampleCount: number
   readonly inputColorSampleCount: number
@@ -779,6 +789,9 @@ export interface DenseRealityFusionDebug {
 }
 
 export interface FinalizedDenseRealityReconstruction {
+  readonly fusedRawSurfels?: readonly FinalizedRealitySurfel[]
+  readonly rawMeasurements?: readonly import('./services/realityMeasurementStabilityService').RawRealityMeasurement[]
+  readonly measurementDiagnostics?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
   readonly appearanceKeyframes?: FinalizedRealityRgbKeyframes
   readonly qualityTelemetry?: import('./services/realityQualityPolicy').RealityQualityTelemetry
   readonly depthSource?: { width: number | null; height: number | null; scale: number | null }
@@ -840,6 +853,7 @@ export interface FinalizedScannerCapture {
 }
 
 export interface ViewerPoseDebug {
+  measurement?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
   quality?: import('./services/realityQualityPolicy').RealityQualityTelemetry
   sessionActive: boolean
   glContextStatus: XRPresentationStatus

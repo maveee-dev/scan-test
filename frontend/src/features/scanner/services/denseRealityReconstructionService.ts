@@ -13,6 +13,12 @@ import type {
 } from '../types'
 import type { PersistentLiveSurfaceService } from './persistentLiveSurfaceService'
 import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
+import type { RealityFrameConsistency } from './realityMeasurementStabilityService'
+
+export interface DenseRealityMeasurementContext {
+  readonly frameSequence: number
+  readonly trackingQuality: number
+}
 
 export const DENSE_REALITY_CONFIG = Object.freeze({
   cellSizeMeters: 0.025,
@@ -347,6 +353,14 @@ export class DenseRealityReconstructionService {
 
   private readonly geometryObservationCounts = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly viewMasks = new Uint16Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly lastFrameSequences = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly trackingQualitySums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly positionResidualSquaredSums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly depthResidualSquaredSums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly normalResidualSquaredSums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly duplicateSurfaceCandidates = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly stable = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
+  private colorObservationBySource = new Int32Array(0)
 
   private readonly lastObservedAt = new Float64Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly createdAt = new Float64Array(DENSE_REALITY_CONFIG.maxSamples)
@@ -377,6 +391,10 @@ export class DenseRealityReconstructionService {
   private reclaimCursor = 0
   private reclaimedSamples = 0
   private capacityRejected = 0
+  private sameFrameDuplicateCount = 0
+  private duplicateSurfaceCandidateCount = 0
+  private viewDiverseSampleCount = 0
+  private singleViewSampleCount = 0
 
   private totalCreatedSampleCount = 0
 
@@ -393,6 +411,7 @@ export class DenseRealityReconstructionService {
   private cameraCapturesUsed = 0
 
   private diagnostics = createInitialDiagnostics()
+  private fallbackFrameSequence = 0
 
   constructor() {
     this.nextInCell.fill(-1)
@@ -404,6 +423,7 @@ export class DenseRealityReconstructionService {
     persistentSurfaceService: PersistentLiveSurfaceService,
     cameraPosition: ViewerPosition | null,
     timestamp: number,
+    context?: DenseRealityMeasurementContext,
   ): void {
     const startedAt = getTimestamp()
     this.totalInputSampleCount += denseFrame.validPointCount
@@ -413,11 +433,15 @@ export class DenseRealityReconstructionService {
       this.cameraCapturesUsed += 1
     }
 
+    const frameSequence = context?.frameSequence ?? ++this.fallbackFrameSequence
+    const trackingQuality = clamp(context?.trackingQuality ?? 1, 0, 1)
     let createdCount = 0
     let fusedCount = 0
     let rejectedCount = 0
-    for (let observationIndex = 0; observationIndex < (registration?.coloredSampleCount ?? denseFrame.valid.length); observationIndex += 1) {
-      const sourceIndex = registration ? registration.sourceSampleIndices[observationIndex] : observationIndex
+    if(this.colorObservationBySource.length<denseFrame.valid.length)this.colorObservationBySource=new Int32Array(denseFrame.valid.length)
+    this.colorObservationBySource.fill(-1,0,denseFrame.valid.length)
+    if(registration)for(let observationIndex=0;observationIndex<registration.coloredSampleCount;observationIndex++)this.colorObservationBySource[registration.sourceSampleIndices[observationIndex]]=observationIndex
+    for (let sourceIndex = 0; sourceIndex < denseFrame.valid.length; sourceIndex += 1) {
       if (
         sourceIndex < 0 ||
         sourceIndex >= denseFrame.valid.length ||
@@ -441,10 +465,10 @@ export class DenseRealityReconstructionService {
         continue
       }
 
-      const colorOffset = observationIndex * 3
-      const red = registration ? srgbToLinear(registration.srgbColors[colorOffset]) : 0
-      const green = registration ? srgbToLinear(registration.srgbColors[colorOffset + 1]) : 0
-      const blue = registration ? srgbToLinear(registration.srgbColors[colorOffset + 2]) : 0
+      const colorObservation=this.colorObservationBySource[sourceIndex],colorOffset=colorObservation*3,hasColor=registration!==null&&colorObservation>=0
+      const red = hasColor ? srgbToLinear(registration.srgbColors[colorOffset]) : 0
+      const green = hasColor ? srgbToLinear(registration.srgbColors[colorOffset + 1]) : 0
+      const blue = hasColor ? srgbToLinear(registration.srgbColors[colorOffset + 2]) : 0
       if (!Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)) {
         rejectedCount += 1
         continue
@@ -453,7 +477,7 @@ export class DenseRealityReconstructionService {
       const matchIndex = this.findCompatibleSample(this.samplePoint, this.sampleNormal)
       if (matchIndex >= 0) {
         this.recordView(matchIndex, cameraPosition)
-        if (this.fuseSample(matchIndex, this.bestMatchDistance, red, green, blue, cameraPosition, timestamp, registration !== null)) {
+        if (this.fuseSample(matchIndex, this.bestMatchDistance, red, green, blue, cameraPosition, timestamp, hasColor, frameSequence, trackingQuality)) {
           fusedCount += 1
         } else {
           rejectedCount += 1
@@ -472,12 +496,12 @@ export class DenseRealityReconstructionService {
         }
         if (reclaimed < 0) { this.capacityRejected++; rejectedCount++; continue }
         this.unlinkCell(reclaimed)
-        this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, reclaimed, registration !== null)
+        this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, reclaimed, hasColor, frameSequence, trackingQuality)
         this.recordView(reclaimed, cameraPosition)
         this.reclaimedSamples++; createdCount++; continue
       }
 
-      this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, undefined, registration !== null)
+      this.createSample(this.samplePoint, this.sampleNormal, red, green, blue, timestamp, undefined, hasColor, frameSequence, trackingQuality)
       this.recordView(this.activeSampleCount - 1, cameraPosition)
       createdCount += 1
     }
@@ -504,15 +528,35 @@ export class DenseRealityReconstructionService {
       cameraCapturesUsed: this.cameraCapturesUsed,
       reclaimedSampleCount: this.reclaimedSamples,
       capacityRejectedSampleCount: this.capacityRejected,
-      numericMemoryBytes: DENSE_REALITY_CONFIG.maxSamples * 71,
+      numericMemoryBytes: DENSE_REALITY_CONFIG.maxSamples * 93 + this.colorObservationBySource.byteLength,
       createdThisTick: createdCount,
       fusedThisTick: fusedCount,
       newGeometryRatio: createdCount / Math.max(1, createdCount + fusedCount),
+      sameFrameDuplicateCount: this.sameFrameDuplicateCount,
+      duplicateSurfaceCandidateCount: this.duplicateSurfaceCandidateCount,
+      viewDiverseSampleCount: this.viewDiverseSampleCount,
+      singleViewSampleCount: this.singleViewSampleCount,
     }
   }
 
   public getDiagnostics(): DenseRealityFusionDebug {
     return { ...this.diagnostics }
+  }
+
+  /** Bounded preflight against established samples; it never mutates fusion. */
+  public assessFrameConsistency(frame: DenseSpatialPointFrame, normals: Float32Array, normalValid: Uint8Array): RealityFrameConsistency {
+    if (this.stableSampleCount < 32) return { consistentRatio: 0, duplicateRatio: 0, unknownRatio: 1, establishedSamples: this.stableSampleCount }
+    const stride = Math.max(1, Math.ceil(frame.validPointCount / 256))
+    let ordinal = 0, considered = 0, consistent = 0, duplicate = 0
+    for (let sourceIndex=0;sourceIndex<frame.valid.length;sourceIndex++) {
+      if (!frame.valid[sourceIndex] || !normalValid[sourceIndex] || ordinal++ % stride) continue
+      const offset=sourceIndex*3
+      this.samplePoint.x=frame.points[offset];this.samplePoint.y=frame.points[offset+1];this.samplePoint.z=frame.points[offset+2]
+      this.sampleNormal.x=normals[offset];this.sampleNormal.y=normals[offset+1];this.sampleNormal.z=normals[offset+2]
+      const state=this.classifyEstablishedRelation(this.samplePoint,this.sampleNormal);considered++
+      if(state===1)consistent++;else if(state===2)duplicate++
+    }
+    return { consistentRatio: consistent/Math.max(1,considered), duplicateRatio: duplicate/Math.max(1,considered), unknownRatio: (considered-consistent-duplicate)/Math.max(1,considered), establishedSamples:this.stableSampleCount }
   }
 
   /** Bounded presentation copy; never exposes writable fusion arrays. */
@@ -538,6 +582,7 @@ export class DenseRealityReconstructionService {
     }
 
     const finalizedSurfels: FinalizedRealitySurfel[] = []
+    const fusedRawSurfels: FinalizedRealitySurfel[] = []
     const colorSamples = [] as {
       position: Readonly<SpatialPoint>
       colorRgb: RealityRgbColor
@@ -548,12 +593,7 @@ export class DenseRealityReconstructionService {
     let colorObservationTotal = 0
     let colorConfidenceTotal = 0
     for (let index = 0; index < this.activeSampleCount; index += 1) {
-      if (
-        this.active[index] !== 1 ||
-        this.geometryObservationCounts[index] < DENSE_REALITY_CONFIG.minimumStableObservations
-      ) {
-        continue
-      }
+      if (this.active[index] !== 1) continue
 
       const positionOffset = index * 3
       const colorOffset = index * 3
@@ -568,8 +608,8 @@ export class DenseRealityReconstructionService {
       const colorConfidence = hasColor
         ? clamp(this.colorWeights[index] / MAX_COLOR_WEIGHT, 0, 1)
         : 0
-      colorObservationTotal += this.colorObservationCounts[index]
-      colorConfidenceTotal += colorConfidence
+      const count=this.geometryObservationCounts[index],denominator=Math.max(1,count-1)
+      const viewCount=this.viewMasks[index].toString(2).replaceAll('0','').length
       const finalizedSurfel = Object.freeze({
         id: index,
         position: Object.freeze({
@@ -585,15 +625,25 @@ export class DenseRealityReconstructionService {
         radius: DENSE_REALITY_CONFIG.sampleRadiusMeters,
         colorRgb,
         colorSpace: 'srgb' as const,
-        geometryConfidence: clamp(this.geometryObservationCounts[index] / 4, 0, 1),
-        geometryObservationCount: this.geometryObservationCounts[index],
-        viewObservationCount: this.viewMasks[index].toString(2).replaceAll('0', '').length,
+        geometryConfidence: clamp((count/5)*.45+(Math.min(2,viewCount)/2)*.25+(this.trackingQualitySums[index]/Math.max(1,count))*.2+(Math.min(2000,this.lastObservedAt[index]-this.createdAt[index])/2000)*.1,0,1),
+        geometryObservationCount: count,
+        viewObservationCount: viewCount,
         firstObservedAt: this.createdAt[index],
         lastObservedAt: this.lastObservedAt[index],
+        positionVarianceMetersSquared:this.positionResidualSquaredSums[index]/denominator,
+        depthVarianceMetersSquared:this.depthResidualSquaredSums[index]/denominator,
+        normalVariance:this.normalResidualSquaredSums[index]/denominator,
+        trackingQuality:this.trackingQualitySums[index]/Math.max(1,count),
+        duplicateSurfaceCandidate:this.duplicateSurfaceCandidates[index]===1,
+        stabilityClass:this.stable[index]?'high':count>=2?'low':'provisional',
         colorConfidence,
         colorObservationCount: this.colorObservationCounts[index],
       })
+      fusedRawSurfels.push(finalizedSurfel)
+      if(count<DENSE_REALITY_CONFIG.minimumStableObservations)continue
       finalizedSurfels.push(finalizedSurfel)
+      colorObservationTotal += this.colorObservationCounts[index]
+      colorConfidenceTotal += colorConfidence
       if (colorRgb && colorSamples.length < 8) {
         colorSamples.push(Object.freeze({
           position: finalizedSurfel.position,
@@ -630,6 +680,7 @@ export class DenseRealityReconstructionService {
       referenceSpaceType,
       status,
       surfels: frozenSurfels,
+      fusedRawSurfels:Object.freeze(fusedRawSurfels),
       bounds: calculateBounds(frozenSurfels),
       captureSummary,
       fusionDiagnostics: Object.freeze({ ...this.diagnostics, multiLayerBucketCount: [...this.cellHeads.values()].filter((index) => this.nextInCell[index] >= 0).length }),
@@ -646,6 +697,13 @@ export class DenseRealityReconstructionService {
     this.colorObservationCounts.fill(0)
     this.geometryObservationCounts.fill(0)
     this.viewMasks.fill(0)
+    this.lastFrameSequences.fill(0)
+    this.trackingQualitySums.fill(0)
+    this.positionResidualSquaredSums.fill(0)
+    this.depthResidualSquaredSums.fill(0)
+    this.normalResidualSquaredSums.fill(0)
+    this.duplicateSurfaceCandidates.fill(0)
+    this.stable.fill(0)
     this.lastObservedAt.fill(0)
     this.createdAt.fill(0)
     this.active.fill(0)
@@ -655,6 +713,8 @@ export class DenseRealityReconstructionService {
     this.stableSampleCount = 0
     this.capacityReached = false
     this.reclaimCursor = 0; this.reclaimedSamples = 0; this.capacityRejected = 0
+    this.sameFrameDuplicateCount = 0
+    this.duplicateSurfaceCandidateCount = 0;this.viewDiverseSampleCount=0;this.singleViewSampleCount=0
     this.totalCreatedSampleCount = 0
     this.totalFusedSampleCount = 0
     this.totalRejectedSampleCount = 0
@@ -663,6 +723,8 @@ export class DenseRealityReconstructionService {
     this.lastCameraSequence = null
     this.cameraCapturesUsed = 0
     this.diagnostics = createInitialDiagnostics()
+    this.fallbackFrameSequence = 0
+    this.colorObservationBySource = new Int32Array(0)
   }
 
   public dispose(): void {
@@ -730,6 +792,8 @@ export class DenseRealityReconstructionService {
     timestamp: number,
     reusedIndex?: number,
     hasColor = true,
+    frameSequence = 0,
+    trackingQuality = 1,
   ): void {
     const index = reusedIndex ?? this.activeSampleCount
     const offset = index * 3
@@ -744,7 +808,16 @@ export class DenseRealityReconstructionService {
     this.linearColors[offset + 2] = blue
     this.colorWeights[index] = hasColor ? 1 : 0
     this.colorObservationCounts[index] = hasColor ? 1 : 0
+    if(reusedIndex!==undefined){if(this.duplicateSurfaceCandidates[index])this.duplicateSurfaceCandidateCount--;const views=this.viewMasks[index].toString(2).replaceAll('0','').length;if(views===1)this.singleViewSampleCount--;else if(views>=2)this.viewDiverseSampleCount--}
     this.viewMasks[index] = 0
+    this.lastFrameSequences[index] = frameSequence
+    this.trackingQualitySums[index] = trackingQuality
+    this.positionResidualSquaredSums[index] = 0
+    this.depthResidualSquaredSums[index] = 0
+    this.normalResidualSquaredSums[index] = 0
+    this.duplicateSurfaceCandidates[index] = this.classifyEstablishedRelation(point,normal)===2?1:0
+    if(this.duplicateSurfaceCandidates[index])this.duplicateSurfaceCandidateCount++
+    this.stable[index] = 0
     this.geometryObservationCounts[index] = 1
     this.lastObservedAt[index] = timestamp
     this.createdAt[index] = timestamp
@@ -774,7 +847,11 @@ export class DenseRealityReconstructionService {
     const offset = index * 3, x = camera.x - this.positions[offset], y = camera.y - this.positions[offset + 1], z = camera.z - this.positions[offset + 2]
     const azimuth = Math.min(7, Math.floor((Math.atan2(x, z) + Math.PI) / (Math.PI * 2) * 8))
     const elevation = y > Math.hypot(x, z) * .35 ? 1 : 0
+    const before=this.viewMasks[index].toString(2).replaceAll('0','').length
     this.viewMasks[index] |= 1 << (azimuth + elevation * 8)
+    const after=this.viewMasks[index].toString(2).replaceAll('0','').length
+    if(before===0&&after===1)this.singleViewSampleCount++
+    else if(before===1&&after===2){this.singleViewSampleCount--;this.viewDiverseSampleCount++}
   }
 
   private fuseSample(
@@ -786,11 +863,17 @@ export class DenseRealityReconstructionService {
     cameraPosition: ViewerPosition | null,
     timestamp: number,
     hasColor = true,
+    frameSequence = 0,
+    trackingQuality = 1,
   ): boolean {
     const index = matchIndex
     const offset = index * 3
     const priorWeight = this.colorWeights[index]
     const priorCount = this.colorObservationCounts[index]
+    // Several depth pixels can land in one 2.5 cm surfel during one XR tick.
+    // They may refine neither stability nor variance more than once.
+    if (this.lastFrameSequences[index] === frameSequence) { this.sameFrameDuplicateCount++; return true }
+    this.lastFrameSequences[index] = frameSequence
     let observationWeight = clamp(
       1 - matchDistance / DENSE_REALITY_CONFIG.maxMergeDistanceMeters,
       0.4,
@@ -833,6 +916,13 @@ export class DenseRealityReconstructionService {
     // Fusion accepts normal orientation up to sign; align before averaging.
     const sign = this.sampleNormal.x * this.normals[offset] + this.sampleNormal.y * this.normals[offset + 1] + this.sampleNormal.z * this.normals[offset + 2] < 0 ? -1 : 1
     this.sampleNormal.x *= sign; this.sampleNormal.y *= sign; this.sampleNormal.z *= sign
+    const dx=this.samplePoint.x-this.positions[offset],dy=this.samplePoint.y-this.positions[offset+1],dz=this.samplePoint.z-this.positions[offset+2]
+    const normalDot=clamp(this.sampleNormal.x*this.normals[offset]+this.sampleNormal.y*this.normals[offset+1]+this.sampleNormal.z*this.normals[offset+2],-1,1)
+    const depthResidual=dx*this.normals[offset]+dy*this.normals[offset+1]+dz*this.normals[offset+2]
+    this.positionResidualSquaredSums[index]+=matchDistance*matchDistance
+    this.depthResidualSquaredSums[index]+=depthResidual*depthResidual
+    this.normalResidualSquaredSums[index]+=(1-normalDot)*(1-normalDot)
+    this.trackingQualitySums[index]+=trackingQuality
     this.unlinkCell(index)
     const geometryBlend = 1 / Math.min(16, this.geometryObservationCounts[index] + 1)
     this.positions[offset] += (this.samplePoint.x - this.positions[offset]) * geometryBlend
@@ -860,15 +950,36 @@ export class DenseRealityReconstructionService {
       this.colorWeights[index] = nextWeight
       this.colorObservationCounts[index] += 1
     }
-    if (
-      this.geometryObservationCounts[index] < DENSE_REALITY_CONFIG.minimumStableObservations &&
-      this.geometryObservationCounts[index] + 1 >= DENSE_REALITY_CONFIG.minimumStableObservations
-    ) {
-      this.stableSampleCount += 1
-    }
     this.geometryObservationCounts[index] += 1
     this.lastObservedAt[index] = timestamp
+    const wasStable=this.stable[index]===1,nextStable=this.isStableSample(index)
+    if(!wasStable&&nextStable){this.stable[index]=1;this.stableSampleCount++}
+    else if(wasStable&&!nextStable){this.stable[index]=0;this.stableSampleCount--}
     return true
+  }
+
+  private isStableSample(index:number):boolean {
+    const count=this.geometryObservationCounts[index],denominator=Math.max(1,count-1)
+    const span=this.lastObservedAt[index]-this.createdAt[index],views=this.viewMasks[index].toString(2).replaceAll('0','').length
+    return count>=3&&span>=250&&this.trackingQualitySums[index]/count>=.55&&
+      Math.sqrt(this.positionResidualSquaredSums[index]/denominator)<=.018&&
+      Math.sqrt(this.depthResidualSquaredSums[index]/denominator)<=.012&&
+      Math.sqrt(this.normalResidualSquaredSums[index]/denominator)<=.18&&
+      (this.duplicateSurfaceCandidates[index]===0||(views>=2&&span>=600))
+  }
+
+  /** 0 unknown, 1 compatible existing surface, 2 suspicious parallel offset. */
+  private classifyEstablishedRelation(point:SpatialPoint,normal:SpatialPoint):0|1|2 {
+    const cx=getCellCoordinate(point.x),cy=getCellCoordinate(point.y),cz=getCellCoordinate(point.z)
+    let result:0|1|2=0,candidates=0
+    for(let x=-4;x<=4;x++)for(let y=-4;y<=4;y++)for(let z=-4;z<=4;z++){
+      let index=this.cellHeads.get(getCellKey(cx+x,cy+y,cz+z))??-1
+      while(index>=0&&candidates++<64){if(this.active[index]&&this.stable[index]){const o=index*3,dx=point.x-this.positions[o],dy=point.y-this.positions[o+1],dz=point.z-this.positions[o+2],distance=Math.hypot(dx,dy,dz),dot=Math.abs(normal.x*this.normals[o]+normal.y*this.normals[o+1]+normal.z*this.normals[o+2]),residual=Math.abs(dx*this.normals[o]+dy*this.normals[o+1]+dz*this.normals[o+2])
+        if(distance<=.035&&dot>=.8)return 1
+        if(distance<=.12&&residual>=.028&&dot>=.94)result=2
+      }index=this.nextInCell[index]}
+    }
+    return result
   }
 
 }

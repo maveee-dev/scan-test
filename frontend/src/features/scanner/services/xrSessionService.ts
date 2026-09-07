@@ -26,6 +26,7 @@ import { DenseSurfaceMaskService } from './denseSurfaceMaskService'
 import { PersistentLiveSurfaceService } from './persistentLiveSurfaceService'
 import { RealityQualityPolicy, type ScanTrajectoryPoint } from './realityQualityPolicy'
 import { LiveRealityMap } from './liveRealityMap'
+import { RealityMeasurementStabilityService } from './realityMeasurementStabilityService'
 import { FinalizedSpatialScanService } from './finalizedSpatialScanService'
 import {
   LivePerformanceTracker,
@@ -165,6 +166,7 @@ export class XRSessionService {
   private readonly realityRgbKeyframeService = new RealityRgbKeyframeService()
   private readonly appearanceKeyframeService = new RealityRgbKeyframeService(true)
   private readonly qualityPolicy = new RealityQualityPolicy()
+  private readonly measurementStabilityService = new RealityMeasurementStabilityService()
   public readonly liveMap = new LiveRealityMap()
 
   private referenceSpace: XRReferenceSpace | null = null
@@ -378,6 +380,8 @@ export class XRSessionService {
         qualityTelemetry: this.qualityPolicy.snapshot(),
         depthSource: { width: depth.width, height: depth.height, scale: depth.rawValueToMeters },
         liveRgbDimensions: { width: liveRgb.copyWidth, height: liveRgb.copyHeight },
+        rawMeasurements: Object.freeze(this.measurementStabilityService.createRawSnapshot()),
+        measurementDiagnostics: Object.freeze(this.measurementStabilityService.getDiagnostics()),
       }) : null
 
       await this.endActiveSession(session)
@@ -607,11 +611,26 @@ export class XRSessionService {
       if (physicalPose) this.qualityPolicy.observePose(physicalPose)
       if (!primaryView) {
         this.latestSpatialObservations = []
+        if(time-this.lastDenseMaskUpdatedAt>=DENSE_MASK_UPDATE_INTERVAL_MS) {
+          this.measurementStabilityService.recordTrackingMissing()
+          this.lastDenseMaskUpdatedAt = time
+        }
+      }
+      const denseMeasurementDue = Boolean(
+        primaryView && physicalPose &&
+        time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS,
+      )
+      const motionAllowsMeasurement = Boolean(
+        denseMeasurementDue && physicalPose && this.qualityPolicy.shouldProcess(physicalPose),
+      )
+      if (denseMeasurementDue && !motionAllowsMeasurement) {
+        // A skipped tick is atomic: depth, pose, RGB, phase and sequence are all
+        // omitted. No part of an older packet may be reused on the next tick.
+        this.measurementStabilityService.recordSkippedTogether()
+        this.lastDenseMaskUpdatedAt = time
       }
       if (
-        primaryView &&
-        time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS &&
-        physicalPose && this.qualityPolicy.shouldProcess(physicalPose)
+        primaryView && physicalPose && motionAllowsMeasurement
       ) {
         const depthAcquisitionStartedAt = getPerformanceTimestamp()
         const depthObservation = this.depthService.inspectFrame(frame, primaryView)
@@ -645,7 +664,7 @@ export class XRSessionService {
         )
         if (denseDepthObservation) {
           const densePointStartedAt = getPerformanceTimestamp()
-          const densePointFrame = this.spatialPointService.processDenseFrame(
+          const reconstructedPointFrame = this.spatialPointService.processDenseFrame(
             denseDepthObservation,
           )
           const densePointDurationMs = Math.max(
@@ -657,6 +676,16 @@ export class XRSessionService {
             0,
             getPerformanceTimestamp() - denseDepthStartedAt,
           )
+
+          const depthDebug=this.depthService.getDiagnostics()
+          const packet=this.measurementStabilityService.createPacket({sequence:this.xrFrameCount,timestamp:time,
+            referenceSpaceType:this.referenceSpaceType??'local',samplingPhase:sampling.phase,qualityTier:this.qualityPolicy.snapshot().tier,
+            pose:physicalPose,view:primaryView,depth:denseDepthObservation,spatial:reconstructedPointFrame,
+            depthWidth:depthDebug.width,depthHeight:depthDebug.height,depthScale:depthDebug.rawValueToMeters})
+          const consistency=this.denseRealityReconstructionService.assessFrameConsistency(packet.denseFrame,packet.normals,packet.normalValid)
+          const acceptance=this.measurementStabilityService.evaluate(packet,consistency)
+          const densePointFrame=packet.denseFrame
+          if (acceptance.accepted) {
 
           this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
           // Separate sparse appearance copies on the non-fusion phase. Never
@@ -789,6 +818,7 @@ export class XRSessionService {
               this.persistentLiveSurfaceService,
               this.position,
               time,
+              {frameSequence:packet.sequence,trackingQuality:acceptance.trackingQuality},
             )
           }
 
@@ -824,6 +854,14 @@ export class XRSessionService {
           this.lastDenseMaskUpdatedAt = time
           this.qualityPolicy.recordTick(getPerformanceTimestamp() - depthAcquisitionStartedAt,
             sampling.columns * sampling.rows, densePointFrame.validPointCount, sampling)
+          } else {
+            this.latestSpatialObservations=[]
+            this.spatialCoverageRenderService.clearCandidateSurfaceMesh()
+            this.spatialCoverageRenderService.clearDenseMesh()
+            if(this.rgbDepthDebugVisible)this.spatialCoverageRenderService.clearRgbDepthMesh()
+            this.lastDenseMaskUpdatedAt=time
+            this.qualityPolicy.recordTick(getPerformanceTimestamp()-depthAcquisitionStartedAt,sampling.columns*sampling.rows,densePointFrame.validPointCount,sampling)
+          }
         } else {
           const candidateVisualizationStartedAt = getPerformanceTimestamp()
           if (this.rawCurrentDepthVisible) {
@@ -939,6 +977,7 @@ export class XRSessionService {
       realityColor: this.realitySurfelColorFusionService.getDiagnostics(),
       denseReality: this.denseRealityReconstructionService.getDiagnostics(),
       quality: this.qualityPolicy.snapshot(),
+      measurement: this.measurementStabilityService.getDiagnostics(),
     }
   }
 
@@ -987,6 +1026,7 @@ export class XRSessionService {
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
     this.qualityPolicy.reset()
+    this.measurementStabilityService.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -1083,6 +1123,7 @@ export class XRSessionService {
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
     this.qualityPolicy.reset()
+    this.measurementStabilityService.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

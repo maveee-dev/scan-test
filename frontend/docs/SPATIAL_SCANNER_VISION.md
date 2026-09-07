@@ -1,9 +1,9 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7**. Reconstruction and walkable
-inspection are the active milestone. M8.6.7.2 customization is frozen pending
-physical reconstruction validation; see the M8.7 section below and
-[implementation report](M8_7_IMPLEMENTATION_REPORT.md).
+Current implementation: **Scanner Build M8.7.1**. Production scan stability and
+clean measured Reality are the active milestone. M8.6.7.2 customization remains
+frozen pending physical reconstruction validation; see the M8.7/M8.7.1 sections
+below and the [M8.7.1 implementation report](M8_7_1_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2290,3 +2290,123 @@ are disposed. No upload, backend persistence, semantic AI, hole inpainting or
 M7 visible paint surface is introduced. Stop customization development here
 and physically evaluate detail, recess depth, walking, live map, joystick,
 follow/free-look and unknown-space preservation before any further milestone.
+
+### M8.7.1 — Production Scan Stability and Clean Reality
+
+M8.7.1 prioritizes correctness, repeatability and cleanliness ahead of coverage
+or detail. The cell size remains 2.5 cm, capacity remains 60,000, and M8.6.7.2
+customization is unchanged. Missing measured geometry is preferable to a
+confident-looking displaced wall or ceiling.
+
+```text
+MEASURE depth + pose from one XRFrame
+              |
+COPY IMMUTABLE FRAME PACKET
+              |
+VALIDATE pose motion + tracking recovery + depth sanity + local world agreement
+              |
+WORLD FUSE distinct accepted frames
+              |
+CONFIDENCE + temporal span + viewpoint diversity + variance
+              |
+FILTER unsupported points / weak duplicate sheets / floating components
+              |
+EDGE-PRESERVING bounded display refinement
+              |
+SAFE measured-vertex triangulation
+              |
+CLEAN FINAL REALITY
+```
+
+#### Frame ownership and acceptance
+
+Depth and pose were audited as synchronous in the existing XR animation-frame
+callback. `XRDepthService` already rejects a different XRFrame/XRView identity;
+no demonstrated N/N+1 stale-pose read was found. M8.7.1 nevertheless makes the
+contract explicit: every candidate tick copies timestamp/sequence, reference
+space, physical pose, view/inverse-view/projection matrices, depth transforms
+and metadata, phase/tier, world points and depths into one application-owned
+packet. Fusion never consults mutable “latest XR state.” A skipped sampling tick
+skips depth, RGB, pose, phase and sequence bookkeeping together.
+
+Before fusion, bounded checks reject implausible pose discontinuities, excessive
+motion, unusable depth distributions and frames dominated by a suspicious
+near-parallel offset against established Reality. A relocalization-like jump
+enters quarantine; several locally stable frames plus return to the accepted
+map or established-world agreement are required before fusion resumes. Rejected
+raw measurements remain available in diagnostic mode but never update coverage,
+color, persistent surfaces or Dense Reality. Live guidance translates the gate
+state into Good, Move slower, Tracking unstable, Scan this area again, Move
+around object and More coverage needed.
+
+#### Fusion stability and duplicate sheets
+
+The concrete M8.7 stability flaw was observation inflation within one depth
+frame: several phase-grid pixels could merge into the same 2.5 cm surfel and
+increment its geometry observation count repeatedly. One bad sheet could thus
+look confirmed without independent time support. M8.7.1 records the last XR
+frame sequence per surfel and permits at most one geometry-confidence update per
+surfel per frame.
+
+High stability now combines at least three distinct frames, observation time
+span, tracking-quality support, position/depth/normal variance and, for a
+suspicious parallel offset, multi-view support. Angular bins distinguish a
+different camera direction from repeated ticks at one pose. A bounded preflight
+compares new measurements to established samples as compatible existing
+surface, suspicious parallel duplicate, or unknown. Unknown is not rejection:
+new rooms, recess backs and side faces can accumulate normally. A shallow
+parallel sheet without boundary/view/time support remains provisional; a true
+recess or real second surface survives when it has depth separation and
+repeated or viewpoint-diverse support.
+
+The spatial hash continues to use floor quantization for positive and negative
+coordinates, explicit bucket unlink/relink when a fused position moves, bounded
+linked entries and multiple incompatible layers. RGB remains independent:
+missing/rejected color cannot remove valid geometry, and valid color cannot make
+questionable geometry stable.
+
+#### Immutable stages and final cleanup
+
+Final diagnostics preserve separate products:
+
+1. Raw Measured Reality — accepted and rejected packet samples.
+2. Fused Raw Reality — every active world-space fused sample.
+3. Confidence Filtered Reality — supported observed samples only.
+4. Refined Geometry — local bounded display positions/normals.
+5. Triangulated Reality — safe measured-vertex connectivity.
+6. Final M8.7.1 Reality — filtered/refined geometry with captured appearance.
+
+Post-scan component analysis uses conservative local distance, normal and
+point-to-plane adjacency. Tiny one-frame islands, unstable detached fragments
+and weak duplicate-sheet components are excluded only from the derived final
+display. Repeated/view-diverse small objects, curtains and recess faces remain.
+No “primary room only” deletion, structural plane, rectangle, new vertex or
+large-hole fill is introduced. Component sample count, estimated area, bounds,
+stable/view-diverse ratios, tracking support, duplicate ratio and decision stay
+available for diagnosis.
+
+Display refinement retains its 12 mm layer envelope and now records mean,
+p90, p95 and maximum displacement. If a local estimate asks to move a sample
+more than 4 mm, the raw position is retained instead of clamping it onto a new
+surface. Triangulation reports and rejects excessive distance, normal mismatch,
+depth-layer disagreement and unsupported neighborhoods; accepted p95/maximum
+edge length is reported. Hole completion remains absent, so doorways and recess
+openings stay unknown/open.
+
+#### Repeatability, quality and privacy
+
+Per-scan comparison metrics include X/Y/Z extent, ceiling-height proxy, major
+component count, stable/low-confidence ratios, floating-component count and
+largest unsupported component. Frame diagnostics include acceptance/rejection
+reasons, largest pose change, relocalization-like events, depth validity/outlier
+statistics, same-frame duplicate observations, duplicate-surface candidates,
+view diversity and capacity. These metrics make Scan A/B/C comparable without
+pretending desktop tests establish physical repeatability.
+
+The finish view warns rather than blocks when stability or component quality is
+clearly low. All raw packets, filtered stages and diagnostics remain local and
+scan-session-only. New Scan/Discard clears them. No semantic AI, cloud upload,
+M7 projection, quality-setting increase, customization change or invented
+geometry is part of M8.7.1. Physical three-scan POCO F5 repeatability, ceiling,
+stationary, walking, recess and fast-motion tests remain mandatory before this
+milestone can be called physically accepted.

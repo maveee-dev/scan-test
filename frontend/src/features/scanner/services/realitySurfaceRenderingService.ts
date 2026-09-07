@@ -37,6 +37,12 @@ export interface RealitySurfaceRenderStats {
   readonly p90NearestNeighborSpacingMeters: number | null
   readonly estimatedSmallGapRegions: number
   readonly estimatedLargeUnsupportedGaps: number
+  readonly trianglesRejectedByDistance: number
+  readonly trianglesRejectedByNormal: number
+  readonly trianglesRejectedByDepthLayer: number
+  readonly trianglesRejectedByUnsupportedNeighborhood: number
+  readonly largestAcceptedTriangleEdgeMeters: number
+  readonly p95AcceptedTriangleEdgeMeters: number
   readonly memoryBytes: number
   readonly renderColorStatistics: RealityColorStatistics
 }
@@ -182,6 +188,12 @@ interface TriangleGeometryResult {
   readonly coveredSurfelIndices: Uint8Array
   readonly coveredSurfelCount: number
   readonly topology: RealityTriangleTopology
+  readonly rejectedDistance: number
+  readonly rejectedNormal: number
+  readonly rejectedLayer: number
+  readonly rejectedUnsupported: number
+  readonly largestAcceptedEdge: number
+  readonly p95AcceptedEdge: number
 }
 
 function getTimestamp(): number {
@@ -620,6 +632,8 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   const tangent = new THREE.Vector3(), bitangent = new THREE.Vector3()
   let triangleCount = 0
   let coveredSurfelCount = 0
+  let rejectedDistance=0,rejectedNormal=0,rejectedLayer=0,rejectedUnsupported=0
+  const acceptedEdges:number[]=[]
 
   for (let centerIndex = 0; centerIndex < surfels.length; centerIndex += 1) {
     const center = surfels[centerIndex]
@@ -652,9 +666,9 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
         const { u: au, v: av } = firstNeighbor, { u: bu, v: bv } = secondNeighbor
         const determinant = au * bv - av * bu
         const a2 = au * au + av * av, b2 = bu * bu + bv * bv
-        if (determinant * determinant <= a2 * b2 * MIN_TRIANGLE_SINE_SQUARED || a2 * b2 <= 1e-16) continue
+        if (determinant * determinant <= a2 * b2 * MIN_TRIANGLE_SINE_SQUARED || a2 * b2 <= 1e-16) { rejectedUnsupported++; continue }
         // Do not form a fan across an unsupported half-plane / large angular hole.
-        if (au * bu + av * bv < -0.5 * Math.sqrt(a2 * b2)) continue
+        if (au * bu + av * bv < -0.5 * Math.sqrt(a2 * b2)) { rejectedUnsupported++; continue }
         const circleU = (a2 * bv - b2 * av) / (2 * determinant)
         const circleV = (au * b2 - bu * a2) / (2 * determinant)
         const radiusSquared = circleU * circleU + circleV * circleV
@@ -685,11 +699,16 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
             if (occupied) break
           }
         }
-        if (occupied) continue
+        if (occupied) { rejectedUnsupported++; continue }
         const first = surfels[firstNeighbor.index]
         const second = surfels[secondNeighbor.index]
         const pairRelation = areLocallyCompatible(first, second)
         if (!pairRelation.compatible || pairRelation.distanceSquared > edgeLimit ** 2) {
+          if(pairRelation.distanceSquared>edgeLimit**2)rejectedDistance++
+          else {
+            const normalDot=first.normal.x*second.normal.x+first.normal.y*second.normal.y+first.normal.z*second.normal.z
+            if(normalDot<MIN_NORMAL_DOT)rejectedNormal++;else rejectedLayer++
+          }
           continue
         }
         edgeA.set(
@@ -730,6 +749,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
           vertexSurfelIds.push(surfel.id)
         }
         triangleCount += 1
+        acceptedEdges.push(Math.sqrt(firstNeighbor.distanceSquared),Math.sqrt(secondNeighbor.distanceSquared),Math.sqrt(pairRelation.distanceSquared))
       }
     }
   }
@@ -737,8 +757,10 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
   geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3))
+  acceptedEdges.sort((a,b)=>a-b)
   return { geometry, triangleCount, coveredSurfelIndices, coveredSurfelCount,
-    topology: { vertexSurfelIds: new Uint32Array(vertexSurfelIds), triangleCount } }
+    topology: { vertexSurfelIds: new Uint32Array(vertexSurfelIds), triangleCount }, rejectedDistance,rejectedNormal,rejectedLayer,rejectedUnsupported,
+    largestAcceptedEdge:acceptedEdges[acceptedEdges.length-1]??0,p95AcceptedEdge:acceptedEdges[Math.floor(Math.max(0,acceptedEdges.length-1)*.95)]??0 }
 }
 
 function createPointMaterial(): THREE.PointsMaterial {
@@ -868,6 +890,7 @@ export function createRealitySurfaceRenderResources(
   let splatSuppressionMask: Uint8Array | undefined
   let triangleTopology: RealityTriangleTopology | null = null
   let triangleGeometry: THREE.BufferGeometry | null = null
+  let triangleSafety={rejectedDistance:0,rejectedNormal:0,rejectedLayer:0,rejectedUnsupported:0,largestAcceptedEdge:0,p95AcceptedEdge:0}
 
   if (mode === 'points') {
     const geometry = createPointGeometry(coloredSurfels, displayColors)
@@ -890,6 +913,7 @@ export function createRealitySurfaceRenderResources(
       splatSuppressionMask = triangleResult.coveredSurfelIndices
       triangleTopology = triangleResult.topology
       triangleGeometry = triangleResult.geometry
+      triangleSafety=triangleResult
     }
 
     if (mode !== 'triangles') {
@@ -955,6 +979,12 @@ export function createRealitySurfaceRenderResources(
       p90NearestNeighborSpacingMeters: neighborIndex?.p90NearestNeighborSpacingMeters ?? null,
       estimatedSmallGapRegions: neighborIndex?.estimatedSmallGapRegions ?? 0,
       estimatedLargeUnsupportedGaps: neighborIndex?.estimatedLargeUnsupportedGaps ?? 0,
+      trianglesRejectedByDistance:triangleSafety.rejectedDistance,
+      trianglesRejectedByNormal:triangleSafety.rejectedNormal,
+      trianglesRejectedByDepthLayer:triangleSafety.rejectedLayer,
+      trianglesRejectedByUnsupportedNeighborhood:triangleSafety.rejectedUnsupported,
+      largestAcceptedTriangleEdgeMeters:triangleSafety.largestAcceptedEdge,
+      p95AcceptedTriangleEdgeMeters:triangleSafety.p95AcceptedEdge,
       memoryBytes,
       renderColorStatistics,
     },

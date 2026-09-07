@@ -17,16 +17,27 @@ const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
 const { createRealitySurfaceRenderResources } = await load('realitySurfaceRenderingService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
+const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
+const { filterRealityConfidence } = await load('realityConfidenceFiltering')
 const identity = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
 const perspective = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,-1,-1, 0,0,-.1,0])
 const pose = (x = 0, timestamp = 0) => ({ position: { x, y: 1, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 }, timestamp })
 function sample(id, x, y, z, normal = { x: 0, y: 0, z: 1 }) { return { id, position: { x,y,z }, normal, radius: .0125, colorRgb: { r: .5,g: .5,b: .5 }, colorSpace: 'srgb', geometryConfidence: .9, colorConfidence: .9, colorObservationCount: 4 } }
 function plane(size = 18, z = -2, noise = false) { return Array.from({ length: size * size }, (_, i) => sample(i, (i % size - size / 2) * .025, (Math.floor(i / size) - size / 2) * .025, z + (noise ? Math.sin(i * 2.34) * .003 : 0))) }
-function feed(service, surfels, sequence, color = true, camera = { x: 0, y: 0, z: 0 }) {
+function feed(service, surfels, sequence, color = true, camera = { x: 0, y: 0, z: 0 }, context) {
   const frame = { validPointCount: surfels.length, valid: new Uint8Array(surfels.length).fill(1), points: new Float32Array(surfels.flatMap((s) => Object.values(s.position))) }
   const registration = color ? { coloredSampleCount: surfels.length, cameraCopySequence: sequence, sourceSampleIndices: new Int32Array(surfels.map((_s, i) => i)), srgbColors: new Uint8Array(surfels.length * 3).fill(128) } : null
-  service.process(registration, frame, { copySampleNormal: (i, out) => { Object.assign(out, surfels[i].normal); return true } }, camera, sequence * 500)
+  service.process(registration, frame, { copySampleNormal: (i, out) => { Object.assign(out, surfels[i].normal); return true } }, camera, sequence * 500, context)
 }
+function measurementInput(sequence, x=0, timestamp=sequence*100, validCount=400) {
+  const columns=20,rows=20,total=columns*rows,valid=new Uint8Array(total),distancesMeters=new Float32Array(total).fill(2),points=new Float32Array(total*3),nx=new Float32Array(total),ny=new Float32Array(total)
+  for(let i=0;i<total;i++){valid[i]=i<validCount?1:0;const gx=i%columns,gy=Math.floor(i/columns);nx[i]=(gx+.5)/columns;ny[i]=(gy+.5)/rows;points[i*3]=(gx-columns/2)*.025+x;points[i*3+1]=(gy-rows/2)*.025;points[i*3+2]=-2}
+  const spatial={columns,rows,valid,normalizedX:nx,normalizedY:ny,distancesMeters,points,attemptedSampleCount:total,validPointCount:validCount,rejectedPointCount:total-validCount}
+  const depth={columns,rows,attemptedSampleCount:total,validSampleCount:validCount,rejectedSampleCount:total-validCount,valid,normalizedX:nx,normalizedY:ny,distancesMeters,depthProjectionMatrix:identity(),depthTransformMatrix:identity(),viewProjectionMatrix:perspective(),viewTransformMatrix:identity()}
+  const matrix=identity();matrix[12]=x
+  return {sequence,timestamp,referenceSpaceType:'local-floor',samplingPhase:sequence%4,qualityTier:0,pose:pose(x,timestamp),view:{transform:{matrix,inverse:{matrix:identity()}},projectionMatrix:perspective()},depth,spatial,depthWidth:160,depthHeight:90,depthScale:1}
+}
+function supported(s, overrides={}) { return {...s,geometryObservationCount:5,viewObservationCount:2,firstObservedAt:0,lastObservedAt:1200,trackingQuality:.95,positionVarianceMetersSquared:.00001,depthVarianceMetersSquared:.000004,normalVariance:.01,stabilityClass:'high',...overrides} }
 function keyframe(size = 64) { return { id: 1, timestamp: 1, width: size, height: size, rgb: new Uint8Array(size * size * 3).fill(210), cameraTransform: identity(), inverseCameraTransform: identity(), projectionMatrix: perspective(), qualityScore: 1, mapping: { sourceCameraWidth: size, sourceCameraHeight: size, copyWidth: size, copyHeight: size, sourceUvRect: { x:0,y:0,width:1,height:1 }, orientation: 'upright' } } }
 
 test('temporal phases deterministic, four distinct subgrids reach every-second RGB tick', () => {
@@ -59,7 +70,7 @@ test('stationary sampling throttles but physical translation resumes immediately
   const p = new RealityQualityPolicy(); for(let i=0;i<8;i++) { p.shouldProcess(pose(0,i*200)); p.recordTick(18,3600,3600) }
   assert.equal(p.shouldProcess(pose(0,1500)),false); assert.equal(p.shouldProcess(pose(.2,1550)),true)
 })
-test('2.5cm/60k decision and numeric storage remain bounded', () => { assert.equal(DENSE_REALITY_CONFIG.cellSizeMeters,.025); assert.equal(DENSE_REALITY_CONFIG.maxSamples,60000); const s = new DenseRealityReconstructionService(); feed(s,plane(3),1); assert.equal(s.getDiagnostics().numericMemoryBytes,4260000) })
+test('2.5cm/60k decision and numeric storage remain bounded', () => { assert.equal(DENSE_REALITY_CONFIG.cellSizeMeters,.025); assert.equal(DENSE_REALITY_CONFIG.maxSamples,60000); const s = new DenseRealityReconstructionService(); feed(s,plane(3),1); assert.ok(s.getDiagnostics().numericMemoryBytes<6*1048576) })
 test('world-space fusion preserves two depth layers and repeated observations', () => {
   const s = new DenseRealityReconstructionService(), a=plane(8,-2), b=plane(8,-2.2); feed(s,a,1); feed(s,b,2); feed(s,a,3); feed(s,b,4)
   const result=s.createSnapshot('layers','local-floor',true); assert.equal(result.surfels.length,128); assert.equal(result.surfels.filter((v)=>v.position.z < -2.1).length,64)
@@ -84,7 +95,7 @@ test('flipped compatible normals do not average to zero and moved cells remain d
 test('capacity reclaims stale unconfirmed samples, never stable geometry', () => {
   const s=new DenseRealityReconstructionService(); const points=Array.from({length:60000},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2));feed(s,points,1)
   feed(s,[sample(60001,20,0,-2)],30);assert.equal(s.getDiagnostics().activeSampleCount,60000);assert.equal(s.getDiagnostics().reclaimedSampleCount,1)
-  feed(s,[sample(60001,20,0,-2)],31);assert.equal(s.getDiagnostics().stableSampleCount,1)
+  feed(s,[sample(60001,20,0,-2)],31);feed(s,[sample(60001,20,0,-2)],32);assert.equal(s.getDiagnostics().stableSampleCount,1)
 })
 test('display smoothing reduces noise without mutating source', () => {
   const wall=plane(30,-2,true), before=JSON.stringify(wall), result=refineRealityDisplay(wall,[])
@@ -146,9 +157,67 @@ test('fast motion defers appearance copy without stopping physical geometry capt
   service.considerCapture({}, {},2000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,{copyKeyframe:()=>{copies++;return null}},{translationMetersPerSecond:2,rotationDegreesPerSecond:80})
   assert.equal(copies,0);assert.equal(service.createSnapshot('empty',true).diagnostics.capacity,8)
 })
+test('immutable measurement packet owns exact frame pose, depth, phase and matrices',()=>{
+  const gate=new RealityMeasurementStabilityService(),input=measurementInput(7,.25,700),packet=gate.createPacket(input)
+  input.spatial.points[0]=99;input.view.transform.matrix[12]=99;input.pose.position.x=99
+  assert.equal(packet.sequence,7);assert.equal(packet.samplingPhase,3);assert.notEqual(packet.denseFrame.points[0],99);assert.equal(packet.viewTransform[12],.25);assert.equal(packet.pose.position.x,.25);assert.ok(Object.isFrozen(packet))
+})
+test('pose discontinuity is rejected and cannot immediately duplicate the room',()=>{
+  const gate=new RealityMeasurementStabilityService(),consistent={consistentRatio:.8,duplicateRatio:0,unknownRatio:.2,establishedSamples:100}
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(1,0,100)),consistent).accepted,true)
+  const jump=gate.evaluate(gate.createPacket(measurementInput(2,1.3,200)),consistent);assert.equal(jump.reason,'pose-discontinuity');assert.equal(jump.accepted,false)
+  assert.equal(gate.getDiagnostics().relocalizationLikeEvents,1)
+})
+test('bad or skipped frame updates no partial measurement state',()=>{
+  const gate=new RealityMeasurementStabilityService(),bad=gate.createPacket(measurementInput(1,0,100,40))
+  assert.equal(gate.evaluate(bad,{consistentRatio:0,duplicateRatio:0,unknownRatio:1,establishedSamples:0}).reason,'depth')
+  gate.recordSkippedTogether();const d=gate.getDiagnostics();assert.equal(d.accepted,0);assert.equal(d.depthRejected,1);assert.equal(d.skippedTogether,1)
+})
+test('same XR frame cannot fake stability through duplicate samples',()=>{
+  const service=new DenseRealityReconstructionService(),wall=plane(3)
+  feed(service,wall,1,true,{x:0,y:0,z:0},{frameSequence:10,trackingQuality:1});feed(service,wall,2,true,{x:0,y:0,z:0},{frameSequence:10,trackingQuality:1})
+  assert.equal(service.getDiagnostics().stableSampleCount,0);assert.ok(service.getDiagnostics().sameFrameDuplicateCount>0)
+  feed(service,wall,3,true,{x:0,y:0,z:0},{frameSequence:11,trackingQuality:1});feed(service,wall,4,true,{x:.3,y:0,z:0},{frameSequence:12,trackingQuality:1});assert.equal(service.getDiagnostics().stableSampleCount,wall.length)
+})
+test('fast but non-relocalizing motion is rejected with move-slower guidance',()=>{
+  const gate=new RealityMeasurementStabilityService(),world={consistentRatio:.5,duplicateRatio:0,unknownRatio:.5,establishedSamples:100}
+  gate.evaluate(gate.createPacket(measurementInput(1,0,100)),world)
+  const result=gate.evaluate(gate.createPacket(measurementInput(2,.4,200)),world);assert.equal(result.reason,'motion');assert.equal(gate.getDiagnostics().guidance,'move-slower')
+})
+test('real near-parallel second surface survives after temporal and viewpoint support',()=>{
+  const service=new DenseRealityReconstructionService(),front=plane(6,-2),second=plane(6,-2.06)
+  for(let i=1;i<=3;i++)feed(service,front,i,true,{x:0,y:0,z:0})
+  feed(service,second,4,true,{x:0,y:0,z:0});feed(service,second,5,true,{x:0,y:0,z:0});feed(service,second,6,true,{x:2,y:0,z:-2})
+  const raw=service.createSnapshot('parallel','local',true).fusedRawSurfels,back=raw.filter(s=>s.position.z<-2.03)
+  assert.equal(back.length,second.length);assert.ok(back.every(s=>s.duplicateSurfaceCandidate&&s.stabilityClass==='high'))
+})
+test('confidence filter excludes tiny one-frame float and retains supported small object',()=>{
+  const room=plane(14).map(s=>supported(s)),floating=Array.from({length:5},(_,i)=>sample(1000+i,2+i*.02,2,-1)),object=Array.from({length:12},(_,i)=>supported(sample(2000+i,.8+(i%4)*.025,(i>>2)*.025,-1.6,{x:1,y:0,z:0})))
+  const result=filterRealityConfidence([...room,...floating,...object]);assert.ok(result.stats.floatingComponentsRejected>=1);assert.ok(result.surfels.some(s=>s.id===2000));assert.ok(!result.surfels.some(s=>s.id===1000))
+})
+test('unsupported duplicate sheet is filtered but multi-view real recess remains',()=>{
+  const main=plane(12,-2).map(s=>supported(s)),duplicate=plane(8,-2.06).map(s=>supported({...s,id:s.id+1000},{stabilityClass:'low',geometryObservationCount:2,viewObservationCount:1,lastObservedAt:100,duplicateSurfaceCandidate:true})),recess=plane(8,-2.3).map(s=>supported({...s,id:s.id+2000}))
+  const result=filterRealityConfidence([...main,...duplicate,...recess]);assert.ok(!result.surfels.some(s=>s.id===1000));assert.ok(result.surfels.some(s=>s.id===2000));assert.ok(result.surfels.some(s=>Math.abs(s.position.z+2)<.001))
+})
+test('confidence components do not connect across a doorway or depth layer',()=>{
+  const left=plane(12).filter(s=>s.position.x<-.05).map(s=>supported(s)),right=plane(12).filter(s=>s.position.x>.05).map(s=>supported({...s,id:s.id+1000})),back=plane(12,-2.3).map(s=>supported({...s,id:s.id+2000}))
+  const result=filterRealityConfidence([...left,...right,...back]);assert.ok(result.stats.connectedComponentCount>=3);assert.equal(result.stats.samplesRemoved,0)
+})
+test('negative-coordinate spatial fusion and hash relinking remain correct',()=>{
+  const service=new DenseRealityReconstructionService(),points=[sample(1,-.026,-.026,-2),sample(2,-.051,-.051,-2)]
+  feed(service,points,1);feed(service,points,2);feed(service,points,3);const result=service.createSnapshot('negative','local',true);assert.equal(result.surfels.length,2)
+})
+test('refinement displacement is bounded and disconnected recess remains separate',()=>{
+  const source=[...plane(16,-2,true),...plane(16,-2.25,true).map(s=>({...s,id:s.id+1000}))],result=refineRealityDisplay(source,[])
+  assert.ok(result.stats.maxDisplacementMeters<=.004);result.geometry.slice(256).forEach(s=>assert.ok(s.position.z<-2.24))
+})
+test('safe mesh reports rejection classes and accepted edge bounds',()=>{
+  const source=plane(16).filter(s=>Math.abs(s.position.x)>.06).map(s=>supported(s)),resources=createRealitySurfaceRenderResources({surfels:source},'dense')
+  assert.ok(resources.stats.largestAcceptedTriangleEdgeMeters<=.1);assert.ok(resources.stats.trianglesRejectedByUnsupportedNeighborhood>=0);assert.ok(resources.stats.trianglesRejectedByDepthLayer>=0);resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
 test('confirmed full-capacity map never evicts stable surfaces to hide pressure',()=>{
   const service=new DenseRealityReconstructionService(),points=Array.from({length:60000},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2))
-  feed(service,points,1);feed(service,points,2);feed(service,[sample(60001,20,0,-2)],40)
+  feed(service,points,1);feed(service,points,2);feed(service,points,3);feed(service,[sample(60001,20,0,-2)],40)
   assert.equal(service.getDiagnostics().stableSampleCount,60000);assert.equal(service.getDiagnostics().reclaimedSampleCount,0);assert.equal(service.getDiagnostics().capacityRejectedSampleCount,1)
 })
 test('view diversity counts directions rather than identical camera ticks',()=>{

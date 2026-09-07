@@ -5,6 +5,8 @@ export interface RealityRefinementStats {
   geometryMs: number; colorMs: number; movedSamples: number; refinedColors: number; visibilityRejects: number
   singleView: number; multipleViews: number; colorConflictRejects: number; rawNoiseMeters: number; refinedNoiseMeters: number
   edgeSamplesRetained: number; numericTemporaryBytes: number; positionNormalBytes: number; colorBytes: number
+  meanDisplacementMeters: number; p90DisplacementMeters: number; p95DisplacementMeters: number; maxDisplacementMeters: number
+  retainedRawByDisplacementSafety: number
 }
 export interface RealityDisplayRefinement {
   discontinuities: Uint8Array
@@ -20,9 +22,12 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
   const started = performance.now(), cell = .06, buckets = new Map<string, number[]>()
   const stats: RealityRefinementStats = { geometryMs: 0, colorMs: 0, movedSamples: 0, refinedColors: 0, visibilityRejects: 0,
     singleView: 0, multipleViews: 0, colorConflictRejects: 0, rawNoiseMeters: 0, refinedNoiseMeters: 0, edgeSamplesRetained: 0,
-    numericTemporaryBytes: source.length * 20, positionNormalBytes: source.length * 24, colorBytes: source.length * 12 }
+    numericTemporaryBytes: source.length * 20, positionNormalBytes: source.length * 24, colorBytes: source.length * 12,
+    meanDisplacementMeters: 0, p90DisplacementMeters: 0, p95DisplacementMeters: 0, maxDisplacementMeters: 0,
+    retainedRawByDisplacementSafety: 0 }
   source.forEach((s, i) => { const p = s.position, k = key(Math.floor(p.x / cell), Math.floor(p.y / cell), Math.floor(p.z / cell)); const list = buckets.get(k); if (list) list.push(i); else buckets.set(k, [i]) })
   let rawNoise = 0, refinedNoise = 0
+  const displacements: number[] = []
   const discontinuities = new Uint8Array(source.length)
   const geometry = source.map((s, sourceIndex) => {
     const p = s.position, n = s.normal, cx = Math.floor(p.x / cell), cy = Math.floor(p.y / cell), cz = Math.floor(p.z / cell)
@@ -53,15 +58,24 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
     // A one-sided neighborhood marks a silhouette/opening, not a hole to fill.
     if (count < 6 || Math.hypot(centroid.x, centroid.y, centroid.z) / count > .015) { stats.edgeSamplesRetained++; return s }
     residuals.sort((a, b) => a - b)
-    const target = residuals[Math.floor(count / 2)], displacement = Math.max(-.004, Math.min(.004, target * .5))
+    const target = residuals[Math.floor(count / 2)], proposedDisplacement = target * .5
+    // Refinement is display-only and may never manufacture a displaced sheet.
+    // If local smoothing asks for more than 4 mm, keep the measured position.
+    if (Math.abs(proposedDisplacement) > .004) { stats.retainedRawByDisplacementSafety++; return s }
+    const displacement = proposedDisplacement
     rawNoise += Math.abs(target); refinedNoise += Math.abs(target - displacement)
     const length = Math.hypot(normal.x, normal.y, normal.z)
-    if (Math.abs(displacement) > .00001) stats.movedSamples++
+    if (Math.abs(displacement) > .00001) { stats.movedSamples++; displacements.push(Math.abs(displacement)) }
     return { ...s, position: { x: p.x + n.x * displacement, y: p.y + n.y * displacement, z: p.z + n.z * displacement },
       normal: { x: normal.x / length, y: normal.y / length, z: normal.z / length } }
   })
   stats.rawNoiseMeters = rawNoise / Math.max(1, source.length - stats.edgeSamplesRetained)
   stats.refinedNoiseMeters = refinedNoise / Math.max(1, source.length - stats.edgeSamplesRetained)
+  displacements.sort((a,b)=>a-b)
+  stats.meanDisplacementMeters=displacements.reduce((sum,value)=>sum+value,0)/Math.max(1,displacements.length)
+  stats.p90DisplacementMeters=displacements[Math.floor(Math.max(0,displacements.length-1)*.9)]??0
+  stats.p95DisplacementMeters=displacements[Math.floor(Math.max(0,displacements.length-1)*.95)]??0
+  stats.maxDisplacementMeters=displacements[displacements.length-1]??0
   stats.geometryMs = performance.now() - started
   const colorStarted = performance.now(), bestScore = new Float32Array(source.length), observations = new Uint8Array(source.length)
   const appearance = source.slice(), pixel = { x: 0, y: 0 }

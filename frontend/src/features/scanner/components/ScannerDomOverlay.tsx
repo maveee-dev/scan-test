@@ -217,6 +217,17 @@ function formatCoverageGuidance(guidance: CoverageGuidance): string {
   }
 }
 
+function formatScanQualityGuidance(guidance: NonNullable<ScannerSessionState['debug']['measurement']>['guidance']): string {
+  switch (guidance) {
+    case 'move-slower': return 'Move slower'
+    case 'tracking-unstable': return 'Tracking unstable — hold phone steady'
+    case 'scan-again': return 'Scan this area again'
+    case 'move-around-object': return 'Move around the object for another angle'
+    case 'more-coverage': return 'More coverage needed — move sideways or scan around corners'
+    default: return 'Scan quality good'
+  }
+}
+
 function formatCoverageRenderStatus(status: CoverageRenderStatus): string {
   switch (status) {
     case 'ready':
@@ -400,7 +411,9 @@ function ScannerDomOverlay({
           </div>
         </div>
 
-        <p className="xr-scanner-hud-guidance">{formatCoverageGuidance(coverage.guidance)}</p>
+        <p className="xr-scanner-hud-guidance">{sessionState.debug.measurement
+          ? formatScanQualityGuidance(sessionState.debug.measurement.guidance)
+          : formatCoverageGuidance(coverage.guidance)}</p>
 
         <div className="xr-scanner-hud-actions">
           <button
