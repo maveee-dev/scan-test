@@ -1,6 +1,9 @@
 import type { ScanTrajectoryPoint } from './realityQualityPolicy'
 
-export interface LiveMapFrame { pose: ScanTrajectoryPoint; copy: (positions: Float32Array, colors: Float32Array) => number }
+export interface LiveMapFrame { pose: ScanTrajectoryPoint; copy: (positions: Float32Array, colors: Float32Array) => number; underPressure?: boolean }
+export const getLiveMapCadenceMs = (underPressure: boolean): { render: number; geometryCopy: number } => underPressure
+  ? { render: 100, geometryCopy: 900 }
+  : { render: 33, geometryCopy: 350 }
 /** One-way physical-pose publisher. No API writes to XR or reconstruction. */
 export class LiveRealityMap {
   public listener: ((frame: LiveMapFrame) => void) | null = null

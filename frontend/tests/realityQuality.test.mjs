@@ -12,13 +12,14 @@ const load = (name) => import(moduleUrl(new URL(`../src/features/scanner/service
 const { RealityQualityPolicy, DEPTH_PHASES } = await load('realityQualityPolicy')
 const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG } = await load('denseRealityReconstructionService')
 const { refineRealityDisplay } = await load('realityDisplayRefinement')
-const { InspectionPose, LiveRealityMap } = await load('liveRealityMap')
+const { InspectionPose, LiveRealityMap, getLiveMapCadenceMs } = await load('liveRealityMap')
 const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
 const { createRealitySurfaceRenderResources } = await load('realitySurfaceRenderingService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
 const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
 const { filterRealityConfidence } = await load('realityConfidenceFiltering')
+const { RealityMeasurementQueueService } = await load('realityMeasurementQueueService')
 const identity = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
 const perspective = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,-1,-1, 0,0,-.1,0])
 const pose = (x = 0, timestamp = 0) => ({ position: { x, y: 1, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 }, timestamp })
@@ -237,4 +238,89 @@ test('near-capacity display refinement and appearance memory remain bounded',()=
   assert.equal(r.combined.length,59536);assert.ok(r.stats.numericTemporaryBytes<4*1048576);assert.ok(r.stats.refinedColors>0)
   console.log('M8.7 59,536 sample / 8 appearance-frame desktop benchmark',JSON.stringify({totalMs:performance.now()-started,stats:r.stats,meshMs:resources.stats.renderPreparationMs,triangles:resources.stats.renderedTriangleCount,meshBytes:resources.stats.memoryBytes,heapDeltaMiB:(process.memoryUsage().heapUsed-heapBefore)/1048576}))
   resources.geometries.forEach((g)=>g.dispose());resources.materials.forEach((m)=>m.dispose())
+})
+
+test('latest-only measurement queue replaces stale pending work without backlog',async()=>{
+  const scheduled=[],processed=[]
+  const queue=new RealityMeasurementQueueService((value)=>{processed.push(value)},(callback)=>scheduled.push(callback),(()=>{let t=0;return()=>++t})())
+  assert.equal(queue.enqueue(1),'queued');assert.equal(queue.enqueue(2),'replaced');assert.equal(queue.enqueue(3),'replaced')
+  assert.equal(scheduled.length,1);scheduled.shift()();await queue.flush()
+  assert.deepEqual(processed,[3]);const d=queue.getDiagnostics();assert.equal(d.completedPackets,1);assert.equal(d.packetsDropped,2);assert.ok(d.maximumQueueDepth<=2)
+})
+test('measurement queue retains processing packet plus only newest pending packet',async()=>{
+  let releaseFirst,startFirst
+  const firstStarted=new Promise(resolve=>{startFirst=resolve}),firstGate=new Promise(resolve=>{releaseFirst=resolve}),processed=[]
+  const queue=new RealityMeasurementQueueService(async(value)=>{processed.push(value);if(value===1){startFirst();await firstGate}})
+  queue.enqueue(1);await firstStarted;queue.enqueue(2);assert.equal(queue.enqueue(3),'replaced');assert.ok(queue.getDiagnostics().queueDepth<=2)
+  releaseFirst();await queue.flush();assert.deepEqual(processed,[1,3]);assert.equal(queue.getDiagnostics().packetsDropped,1)
+})
+
+test('packet-local sampling phases stay deterministic when queued packets are dropped',()=>{
+  const policy=new RealityQualityPolicy(),claimed=[]
+  for(let i=0;i<8;i++)claimed.push(policy.claimSampling().phase)
+  assert.deepEqual(claimed,[0,0,1,1,2,2,3,3])
+  assert.equal(policy.claimSampling().phase,0)
+})
+
+test('temporal sub-grid shifts match established wall surfels instead of churning',()=>{
+  const service=new DenseRealityReconstructionService()
+  const first=Array.from({length:20},(_,i)=>sample(i,i*.1,0,-2))
+  const shifted=first.map((s,i)=>sample(i,s.position.x+.025,0,-2))
+  feed(service,first,1);feed(service,shifted,2)
+  const d=service.getDiagnostics();assert.equal(d.activeSampleCount,20);assert.equal(d.createdThisTick,0);assert.equal(d.fusedThisTick,20);assert.equal(d.matchRatioPercentage,100)
+})
+
+test('repeated temporal phases converge rather than saturating the Dense map',()=>{
+  const service=new DenseRealityReconstructionService(),base=Array.from({length:120},(_,i)=>sample(i,(i%20)*.1,Math.floor(i/20)*.1,-2))
+  for(let frame=1;frame<=12;frame++){const shift=[0,.012,.024,.008][frame%4];feed(service,base.map((s,i)=>sample(i,s.position.x+shift,s.position.y,-2)),frame)}
+  const d=service.getDiagnostics();assert.equal(d.activeSampleCount,120);assert.equal(d.createdSampleCount,120);assert.equal(d.fusedSampleCount,1320);assert.ok(d.matchRatioPercentage>90)
+})
+
+test('modest lateral camera sweep establishes viewpoint diversity',()=>{
+  const service=new DenseRealityReconstructionService(),wall=plane(6)
+  feed(service,wall,1,true,{x:0,y:0,z:0});feed(service,wall,2,true,{x:0,y:0,z:0});feed(service,wall,3,true,{x:.12,y:0,z:0})
+  const d=service.getDiagnostics();assert.ok(d.viewDiverseSampleCount>0);assert.ok((d.viewBaselineP50Meters??0)>=.06)
+})
+
+test('appearance capture yields under queue or XR timing pressure',()=>{
+  const policy=new RealityQualityPolicy();assert.equal(policy.shouldCaptureAppearance(1),false)
+  for(let i=1;i<20;i++)policy.recordFrame(i*52)
+  policy.recordTick(40,3600,3000)
+  assert.equal(policy.shouldCaptureAppearance(0),false)
+})
+test('Live Map throttles display work before core measurement capture',()=>{
+  assert.deepEqual(getLiveMapCadenceMs(false),{render:33,geometryCopy:350});assert.deepEqual(getLiveMapCadenceMs(true),{render:100,geometryCopy:900})
+})
+test('React diagnostics cadence backs off under scanner pressure',()=>{
+  const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
+  assert.match(session,/scannerUnderPressure\?DEBUG_SAMPLE_INTERVAL_MS\*3:DEBUG_SAMPLE_INTERVAL_MS/)
+})
+
+test('depth rejection categories remain explicit and mutually attributable',()=>{
+  const gate=new RealityMeasurementStabilityService()
+  gate.recordDepthMissing();gate.evaluate(gate.createPacket(measurementInput(2,0,200,40)),{consistentRatio:0,duplicateRatio:0,unknownRatio:1,establishedSamples:0})
+  const d=gate.getDiagnostics();assert.equal(d.depthRejected,2);assert.equal(d.depthRejectedMissing,1);assert.equal(d.depthRejectedSampleCount,1)
+})
+test('fast-motion rejection recovers when the next interval is slow and coherent',()=>{
+  const gate=new RealityMeasurementStabilityService(),world={consistentRatio:.7,duplicateRatio:0,unknownRatio:.3,establishedSamples:100}
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(1,0,100)),world).accepted,true)
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(2,.4,200)),world).reason,'motion')
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(3,.41,700)),world).accepted,true)
+})
+test('short valid phased scan accumulates one coherent wall component',()=>{
+  const service=new DenseRealityReconstructionService(),wall=plane(10)
+  for(let frame=1;frame<=5;frame++)feed(service,wall.map((s,i)=>sample(i,s.position.x+(frame%2)*.008,s.position.y,s.position.z)),frame,true,{x:frame*.04,y:0,z:0})
+  const raw=service.createSnapshot('short','local-floor',true),filtered=filterRealityConfidence(raw.surfels)
+  assert.equal(raw.surfels.length,100);assert.equal(filtered.stats.connectedComponentCount,1);assert.equal(filtered.stats.samplesRemoved,0)
+})
+
+test('unsupported explicit duplicate cannot become stable by repeated same-view count',()=>{
+  const main=plane(10,-2).map(s=>supported(s)),duplicate=plane(10,-2.06).map(s=>supported({...s,id:s.id+1000},{geometryObservationCount:8,viewObservationCount:1,lastObservedAt:3000,duplicateSurfaceCandidate:true,stabilityClass:'low'}))
+  const result=filterRealityConfidence([...main,...duplicate]);assert.equal(result.surfels.filter(s=>s.id>=1000).length,0);assert.ok(result.stats.duplicateCandidatesRejected>=100)
+})
+
+test('triangle rejection diagnostics distinguish combinatorial candidates from missing surfels',()=>{
+  const resources=createRealitySurfaceRenderResources({surfels:plane(12).map(s=>supported(s))},'dense'),s=resources.stats
+  assert.ok(s.triangleCandidatePairCount>=s.renderedTriangleCount);assert.equal(s.trianglesRejectedByUnsupportedNeighborhood,s.trianglesRejectedDegenerate+s.trianglesRejectedAngularGap+s.trianglesRejectedOccupiedCircumcircle);assert.equal(s.triangleNonParticipantCount,s.coloredSurfelCount-s.triangleParticipantCount);assert.equal(s.fallbackSplatCount,s.triangleNonParticipantCount)
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })

@@ -17,14 +17,19 @@ export interface RealityMeasurementPacket {
 export interface RealityFrameAcceptance { packet: RealityMeasurementPacket; accepted: boolean; reason: RealityMeasurementRejectionReason; trackingQuality: number; consistency: RealityFrameConsistency }
 export interface RawRealityMeasurement { position: SpatialPoint; normal: SpatialPoint; timestamp: number; frameSequence: number; accepted: boolean; rejectionReason: RealityMeasurementRejectionReason }
 export interface RealityMeasurementDiagnostics {
-  ticksConsidered: number; accepted: number; skippedTogether: number; motionRejected: number; trackingRejected: number
+  candidateTicks: number; cadenceSkipped: number; backpressureSkipped: number
+  ticksConsidered: number; accepted: number; fusedSuccessfully: number; producedNewSamples: number; matchedExistingSamples: number
+  skippedTogether: number; motionRejected: number; trackingRejected: number
   depthRejected: number; poseDiscontinuityRejected: number; consistencyRejected: number; badDepthFrames: number
+  depthRejectedMissing: number; depthRejectedValidRatio: number; depthRejectedSampleCount: number
+  depthRejectedOutliers: number; depthRejectedDiscontinuity: number; depthRejectedRange: number
   largestTranslationMeters: number; largestRotationDegrees: number; largestVelocityMetersPerSecond: number
   translationP50Meters: number; translationP90Meters: number; translationP95Meters: number
   rotationP50Degrees: number; rotationP90Degrees: number; rotationP95Degrees: number
   largestAngularVelocityDegreesPerSecond: number; relocalizationLikeEvents: number; stableRecoveryFrames: number
   validRatio: number; outlierRatio: number; medianDepthMeters: number; p95DepthMeters: number
   guidance: ScanQualityGuidance; validationMs: number
+  acceptedPercentage: number; fusedPercentage: number; usefulPercentage: number
 }
 
 const MIN_VALID_SAMPLES = 96, MIN_VALID_RATIO = .18, MAX_RAW_MEASUREMENTS = 30000
@@ -89,7 +94,12 @@ export class RealityMeasurementStabilityService {
     let reason: RealityMeasurementRejectionReason='none'
     const impossibleJump = previous !== null && dt < .7 && ((translation > .75 && velocity > 2.5) || (rotation > 75 && angularVelocity > 180))
     const unreliableMotion = previous !== null && dt < .5 && ((translation > .35 && velocity > 2.8) || (rotation > 48 && angularVelocity > 220))
-    const badDepth = packet.valid < MIN_VALID_SAMPLES || packet.validRatio < MIN_VALID_RATIO || !Number.isFinite(packet.medianDepth) || packet.isolatedOutlierRatio > .28 || packet.discontinuityRatio > .72
+    const depthFailure = packet.valid < MIN_VALID_SAMPLES ? 'sample-count'
+      : packet.validRatio < MIN_VALID_RATIO ? 'valid-ratio'
+        : !Number.isFinite(packet.medianDepth) || packet.medianDepth <= 0 || packet.p95Depth > 20 ? 'range'
+          : packet.isolatedOutlierRatio > .28 ? 'outliers'
+            : packet.discontinuityRatio > .72 ? 'discontinuity' : null
+    const badDepth = depthFailure !== null
     if (impossibleJump) { reason='pose-discontinuity'; this.quarantine=true; this.recoveryFrames=0; this.diagnostics.relocalizationLikeEvents++ }
     else if (unreliableMotion) reason='motion'
     else if (badDepth) reason='depth'
@@ -107,7 +117,14 @@ export class RealityMeasurementStabilityService {
     if (acceptedFrame) { this.lastAccepted=packet.pose; this.diagnostics.accepted++ }
     else if(reason==='motion')this.diagnostics.motionRejected++
     else if(reason==='tracking')this.diagnostics.trackingRejected++
-    else if(reason==='depth'){this.diagnostics.depthRejected++;this.diagnostics.badDepthFrames++}
+    else if(reason==='depth'){
+      this.diagnostics.depthRejected++;this.diagnostics.badDepthFrames++
+      if(depthFailure==='sample-count')this.diagnostics.depthRejectedSampleCount++
+      else if(depthFailure==='valid-ratio')this.diagnostics.depthRejectedValidRatio++
+      else if(depthFailure==='outliers')this.diagnostics.depthRejectedOutliers++
+      else if(depthFailure==='discontinuity')this.diagnostics.depthRejectedDiscontinuity++
+      else this.diagnostics.depthRejectedRange++
+    }
     else if(reason==='pose-discontinuity')this.diagnostics.poseDiscontinuityRejected++
     else this.diagnostics.consistencyRejected++
     this.diagnostics.stableRecoveryFrames=this.recoveryFrames;this.diagnostics.validRatio=packet.validRatio;this.diagnostics.outlierRatio=packet.isolatedOutlierRatio
@@ -118,14 +135,21 @@ export class RealityMeasurementStabilityService {
     return { packet, accepted: acceptedFrame, reason, trackingQuality: acceptedFrame ? Math.max(.5,1-Math.min(1,velocity/3)*.3-Math.min(1,angularVelocity/240)*.2) : 0, consistency }
   }
 
+  public recordCandidateTick(): void { this.diagnostics.candidateTicks++ }
+  public recordCadenceSkipped(): void { this.diagnostics.cadenceSkipped++ }
   public recordSkippedTogether(): void { this.diagnostics.skippedTogether++ }
+  public recordBackpressureSkipped(): void { this.diagnostics.backpressureSkipped++ }
+  public recordDepthMissing(): void { this.diagnostics.ticksConsidered++;this.diagnostics.depthRejected++;this.diagnostics.depthRejectedMissing++;this.diagnostics.badDepthFrames++;this.diagnostics.guidance='scan-again' }
+  public recordFusion(created: number, matched: number): void { this.diagnostics.fusedSuccessfully++;this.diagnostics.producedNewSamples+=created;this.diagnostics.matchedExistingSamples+=matched }
   public recordTrackingMissing(): void { this.diagnostics.ticksConsidered++;this.diagnostics.trackingRejected++;this.diagnostics.guidance='tracking-unstable' }
-  public getDiagnostics(): RealityMeasurementDiagnostics { const translations=[...this.translations].sort((a,b)=>a-b),rotations=[...this.rotations].sort((a,b)=>a-b);return { ...this.diagnostics,
+  public getDiagnostics(): RealityMeasurementDiagnostics { const translations=[...this.translations].sort((a,b)=>a-b),rotations=[...this.rotations].sort((a,b)=>a-b),considered=Math.max(1,this.diagnostics.ticksConsidered);return { ...this.diagnostics,
     translationP50Meters:percentile(translations,.5),translationP90Meters:percentile(translations,.9),translationP95Meters:percentile(translations,.95),
-    rotationP50Degrees:percentile(rotations,.5),rotationP90Degrees:percentile(rotations,.9),rotationP95Degrees:percentile(rotations,.95) } }
+    rotationP50Degrees:percentile(rotations,.5),rotationP90Degrees:percentile(rotations,.9),rotationP95Degrees:percentile(rotations,.95),
+    acceptedPercentage:this.diagnostics.accepted/considered*100,fusedPercentage:this.diagnostics.fusedSuccessfully/considered*100,
+    usefulPercentage:(this.diagnostics.producedNewSamples+this.diagnostics.matchedExistingSamples)>0?this.diagnostics.fusedSuccessfully/considered*100:0 } }
   public createRawSnapshot(): RawRealityMeasurement[] { return this.raw.map((s)=>({ ...s, position:{...s.position}, normal:{...s.normal} })) }
   public reset(): void { this.lastAccepted=null;this.lastSeen=null;this.quarantine=false;this.recoveryFrames=0;this.raw=[];this.translations=[];this.rotations=[];this.diagnostics=this.createDiagnostics() }
-  private createDiagnostics(): RealityMeasurementDiagnostics { return { ticksConsidered:0,accepted:0,skippedTogether:0,motionRejected:0,trackingRejected:0,depthRejected:0,poseDiscontinuityRejected:0,consistencyRejected:0,badDepthFrames:0,largestTranslationMeters:0,largestRotationDegrees:0,largestVelocityMetersPerSecond:0,translationP50Meters:0,translationP90Meters:0,translationP95Meters:0,rotationP50Degrees:0,rotationP90Degrees:0,rotationP95Degrees:0,largestAngularVelocityDegreesPerSecond:0,relocalizationLikeEvents:0,stableRecoveryFrames:0,validRatio:0,outlierRatio:0,medianDepthMeters:0,p95DepthMeters:0,guidance:'more-coverage',validationMs:0 } }
+  private createDiagnostics(): RealityMeasurementDiagnostics { return { candidateTicks:0,cadenceSkipped:0,backpressureSkipped:0,ticksConsidered:0,accepted:0,fusedSuccessfully:0,producedNewSamples:0,matchedExistingSamples:0,skippedTogether:0,motionRejected:0,trackingRejected:0,depthRejected:0,depthRejectedMissing:0,depthRejectedValidRatio:0,depthRejectedSampleCount:0,depthRejectedOutliers:0,depthRejectedDiscontinuity:0,depthRejectedRange:0,poseDiscontinuityRejected:0,consistencyRejected:0,badDepthFrames:0,largestTranslationMeters:0,largestRotationDegrees:0,largestVelocityMetersPerSecond:0,translationP50Meters:0,translationP90Meters:0,translationP95Meters:0,rotationP50Degrees:0,rotationP90Degrees:0,rotationP95Degrees:0,largestAngularVelocityDegreesPerSecond:0,relocalizationLikeEvents:0,stableRecoveryFrames:0,validRatio:0,outlierRatio:0,medianDepthMeters:0,p95DepthMeters:0,guidance:'more-coverage',validationMs:0,acceptedPercentage:0,fusedPercentage:0,usefulPercentage:0 } }
   private captureRaw(packet: RealityMeasurementPacket, accepted: boolean, reason: RealityMeasurementRejectionReason): void {
     const stride=Math.max(1,Math.ceil(packet.valid/256)), frame=packet.denseFrame
     let seen=0

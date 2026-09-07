@@ -255,6 +255,7 @@ function ScannerDomOverlay({
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
   const [isPersistentSurfelDebugVisible, setIsPersistentSurfelDebugVisible] = useState(false)
   const [isRgbDepthDebugVisible, setIsRgbDepthDebugVisible] = useState(false)
+  const [finishWarningVisible, setFinishWarningVisible] = useState(false)
   const rawCameraPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const [stabilizationOptions, setStabilizationOptions] = useState<DenseMaskStabilizationOptions>(
     () => ({ ...sessionState.debug.coverage.dense.stabilizationOptions }),
@@ -270,6 +271,12 @@ function ScannerDomOverlay({
   const rgbDepth = sessionState.debug.rgbDepth
   const realityColor = sessionState.debug.realityColor
   const denseReality = sessionState.debug.denseReality
+  const measurement = sessionState.debug.measurement
+  const measurementQueue = sessionState.debug.measurementQueue
+  const elapsedSeconds = Math.max(1, sessionState.debug.performance.xrSessionElapsedMs / 1000)
+  const scanReady = (measurement?.accepted ?? 0) >= 24 &&
+    denseReality.stableSampleCount >= 800 &&
+    ((denseReality.viewDiverseSampleCount ?? 0) >= 100 || (sessionState.debug.quality?.distanceWalkedMeters ?? 0) >= .4)
 
   useEffect(() => {
     const canvas = rawCameraPreviewCanvasRef.current
@@ -303,6 +310,15 @@ function ScannerDomOverlay({
   }
 
   function handleFinishScan(): void {
+    if (!scanReady) {
+      setFinishWarningVisible(true)
+      return
+    }
+    completeFinishScan()
+  }
+
+  function completeFinishScan(): void {
+    setFinishWarningVisible(false)
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
     setIsPersistentSurfelDebugVisible(false)
@@ -355,7 +371,7 @@ function ScannerDomOverlay({
     <>
       <section className="xr-scanner-hud" aria-label="Spatial Scanner controls">
         {!isStarting && !isFinishing && !isCancelling && <LiveRealityMapView bridge={liveMap} />}
-        {sessionState.debug.quality && <small>Depth tier {sessionState.debug.quality.tier} · phase {sessionState.debug.quality.phase + 1}/4 · {sessionState.debug.quality.distanceWalkedMeters.toFixed(1)} m walked · {sessionState.debug.denseReality.createdThisTick ?? 0} new / {sessionState.debug.denseReality.fusedThisTick ?? 0} fused</small>}
+        {isDebugOpen && sessionState.debug.quality && <small>XR {sessionState.debug.performance.fps.toFixed(1)} fps · depth/fusion {((measurementQueue?.completedPackets ?? 0)/elapsedSeconds).toFixed(1)} Hz · accepted {((measurement?.accepted ?? 0)/elapsedSeconds).toFixed(1)} Hz · fusion p95 {denseReality.fusionP95Ms?.toFixed(1) ?? '?'} ms · queue {measurementQueue?.queueDepth ?? 0} · latency p95 {measurementQueue?.latencyP95Ms.toFixed(0) ?? '?'} ms · acceptance {measurement?.acceptedPercentage.toFixed(0) ?? 0}% · new/matched {((denseReality.createdSampleCount ?? 0)/elapsedSeconds).toFixed(0)}/{((denseReality.fusedSampleCount ?? 0)/elapsedSeconds).toFixed(0)} s⁻¹ ({denseReality.matchRatioPercentage?.toFixed(0) ?? '?'}%) · stable {(denseReality.stableSampleCount/Math.max(1,denseReality.activeSampleCount)*100).toFixed(0)}% · diverse {((denseReality.viewDiverseSampleCount??0)/Math.max(1,denseReality.activeSampleCount)*100).toFixed(0)}% · capacity {denseReality.capacityUtilizationPercentage.toFixed(0)}% · tier {sessionState.debug.quality.tier}</small>}
         {sessionState.debug.denseReality.capacityUtilizationPercentage > 95 && <p role="status">Measured map nearly full. Stable surfaces are retained; new-area coverage may be limited. Finish before starting a separate scan of the extension.</p>}
         <div className="xr-scanner-hud-header">
           <div className="xr-scanner-hud-session">
@@ -414,6 +430,14 @@ function ScannerDomOverlay({
         <p className="xr-scanner-hud-guidance">{sessionState.debug.measurement
           ? formatScanQualityGuidance(sessionState.debug.measurement.guidance)
           : formatCoverageGuidance(coverage.guidance)}</p>
+
+        {finishWarningVisible && <div role="alert" className="xr-scanner-hud-guidance">
+          <p>More scanning needed for a clean model. Move slowly and capture the room from another angle.</p>
+          <div className="xr-scanner-hud-actions">
+            <button type="button" onClick={() => setFinishWarningVisible(false)}>Continue scanning</button>
+            <button type="button" onClick={completeFinishScan}>Finish anyway</button>
+          </div>
+        </div>}
 
         <div className="xr-scanner-hud-actions">
           <button

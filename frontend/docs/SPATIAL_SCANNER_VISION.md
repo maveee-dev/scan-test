@@ -1,9 +1,10 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1**. Production scan stability and
-clean measured Reality are the active milestone. M8.6.7.2 customization remains
-frozen pending physical reconstruction validation; see the M8.7/M8.7.1 sections
-below and the [M8.7.1 implementation report](M8_7_1_IMPLEMENTATION_REPORT.md).
+Current implementation: **Scanner Build M8.7.1.1**. Real-time capture throughput
+and reliable repeat-observation fusion are the active milestone. M8.6.7.2
+customization remains frozen pending physical reconstruction validation; see
+the M8.7/M8.7.1 sections below and the
+[M8.7.1.1 implementation report](M8_7_1_1_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2410,3 +2411,82 @@ M7 projection, quality-setting increase, customization change or invented
 geometry is part of M8.7.1. Physical three-scan POCO F5 repeatability, ceiling,
 stationary, walking, recess and fast-motion tests remain mandatory before this
 milestone can be called physically accepted.
+
+### M8.7.1.1 — Real-Time Capture Throughput and Reliable Fusion
+
+M8.7.1.1 responds to the physical 41-second POCO trace: a 51.8 ms XR interval,
+502.2 ms accepted-tick time, 87,834 created surfels, 27,834 provisional
+reclaims, only 1,705 view-diverse samples, and 6,802 duplicate candidates with
+zero reported rejection. Resolution remains 2.5 cm, capacity remains 60,000,
+and customization remains frozen.
+
+The former “Last processing” value covered almost the entire accepted capture
+path, not depth lookup alone. Timing is now split into depth capture, world
+reconstruction, packet validation/world consistency, RGB registration,
+appearance copy, coverage, persistent-surface processing, Dense fusion and
+render preparation. Each stage records bounded p50/p95/max samples. The XR
+callback still owns synchronous browser depth and camera access; application
+fusion work is handed to a latest-only main-thread task with one processing and
+at most one pending immutable packet. A newer packet replaces stale pending
+work atomically. No packet may borrow another frame's pose, phase, depth or RGB.
+
+Presentation, measurement cadence, fusion handoff, Live Map, high-resolution
+appearance and React diagnostics now have independent pressure behavior.
+High-resolution appearance captures only with a healthy XR interval and an
+empty fusion queue. Under pressure, Live Map geometry copies slow from 350 ms
+to 900 ms, its render cadence slows from about 30 Hz to 10 Hz, and React
+diagnostic publication slows from 4 Hz to roughly 1.3 Hz. Core packet capture
+is not reduced merely to refresh UI.
+
+#### Repeat-observation fusion
+
+The physical median nearest-neighbor spacing was 2.2 cm while the former merge
+radius was 2.1 cm. Deterministic temporal sub-grid phases could therefore place
+the same measured surface just outside the match radius and create a new surfel.
+Matching now searches center-first through a bounded two-cell neighborhood with
+a 3.4 cm Euclidean radius and a much tighter 1.4 cm point-to-plane compatibility
+gate. The wider tangential radius reinforces a 2.5 cm surface lattice; the
+point-to-plane and normal gates continue to preserve recesses and separate
+depth layers. Samples from one frame cannot use this wider radius to collapse
+adjacent lattice points.
+
+The prior lexical neighbor traversal could consume its candidate budget before
+reaching the nearest cell. Center-first traversal and explicit distance,
+normal, depth-layer, empty-bucket and budget failure counters make matching
+order-independent and inspectable. Established-surface consistency no longer
+runs a 9×9×9 string-hash search for every new point; confirmed surfels also live
+in a coarse bounded lookup used only for duplicate-sheet evidence.
+
+View diversity is based on each surfel's first camera position and direction,
+maximum baseline, and angular separation. A modest lateral sweep can therefore
+count even when both poses fall in the same old 45-degree world-azimuth bin.
+Repeated ticks at one pose still cannot create diversity or stability.
+
+#### Duplicate sheets and final mesh
+
+An explicit Dense `stabilityClass` is now authoritative in confidence filtering.
+Previously, a duplicate candidate marked provisional by Dense fusion could fall
+through to an observation-count fallback and be called stable, which explains
+why thousands of candidates could yield zero rejection. A suspicious parallel
+sample now needs its own time-separated multi-view support plus locally stable
+same-layer support, or independently measured nearby side-face/recess topology.
+It cannot borrow confidence from the established front wall.
+
+The former “unsupported triangle” count mixed degenerate pairs, large angular
+gaps and occupied-circumcircle alternatives. It counted combinatorial candidate
+pairs, not omitted samples, so 740,476 did not mean 740,476 missing triangles.
+Those reasons are now separate, alongside candidate-pair count, actual triangle
+participants, non-participants and fallback splats. Every valid colored sample
+that cannot safely participate in a triangle remains visible as a measured
+fallback splat; no hole or structural geometry is invented.
+
+The developer HUD reports XR FPS, capture/fusion/acceptance rates, fusion p95,
+queue depth and latency, new/matched rates, match percentage, stable and
+view-diverse percentages, capacity and quality tier. Finish warns when the scan
+lacks minimum accepted-frame/stability/viewpoint support and lets the user
+continue the same scan or explicitly finish anyway.
+
+M8.7.1.1 is not physically accepted by desktop tests. The next POCO run must
+verify capture smoothness, stage p95 values, low queue latency, substantially
+higher match/view-diverse ratios, reduced churn and repeatable Raw/Fused/Final
+geometry before any resolution or customization work resumes.

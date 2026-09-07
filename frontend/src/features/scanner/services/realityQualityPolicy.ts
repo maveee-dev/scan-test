@@ -17,6 +17,7 @@ export class RealityQualityPolicy {
   private fastTicks = 0
   private slowTicks = 0
   private tick = 0
+  private samplingTick = 0
   private lastFusion: ScanTrajectoryPoint | null = null
   private lastFrameTime = 0
   private motion = { translationMetersPerSecond: 0, rotationDegreesPerSecond: 0 }
@@ -55,15 +56,26 @@ export class RealityQualityPolicy {
     const tier = DEPTH_TIERS[this.tier]
     if (viewAspect !== undefined && Number.isFinite(viewAspect) && viewAspect >= .2 && viewAspect <= 5) {
       const budget = tier.columns * tier.rows, columns = Math.max(16, Math.round(Math.sqrt(budget * viewAspect)))
-      return { columns, rows: Math.floor(budget / columns), phase: Math.floor(this.tick / 2) % DEPTH_PHASES.length }
+      return { columns, rows: Math.floor(budget / columns), phase: Math.floor(this.samplingTick / 2) % DEPTH_PHASES.length }
     }
-    return { ...tier, phase: Math.floor(this.tick / 2) % DEPTH_PHASES.length }
+    return { ...tier, phase: Math.floor(this.samplingTick / 2) % DEPTH_PHASES.length }
   }
 
-  public recordTick(ms: number, attempted: number, valid: number, grid: { columns: number; rows: number } = DEPTH_TIERS[this.tier]): void {
+  /** Reserves a frame-local phase before a packet can enter backpressure. */
+  public claimSampling(viewAspect?: number): { columns: number; rows: number; phase: number } {
+    const sampling = this.sampling(viewAspect)
+    this.samplingTick += 1
+    return sampling
+  }
+
+  public shouldCaptureAppearance(queueDepth: number): boolean {
+    return queueDepth === 0 && (this.telemetry.xrFrameIntervalMs ?? 0) < 34 && this.telemetry.processingMs < 32
+  }
+
+  public recordTick(ms: number, attempted: number, valid: number, grid: { columns: number; rows: number; phase?: number } = DEPTH_TIERS[this.tier], phaseAlreadyClaimed = false): void {
     this.telemetry.columns = grid.columns; this.telemetry.rows = grid.rows
-    this.telemetry.phase = this.sampling().phase
-    this.tick++; this.telemetry.ticks = this.tick
+    this.telemetry.phase = grid.phase ?? this.sampling().phase
+    this.tick++; if(!phaseAlreadyClaimed)this.samplingTick++; this.telemetry.ticks = this.tick
     this.telemetry.attempted += attempted; this.telemetry.valid += valid; this.telemetry.processingMs = ms
     this.fastTicks = ms < 12 && (this.telemetry.xrFrameIntervalMs ?? 0) < 26 ? this.fastTicks + 1 : 0
     this.slowTicks = ms > 26 ? this.slowTicks + 1 : 0

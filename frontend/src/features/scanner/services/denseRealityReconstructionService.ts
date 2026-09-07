@@ -23,10 +23,14 @@ export interface DenseRealityMeasurementContext {
 export const DENSE_REALITY_CONFIG = Object.freeze({
   cellSizeMeters: 0.025,
   maxSamples: 60000,
-  maxMergeDistanceMeters: 0.021,
-  maxPointToPlaneResidualMeters: 0.012,
+  // The physical M8.7.1 median spacing was 2.2 cm. A 2.1 cm merge radius
+  // therefore forced repeat phase samples to become new surfels. Tangential
+  // matching may span a little more than one cell, while the tighter
+  // point-to-plane limit continues to preserve separate depth layers.
+  maxMergeDistanceMeters: 0.034,
+  maxPointToPlaneResidualMeters: 0.014,
   minNormalDot: Math.cos(40 * Math.PI / 180),
-  maxCandidatesPerSample: 48,
+  maxCandidatesPerSample: 96,
   minimumStableObservations: 2,
   sampleRadiusMeters: 0.0125,
 })
@@ -39,6 +43,18 @@ const DENSITY_CELL_SIZE_METERS = 0.05
 const SMALL_GAP_LIMIT_METERS = 0.04
 const LARGE_GAP_LIMIT_METERS = 0.12
 const MAX_DENSITY_CANDIDATES = 64
+const VIEW_DIVERSITY_BASELINE_METERS = 0.06
+const VIEW_DIVERSITY_ANGLE_RADIANS = 2.5 * Math.PI / 180
+const STRONG_VIEW_BASELINE_METERS = 0.15
+const STABLE_BUCKET_SIZE_METERS = 0.10
+
+const MATCH_CELL_OFFSETS = (() => {
+  const offsets: Array<readonly [number, number, number]> = []
+  for (let x = -2; x <= 2; x++) for (let y = -2; y <= 2; y++) for (let z = -2; z <= 2; z++) {
+    offsets.push([x, y, z])
+  }
+  return offsets.sort((a, b) => a[0] ** 2 + a[1] ** 2 + a[2] ** 2 - b[0] ** 2 - b[1] ** 2 - b[2] ** 2)
+})()
 
 function getTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
@@ -353,6 +369,12 @@ export class DenseRealityReconstructionService {
 
   private readonly geometryObservationCounts = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly viewMasks = new Uint16Array(DENSE_REALITY_CONFIG.maxSamples)
+  // Bounded diagnostics/diversity state: centimetres, signed normalized
+  // direction, centimetres and degrees respectively.
+  private readonly firstViewPositions = new Int16Array(DENSE_REALITY_CONFIG.maxSamples * 3)
+  private readonly firstViewDirections = new Int8Array(DENSE_REALITY_CONFIG.maxSamples * 3)
+  private readonly maximumViewBaselines = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
+  private readonly maximumViewAngles = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly lastFrameSequences = new Uint32Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly trackingQualitySums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
   private readonly positionResidualSquaredSums = new Float32Array(DENSE_REALITY_CONFIG.maxSamples)
@@ -370,6 +392,8 @@ export class DenseRealityReconstructionService {
   private readonly nextInCell = new Int32Array(DENSE_REALITY_CONFIG.maxSamples)
 
   private readonly cellHeads = new Map<string, number>()
+  private readonly stableBuckets = new Map<string, number[]>()
+  private readonly stableBucketIndexed = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
 
   private readonly samplePoint: SpatialPoint = { x: 0, y: 0, z: 0 }
 
@@ -382,6 +406,7 @@ export class DenseRealityReconstructionService {
   private readonly normalScratch: SpatialPoint = { x: 0, y: 0, z: 0 }
 
   private bestMatchDistance = 0
+  private lastMatchFailure: 'distance' | 'normal' | 'depth-layer' | 'bucket' | 'candidate-budget' = 'bucket'
 
   private activeSampleCount = 0
 
@@ -395,6 +420,12 @@ export class DenseRealityReconstructionService {
   private duplicateSurfaceCandidateCount = 0
   private viewDiverseSampleCount = 0
   private singleViewSampleCount = 0
+  private matchDistanceRejectCount = 0
+  private matchNormalRejectCount = 0
+  private matchDepthLayerRejectCount = 0
+  private matchBucketMissCount = 0
+  private matchCandidateBudgetRejectCount = 0
+  private readonly fusionDurations: number[] = []
 
   private totalCreatedSampleCount = 0
 
@@ -474,7 +505,7 @@ export class DenseRealityReconstructionService {
         continue
       }
 
-      const matchIndex = this.findCompatibleSample(this.samplePoint, this.sampleNormal)
+      const matchIndex = this.findCompatibleSample(this.samplePoint, this.sampleNormal, frameSequence)
       if (matchIndex >= 0) {
         this.recordView(matchIndex, cameraPosition)
         if (this.fuseSample(matchIndex, this.bestMatchDistance, red, green, blue, cameraPosition, timestamp, hasColor, frameSequence, trackingQuality)) {
@@ -484,6 +515,12 @@ export class DenseRealityReconstructionService {
         }
         continue
       }
+
+      if (this.lastMatchFailure === 'distance') this.matchDistanceRejectCount++
+      else if (this.lastMatchFailure === 'normal') this.matchNormalRejectCount++
+      else if (this.lastMatchFailure === 'depth-layer') this.matchDepthLayerRejectCount++
+      else if (this.lastMatchFailure === 'candidate-budget') this.matchCandidateBudgetRejectCount++
+      else this.matchBucketMissCount++
 
       if (this.activeSampleCount >= DENSE_REALITY_CONFIG.maxSamples) {
         this.capacityReached = true
@@ -509,6 +546,17 @@ export class DenseRealityReconstructionService {
     this.totalCreatedSampleCount += createdCount
     this.totalFusedSampleCount += fusedCount
     this.totalRejectedSampleCount += rejectedCount
+    const fusionMs = Math.max(0, getTimestamp() - startedAt)
+    if (this.fusionDurations.length >= 128) this.fusionDurations.shift()
+    this.fusionDurations.push(fusionMs)
+    const sortedFusion = [...this.fusionDurations].sort((a, b) => a - b)
+    const baselines: number[] = [], angles: number[] = []
+    const diagnosticStride = Math.max(1, Math.ceil(this.activeSampleCount / 512))
+    for (let index = 0; index < this.activeSampleCount; index += diagnosticStride) if (this.active[index]) {
+      baselines.push(this.maximumViewBaselines[index] / 100); angles.push(this.maximumViewAngles[index])
+    }
+    baselines.sort((a, b) => a - b); angles.sort((a, b) => a - b)
+    const p = (values: readonly number[], fraction: number) => values[Math.max(0, Math.ceil(values.length * fraction) - 1)] ?? 0
     this.diagnostics = {
       ...this.diagnostics,
       status: this.activeSampleCount > 0 ? 'active' : 'empty',
@@ -522,13 +570,13 @@ export class DenseRealityReconstructionService {
       capacity: DENSE_REALITY_CONFIG.maxSamples,
       capacityUtilizationPercentage: (this.activeSampleCount / DENSE_REALITY_CONFIG.maxSamples) * 100,
       capacityReached: this.capacityReached,
-      fusionMs: Math.max(0, getTimestamp() - startedAt),
+      fusionMs,
       lastCaptureTimestamp: timestamp,
       lastCameraSequence: this.lastCameraSequence,
       cameraCapturesUsed: this.cameraCapturesUsed,
       reclaimedSampleCount: this.reclaimedSamples,
       capacityRejectedSampleCount: this.capacityRejected,
-      numericMemoryBytes: DENSE_REALITY_CONFIG.maxSamples * 93 + this.colorObservationBySource.byteLength,
+      numericMemoryBytes: DENSE_REALITY_CONFIG.maxSamples * 104 + this.colorObservationBySource.byteLength,
       createdThisTick: createdCount,
       fusedThisTick: fusedCount,
       newGeometryRatio: createdCount / Math.max(1, createdCount + fusedCount),
@@ -536,6 +584,19 @@ export class DenseRealityReconstructionService {
       duplicateSurfaceCandidateCount: this.duplicateSurfaceCandidateCount,
       viewDiverseSampleCount: this.viewDiverseSampleCount,
       singleViewSampleCount: this.singleViewSampleCount,
+      matchDistanceRejectCount: this.matchDistanceRejectCount,
+      matchNormalRejectCount: this.matchNormalRejectCount,
+      matchDepthLayerRejectCount: this.matchDepthLayerRejectCount,
+      matchBucketMissCount: this.matchBucketMissCount,
+      matchCandidateBudgetRejectCount: this.matchCandidateBudgetRejectCount,
+      matchRatioPercentage: fusedCount / Math.max(1, createdCount + fusedCount) * 100,
+      viewBaselineP50Meters: p(baselines, .5),
+      viewBaselineP90Meters: p(baselines, .9),
+      viewAngleP50Degrees: p(angles, .5),
+      viewAngleP90Degrees: p(angles, .9),
+      fusionP50Ms: p(sortedFusion, .5),
+      fusionP95Ms: p(sortedFusion, .95),
+      fusionMaxMs: sortedFusion.at(-1) ?? 0,
     }
   }
 
@@ -697,6 +758,10 @@ export class DenseRealityReconstructionService {
     this.colorObservationCounts.fill(0)
     this.geometryObservationCounts.fill(0)
     this.viewMasks.fill(0)
+    this.firstViewPositions.fill(0)
+    this.firstViewDirections.fill(0)
+    this.maximumViewBaselines.fill(0)
+    this.maximumViewAngles.fill(0)
     this.lastFrameSequences.fill(0)
     this.trackingQualitySums.fill(0)
     this.positionResidualSquaredSums.fill(0)
@@ -709,12 +774,16 @@ export class DenseRealityReconstructionService {
     this.active.fill(0)
     this.nextInCell.fill(-1)
     this.cellHeads.clear()
+    this.stableBuckets.clear()
+    this.stableBucketIndexed.fill(0)
     this.activeSampleCount = 0
     this.stableSampleCount = 0
     this.capacityReached = false
     this.reclaimCursor = 0; this.reclaimedSamples = 0; this.capacityRejected = 0
     this.sameFrameDuplicateCount = 0
     this.duplicateSurfaceCandidateCount = 0;this.viewDiverseSampleCount=0;this.singleViewSampleCount=0
+    this.matchDistanceRejectCount=0;this.matchNormalRejectCount=0;this.matchDepthLayerRejectCount=0;this.matchBucketMissCount=0;this.matchCandidateBudgetRejectCount=0
+    this.fusionDurations.length=0
     this.totalCreatedSampleCount = 0
     this.totalFusedSampleCount = 0
     this.totalRejectedSampleCount = 0
@@ -731,27 +800,35 @@ export class DenseRealityReconstructionService {
     this.reset()
   }
 
-  private findCompatibleSample(point: SpatialPoint, normal: SpatialPoint): number {
+  private findCompatibleSample(point: SpatialPoint, normal: SpatialPoint, frameSequence: number): number {
     const cellX = getCellCoordinate(point.x)
     const cellY = getCellCoordinate(point.y)
     const cellZ = getCellCoordinate(point.z)
     let candidateCount = 0
     let bestIndex = -1
     let bestDistance = Infinity
-    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-        for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
+    let sawCandidate = false, sawDistance = false, sawNormal = false, exhausted = false
+    for (const [offsetX, offsetY, offsetZ] of MATCH_CELL_OFFSETS) {
           const head = this.cellHeads.get(getCellKey(cellX + offsetX, cellY + offsetY, cellZ + offsetZ))
           let index = head ?? -1
-          while (index >= 0 && candidateCount < DENSE_REALITY_CONFIG.maxCandidatesPerSample) {
+          while (index >= 0) {
+            if (candidateCount >= DENSE_REALITY_CONFIG.maxCandidatesPerSample) { exhausted = true; break }
             candidateCount += 1
             if (this.active[index] === 1) {
+              sawCandidate = true
               const positionOffset = index * 3
               const dx = point.x - this.positions[positionOffset]
               const dy = point.y - this.positions[positionOffset + 1]
               const dz = point.z - this.positions[positionOffset + 2]
               const distanceSquared = dx * dx + dy * dy + dz * dz
               if (distanceSquared <= DENSE_REALITY_CONFIG.maxMergeDistanceMeters ** 2) {
+                // A wider temporal match radius must not collapse adjacent
+                // lattice samples captured in this same frame.
+                if (this.lastFrameSequences[index] === frameSequence && distanceSquared > .010 ** 2) {
+                  index = this.nextInCell[index]
+                  continue
+                }
+                sawDistance = true
                 const normalDot = Math.abs(
                   normal.x * this.normals[positionOffset] +
                   normal.y * this.normals[positionOffset + 1] +
@@ -771,15 +848,19 @@ export class DenseRealityReconstructionService {
                     bestIndex = index
                     bestDistance = distance
                   }
-                }
+                } else if (normalDot >= DENSE_REALITY_CONFIG.minNormalDot) sawNormal = true
               }
             }
             index = this.nextInCell[index]
           }
-        }
-      }
+          if (exhausted && bestIndex >= 0) break
     }
     this.bestMatchDistance = bestDistance
+    this.lastMatchFailure = bestIndex >= 0 ? 'bucket'
+      : exhausted ? 'candidate-budget'
+        : sawNormal ? 'depth-layer'
+          : sawDistance ? 'normal'
+            : sawCandidate ? 'distance' : 'bucket'
     return bestIndex
   }
 
@@ -810,6 +891,10 @@ export class DenseRealityReconstructionService {
     this.colorObservationCounts[index] = hasColor ? 1 : 0
     if(reusedIndex!==undefined){if(this.duplicateSurfaceCandidates[index])this.duplicateSurfaceCandidateCount--;const views=this.viewMasks[index].toString(2).replaceAll('0','').length;if(views===1)this.singleViewSampleCount--;else if(views>=2)this.viewDiverseSampleCount--}
     this.viewMasks[index] = 0
+    this.firstViewPositions.fill(0, offset, offset + 3)
+    this.firstViewDirections.fill(0, offset, offset + 3)
+    this.maximumViewBaselines[index] = 0
+    this.maximumViewAngles[index] = 0
     this.lastFrameSequences[index] = frameSequence
     this.trackingQualitySums[index] = trackingQuality
     this.positionResidualSquaredSums[index] = 0
@@ -844,11 +929,40 @@ export class DenseRealityReconstructionService {
 
   private recordView(index: number, camera: ViewerPosition | null): void {
     if (!camera) return
-    const offset = index * 3, x = camera.x - this.positions[offset], y = camera.y - this.positions[offset + 1], z = camera.z - this.positions[offset + 2]
-    const azimuth = Math.min(7, Math.floor((Math.atan2(x, z) + Math.PI) / (Math.PI * 2) * 8))
-    const elevation = y > Math.hypot(x, z) * .35 ? 1 : 0
+    const offset = index * 3
+    const x = camera.x - this.positions[offset], y = camera.y - this.positions[offset + 1], z = camera.z - this.positions[offset + 2]
+    const length = Math.hypot(x, y, z)
+    if (length <= VECTOR_EPSILON) return
     const before=this.viewMasks[index].toString(2).replaceAll('0','').length
-    this.viewMasks[index] |= 1 << (azimuth + elevation * 8)
+    if (before === 0) {
+      this.firstViewPositions[offset] = Math.max(-32768,Math.min(32767,Math.round(camera.x*100)))
+      this.firstViewPositions[offset + 1] = Math.max(-32768,Math.min(32767,Math.round(camera.y*100)))
+      this.firstViewPositions[offset + 2] = Math.max(-32768,Math.min(32767,Math.round(camera.z*100)))
+      this.firstViewDirections[offset] = Math.round(x / length*127)
+      this.firstViewDirections[offset + 1] = Math.round(y / length*127)
+      this.firstViewDirections[offset + 2] = Math.round(z / length*127)
+      this.viewMasks[index] = 1
+    } else {
+      const baseline = Math.hypot(
+        camera.x - this.firstViewPositions[offset]/100,
+        camera.y - this.firstViewPositions[offset + 1]/100,
+        camera.z - this.firstViewPositions[offset + 2]/100,
+      )
+      const cosine = clamp(
+        x / length * this.firstViewDirections[offset]/127 +
+        y / length * this.firstViewDirections[offset + 1]/127 +
+        z / length * this.firstViewDirections[offset + 2]/127,
+        -1,
+        1,
+      )
+      const angle = Math.acos(cosine)
+      this.maximumViewBaselines[index] = Math.max(this.maximumViewBaselines[index],Math.min(255,Math.round(baseline*100)))
+      this.maximumViewAngles[index] = Math.max(this.maximumViewAngles[index],Math.min(255,Math.round(angle*180/Math.PI)))
+      if ((baseline >= VIEW_DIVERSITY_BASELINE_METERS && angle >= VIEW_DIVERSITY_ANGLE_RADIANS) || baseline >= STRONG_VIEW_BASELINE_METERS) {
+        this.viewMasks[index] |= 2
+      }
+      if (baseline >= .30 && angle >= VIEW_DIVERSITY_ANGLE_RADIANS * 2) this.viewMasks[index] |= 4
+    }
     const after=this.viewMasks[index].toString(2).replaceAll('0','').length
     if(before===0&&after===1)this.singleViewSampleCount++
     else if(before===1&&after===2){this.singleViewSampleCount--;this.viewDiverseSampleCount++}
@@ -953,7 +1067,7 @@ export class DenseRealityReconstructionService {
     this.geometryObservationCounts[index] += 1
     this.lastObservedAt[index] = timestamp
     const wasStable=this.stable[index]===1,nextStable=this.isStableSample(index)
-    if(!wasStable&&nextStable){this.stable[index]=1;this.stableSampleCount++}
+    if(!wasStable&&nextStable){this.stable[index]=1;this.stableSampleCount++;this.indexStableSample(index)}
     else if(wasStable&&!nextStable){this.stable[index]=0;this.stableSampleCount--}
     return true
   }
@@ -970,16 +1084,31 @@ export class DenseRealityReconstructionService {
 
   /** 0 unknown, 1 compatible existing surface, 2 suspicious parallel offset. */
   private classifyEstablishedRelation(point:SpatialPoint,normal:SpatialPoint):0|1|2 {
-    const cx=getCellCoordinate(point.x),cy=getCellCoordinate(point.y),cz=getCellCoordinate(point.z)
+    if(this.stableSampleCount<32)return 0
+    const coordinate=(value:number)=>Math.floor(value/STABLE_BUCKET_SIZE_METERS)
+    const cx=coordinate(point.x),cy=coordinate(point.y),cz=coordinate(point.z)
     let result:0|1|2=0,candidates=0
-    for(let x=-4;x<=4;x++)for(let y=-4;y<=4;y++)for(let z=-4;z<=4;z++){
-      let index=this.cellHeads.get(getCellKey(cx+x,cy+y,cz+z))??-1
-      while(index>=0&&candidates++<64){if(this.active[index]&&this.stable[index]){const o=index*3,dx=point.x-this.positions[o],dy=point.y-this.positions[o+1],dz=point.z-this.positions[o+2],distance=Math.hypot(dx,dy,dz),dot=Math.abs(normal.x*this.normals[o]+normal.y*this.normals[o+1]+normal.z*this.normals[o+2]),residual=Math.abs(dx*this.normals[o]+dy*this.normals[o+1]+dz*this.normals[o+2])
+    for(let x=-2;x<=2;x++)for(let y=-2;y<=2;y++)for(let z=-2;z<=2;z++){
+      const bucket=this.stableBuckets.get(getCellKey(cx+x,cy+y,cz+z))
+      if(!bucket)continue
+      for(const index of bucket){if(candidates++>=96)return result;if(this.active[index]&&this.stable[index]){const o=index*3,dx=point.x-this.positions[o],dy=point.y-this.positions[o+1],dz=point.z-this.positions[o+2],distance=Math.hypot(dx,dy,dz),dot=Math.abs(normal.x*this.normals[o]+normal.y*this.normals[o+1]+normal.z*this.normals[o+2]),residual=Math.abs(dx*this.normals[o]+dy*this.normals[o+1]+dz*this.normals[o+2])
         if(distance<=.035&&dot>=.8)return 1
         if(distance<=.12&&residual>=.028&&dot>=.94)result=2
-      }index=this.nextInCell[index]}
+      }}
     }
     return result
+  }
+
+  private indexStableSample(index:number):void {
+    if(this.stableBucketIndexed[index])return
+    const offset=index*3,key=getCellKey(
+      Math.floor(this.positions[offset]/STABLE_BUCKET_SIZE_METERS),
+      Math.floor(this.positions[offset+1]/STABLE_BUCKET_SIZE_METERS),
+      Math.floor(this.positions[offset+2]/STABLE_BUCKET_SIZE_METERS),
+    )
+    const bucket=this.stableBuckets.get(key)
+    if(bucket)bucket.push(index);else this.stableBuckets.set(key,[index])
+    this.stableBucketIndexed[index]=1
   }
 
 }

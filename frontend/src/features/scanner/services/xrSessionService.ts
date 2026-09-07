@@ -38,6 +38,9 @@ import {
 import { RealitySurfelColorFusionService } from './realitySurfelColorFusionService'
 import { DenseRealityReconstructionService } from './denseRealityReconstructionService'
 import { RealityRgbKeyframeService } from './realityRgbKeyframeService'
+import { RealityMeasurementQueueService } from './realityMeasurementQueueService'
+import type { RealityFrameAcceptance, RealityMeasurementPacket } from './realityMeasurementStabilityService'
+import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -86,6 +89,15 @@ export interface XRSessionStartOptions {
 interface ReferenceSpaceResult {
   referenceSpace: XRReferenceSpace
   type: ScannerReferenceSpaceType
+}
+
+interface QueuedRealityMeasurement {
+  readonly packet: RealityMeasurementPacket
+  readonly acceptance: RealityFrameAcceptance
+  readonly registration: RgbDepthRegistrationResult | null
+  readonly cameraDirection: ViewerDirection
+  readonly depthReconstructionDurationMs: number
+  readonly sampling: { columns: number; rows: number; phase: number }
 }
 
 function updatePosition(target: ViewerPosition, position: DOMPointReadOnly): void {
@@ -167,6 +179,9 @@ export class XRSessionService {
   private readonly appearanceKeyframeService = new RealityRgbKeyframeService(true)
   private readonly qualityPolicy = new RealityQualityPolicy()
   private readonly measurementStabilityService = new RealityMeasurementStabilityService()
+  private readonly measurementQueue = new RealityMeasurementQueueService<QueuedRealityMeasurement>(
+    (measurement) => this.processQueuedMeasurement(measurement),
+  )
   public readonly liveMap = new LiveRealityMap()
 
   private referenceSpace: XRReferenceSpace | null = null
@@ -297,6 +312,9 @@ export class XRSessionService {
       return
     }
 
+    // Cancel the newest pending packet before any stateful fusion service is
+    // reset. A scheduled task must never repopulate a stopped scan.
+    this.measurementQueue.reset()
     this.rawCameraService.dispose()
     this.rgbDepthRegistrationService.reset()
     this.realitySurfelColorFusionService.reset()
@@ -343,6 +361,7 @@ export class XRSessionService {
     this.rawCameraCopyPhase = 0
 
     try {
+      await this.measurementQueue.flush()
       const finishedAt = Date.now()
       const fusedSurfaceSurfels = this.persistentLiveSurfaceService.getFinalizationSurfels(
         this.spatialCoverageService,
@@ -382,6 +401,7 @@ export class XRSessionService {
         liveRgbDimensions: { width: liveRgb.copyWidth, height: liveRgb.copyHeight },
         rawMeasurements: Object.freeze(this.measurementStabilityService.createRawSnapshot()),
         measurementDiagnostics: Object.freeze(this.measurementStabilityService.getDiagnostics()),
+        measurementQueueDiagnostics: Object.freeze(this.measurementQueue.getDiagnostics()),
       }) : null
 
       await this.endActiveSession(session)
@@ -620,6 +640,10 @@ export class XRSessionService {
         primaryView && physicalPose &&
         time - this.lastDenseMaskUpdatedAt >= DENSE_MASK_UPDATE_INTERVAL_MS,
       )
+      if (primaryView && physicalPose) {
+        if (denseMeasurementDue) this.measurementStabilityService.recordCandidateTick()
+        else this.measurementStabilityService.recordCadenceSkipped()
+      }
       const motionAllowsMeasurement = Boolean(
         denseMeasurementDue && physicalPose && this.qualityPolicy.shouldProcess(physicalPose),
       )
@@ -650,7 +674,7 @@ export class XRSessionService {
         // getDepthInMeters uses normalized VIEW coordinates, so distribute the
         // fixed attempt budget according to view projection aspect, not raw
         // camera/depth-buffer orientation or a second projection convention.
-        const sampling = this.qualityPolicy.sampling(Math.abs(primaryView.projectionMatrix[5] / primaryView.projectionMatrix[0]))
+        const sampling = this.qualityPolicy.claimSampling(Math.abs(primaryView.projectionMatrix[5] / primaryView.projectionMatrix[0]))
         const denseDepthObservation = this.depthService.inspectDenseFrame(
           frame,
           primaryView,
@@ -662,6 +686,7 @@ export class XRSessionService {
           'depthAcquisition',
           getPerformanceTimestamp() - denseDepthStartedAt,
         )
+        this.measurementQueue.recordStage('depth-capture', getPerformanceTimestamp() - denseDepthStartedAt)
         if (denseDepthObservation) {
           const densePointStartedAt = getPerformanceTimestamp()
           const reconstructedPointFrame = this.spatialPointService.processDenseFrame(
@@ -672,11 +697,13 @@ export class XRSessionService {
             getPerformanceTimestamp() - densePointStartedAt,
           )
           this.performanceTracker.recordStage('candidateGeneration', densePointDurationMs)
+          this.measurementQueue.recordStage('world-reconstruction', densePointDurationMs)
           const depthReconstructionDurationMs = Math.max(
             0,
             getPerformanceTimestamp() - denseDepthStartedAt,
           )
 
+          const validationStartedAt=getPerformanceTimestamp()
           const depthDebug=this.depthService.getDiagnostics()
           const packet=this.measurementStabilityService.createPacket({sequence:this.xrFrameCount,timestamp:time,
             referenceSpaceType:this.referenceSpaceType??'local',samplingPhase:sampling.phase,qualityTier:this.qualityPolicy.snapshot().tier,
@@ -684,185 +711,69 @@ export class XRSessionService {
             depthWidth:depthDebug.width,depthHeight:depthDebug.height,depthScale:depthDebug.rawValueToMeters})
           const consistency=this.denseRealityReconstructionService.assessFrameConsistency(packet.denseFrame,packet.normals,packet.normalValid)
           const acceptance=this.measurementStabilityService.evaluate(packet,consistency)
+          this.measurementQueue.recordStage('packet-validation',getPerformanceTimestamp()-validationStartedAt)
           const densePointFrame=packet.denseFrame
           if (acceptance.accepted) {
-
-          this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
-          // Separate sparse appearance copies on the non-fusion phase. Never
-          // replace the mask keyframes or change their resolution/cadence.
-          if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1) {
-            this.appearanceKeyframeService.considerCapture(frame, primaryView, time, this.position, this.viewerDirection,
-              densePointFrame.validPointCount * 3600 / (sampling.columns * sampling.rows), this.rawCameraService, this.qualityPolicy.appearanceMotion())
-          }
-          let currentRawCameraFrame: RawCameraCopyFrame | null = null
-          let currentRgbDepthResult: ReturnType<RgbDepthRegistrationService['process']> | null = null
-          const realityCaptureAvailable = this.realityCaptureEnabled && this.rawCameraService.isAvailable()
-          const cameraProbeEnabled = realityCaptureAvailable ||
-            this.rgbDepthDebugVisible ||
-            this.rawCameraDebugVisible
-          if (cameraProbeEnabled && this.rawCameraCopyPhase === 0) {
-            if (this.realityCaptureEnabled) {
-              this.realitySurfelColorFusionService.recordEligibleRgbdTick()
+            this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
+            const queueIdle = this.measurementQueue.getDiagnostics().queueDepth === 0
+            // High-resolution appearance is optional and yields first under
+            // pressure. The M8.6 mask keyframe cadence remains unchanged.
+            if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1 && queueIdle &&
+              this.qualityPolicy.shouldCaptureAppearance(0)) {
+              const appearanceStartedAt=getPerformanceTimestamp()
+              this.appearanceKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position, this.viewerDirection,
+                densePointFrame.validPointCount * 3600 / (sampling.columns * sampling.rows), this.rawCameraService, this.qualityPolicy.appearanceMotion())
+              this.measurementQueue.recordStage('appearance-copy',getPerformanceTimestamp()-appearanceStartedAt)
+            } else if(this.realityCaptureEnabled&&this.rawCameraCopyPhase===1) this.appearanceKeyframeService.recordPressureSkip()
+            let currentRawCameraFrame: RawCameraCopyFrame | null = null
+            let currentRgbDepthResult: RgbDepthRegistrationResult | null = null
+            const realityCaptureAvailable = this.realityCaptureEnabled && this.rawCameraService.isAvailable()
+            const cameraProbeEnabled = realityCaptureAvailable || this.rgbDepthDebugVisible || this.rawCameraDebugVisible
+            if (cameraProbeEnabled && this.rawCameraCopyPhase === 0) {
+              if (this.realityCaptureEnabled) this.realitySurfelColorFusionService.recordEligibleRgbdTick()
+              if (densePointFrame.validPointCount > 0) {
+                const copied = this.rawCameraService.copyFrame(frame, primaryView, time, this.rawCameraDebugVisible)
+                if (copied) {
+                  currentRawCameraFrame = this.rawCameraService.getLatestCopyFrame()
+                  this.realityRgbKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position,
+                    this.viewerDirection, densePointFrame.validPointCount, this.rawCameraService)
+                }
+              } else this.rawCameraService.recordSkipped()
             }
-            if (densePointFrame.validPointCount > 0) {
-              const copied = this.rawCameraService.copyFrame(
-                frame,
-                primaryView,
-                time,
-                this.rawCameraDebugVisible,
-              )
-              if (copied) {
-                currentRawCameraFrame = this.rawCameraService.getLatestCopyFrame()
-                // A separate 320px-long-edge copy is considered only after a
-                // validated camera/RGB-D tick and only when pose diversity
-                // warrants one. It never changes the 160px fusion copy.
-                this.realityRgbKeyframeService.considerCapture(
-                  frame,
-                  primaryView,
-                  time,
-                  this.position,
-                  this.viewerDirection,
-                  densePointFrame.validPointCount,
-                  this.rawCameraService,
-                )
-              }
-            } else {
-              this.rawCameraService.recordSkipped()
+            if (this.realityCaptureEnabled && !this.rawCameraService.isAvailable()) {
+              this.realityCaptureEnabled = false
+              this.realitySurfelColorFusionService.setCameraAvailability(false)
             }
-          }
-
-          if (this.realityCaptureEnabled && !this.rawCameraService.isAvailable()) {
-            this.realityCaptureEnabled = false
-            this.realitySurfelColorFusionService.setCameraAvailability(false)
-          }
-
-          if (this.realityCaptureEnabled || this.rgbDepthDebugVisible) {
-            if (currentRawCameraFrame) {
-              currentRgbDepthResult = this.rgbDepthRegistrationService.process(
-                densePointFrame,
-                primaryView,
-                currentRawCameraFrame,
-                time,
-                true,
-              )
-              if (this.rgbDepthDebugVisible) {
-                this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
-              }
-            } else if (this.rawCameraService.isAvailable()) {
-              this.rgbDepthRegistrationService.recordStaleFrame(
-                densePointFrame.validPointCount,
-                time,
-              )
-            } else {
-              currentRgbDepthResult = this.rgbDepthRegistrationService.process(
-                densePointFrame,
-                primaryView,
-                null,
-                time,
-                false,
-              )
-              if (this.rgbDepthDebugVisible) {
-                this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
+            if (this.realityCaptureEnabled || this.rgbDepthDebugVisible) {
+              if (currentRawCameraFrame) {
+                const registrationStartedAt=getPerformanceTimestamp()
+                currentRgbDepthResult = this.rgbDepthRegistrationService.process(densePointFrame, primaryView, currentRawCameraFrame, time, true)
+                this.measurementQueue.recordStage('rgb-registration',getPerformanceTimestamp()-registrationStartedAt)
+                if (this.rgbDepthDebugVisible) this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
+              } else if (this.rawCameraService.isAvailable()) {
+                this.rgbDepthRegistrationService.recordStaleFrame(densePointFrame.validPointCount, time)
+              } else {
+                currentRgbDepthResult = this.rgbDepthRegistrationService.process(densePointFrame, primaryView, null, time, false)
+                if (this.rgbDepthDebugVisible) this.spatialCoverageRenderService.updateRgbDepthMesh(currentRgbDepthResult.mesh)
               }
             }
-          }
-
-          const coverageStartedAt = getPerformanceTimestamp()
-          this.spatialCoverageService.processDenseFrame(
-            densePointFrame,
-            this.position,
-            this.viewerDirection,
-            time,
-            this.mappingPhase,
-          )
-          this.performanceTracker.recordStage(
-            'coverageUpdate',
-            getPerformanceTimestamp() - coverageStartedAt,
-          )
-          this.mappingPhase = (this.mappingPhase + 1) % 4
-
-          const persistentSurfaceResult = this.persistentLiveSurfaceService.processFrame(
-            densePointFrame,
-            this.position,
-            time,
-            this.spatialCoverageService,
-            this.persistentSurfelDebugVisible,
-          )
-          this.performanceTracker.recordStage(
-            'normalFiltering',
-            persistentSurfaceResult.performance.normalFilteringDurationMs,
-          )
-          this.performanceTracker.recordStage(
-            'fusionUpdate',
-            persistentSurfaceResult.performance.fusionDurationMs,
-          )
-
-          if (currentRgbDepthResult) {
-            this.realitySurfelColorFusionService.process(
-              currentRgbDepthResult,
-              densePointFrame,
-              persistentSurfaceResult.matchedSurfelIds,
-              persistentSurfaceResult.matchedSurfelGenerations,
-              persistentSurfaceResult.removedSurfelIds,
-              this.persistentLiveSurfaceService,
-              this.position,
-              time,
-              persistentSurfaceResult.activeSurfelCount,
-            )
-          }
-          if (this.realityCaptureEnabled) {
-            // Geometry-only ticks never reuse stale camera pixels.
-            this.denseRealityReconstructionService.process(
-              currentRgbDepthResult,
-              densePointFrame,
-              this.persistentLiveSurfaceService,
-              this.position,
-              time,
-              {frameSequence:packet.sequence,trackingQuality:acceptance.trackingQuality},
-            )
-          }
-
-          const persistentRenderStartedAt = getPerformanceTimestamp()
-          this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
-            persistentSurfaceResult.persistentSurfaceMesh,
-          )
-          this.performanceTracker.recordStage(
-            'persistentRenderPreparation',
-            persistentSurfaceResult.performance.renderPreparationDurationMs +
-              getPerformanceTimestamp() - persistentRenderStartedAt,
-          )
-
-          const candidateVisualizationStartedAt = getPerformanceTimestamp()
-          this.spatialCoverageRenderService.updateCandidateSurfaceMesh(
-            persistentSurfaceResult.candidateSurfaceMesh,
-          )
-          if (this.rawCurrentDepthVisible) {
-            const denseMesh = this.denseSurfaceMaskService.build(
-              densePointFrame,
-              this.spatialCoverageService,
-              time,
-              depthReconstructionDurationMs,
-            )
-            this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
-          } else {
-            this.spatialCoverageRenderService.clearDenseMesh()
-          }
-          this.performanceTracker.recordStage(
-            'candidateVisualization',
-            getPerformanceTimestamp() - candidateVisualizationStartedAt,
-          )
-          this.lastDenseMaskUpdatedAt = time
-          this.qualityPolicy.recordTick(getPerformanceTimestamp() - depthAcquisitionStartedAt,
-            sampling.columns * sampling.rows, densePointFrame.validPointCount, sampling)
+            const queuedRegistration=currentRgbDepthResult?{...currentRgbDepthResult,
+              sourceSampleIndices:new Int32Array(currentRgbDepthResult.sourceSampleIndices),
+              srgbColors:new Uint8Array(currentRgbDepthResult.srgbColors)}:null
+            const result=this.measurementQueue.enqueue({packet,acceptance,registration:queuedRegistration,
+              cameraDirection:{...(this.viewerDirection??{x:0,y:0,z:-1})},depthReconstructionDurationMs,sampling})
+            if(result==='replaced'||result==='dropped')this.measurementStabilityService.recordBackpressureSkipped()
           } else {
             this.latestSpatialObservations=[]
             this.spatialCoverageRenderService.clearCandidateSurfaceMesh()
             this.spatialCoverageRenderService.clearDenseMesh()
             if(this.rgbDepthDebugVisible)this.spatialCoverageRenderService.clearRgbDepthMesh()
             this.lastDenseMaskUpdatedAt=time
-            this.qualityPolicy.recordTick(getPerformanceTimestamp()-depthAcquisitionStartedAt,sampling.columns*sampling.rows,densePointFrame.validPointCount,sampling)
           }
+          this.lastDenseMaskUpdatedAt=time
+          this.qualityPolicy.recordTick(getPerformanceTimestamp()-depthAcquisitionStartedAt,sampling.columns*sampling.rows,densePointFrame.validPointCount,sampling,true)
         } else {
+          this.measurementStabilityService.recordDepthMissing()
           const candidateVisualizationStartedAt = getPerformanceTimestamp()
           if (this.rawCurrentDepthVisible) {
             const cachedDenseMesh = this.denseSurfaceMaskService.buildCached(time)
@@ -880,6 +791,7 @@ export class XRSessionService {
             this.spatialCoverageRenderService.clearRgbDepthMesh()
           }
           this.lastDenseMaskUpdatedAt = time
+          this.qualityPolicy.recordTick(getPerformanceTimestamp()-depthAcquisitionStartedAt,sampling.columns*sampling.rows,0,sampling,true)
         }
       }
 
@@ -888,12 +800,14 @@ export class XRSessionService {
       this.performanceTracker.recordStage('webGlDraw', getPerformanceTimestamp() - renderStartedAt)
       // DOM-overlay canvas has its own renderer/context/camera. Keep it driven
       // by XR rAF: window rAF can be suspended during immersive presentation.
+      const qualitySnapshot=this.qualityPolicy.snapshot()
+      const scannerUnderPressure=this.measurementQueue.getDiagnostics().queueDepth>0||(qualitySnapshot.xrFrameIntervalMs??0)>38
       if (physicalPose) {
-        try { this.liveMap.publish({ pose: physicalPose, copy: (positions, colors) => this.denseRealityReconstructionService.copyLiveMap(positions, colors) }) }
+        try { this.liveMap.publish({ pose: physicalPose, copy: (positions, colors) => this.denseRealityReconstructionService.copyLiveMap(positions, colors),underPressure:scannerUnderPressure }) }
         catch { /* Inspection failure must never terminate measured capture. */ }
       }
 
-      if (time - this.lastPublishedAt >= DEBUG_SAMPLE_INTERVAL_MS) {
+      if (time - this.lastPublishedAt >= (scannerUnderPressure?DEBUG_SAMPLE_INTERVAL_MS*3:DEBUG_SAMPLE_INTERVAL_MS)) {
         this.lastPublishedAt = time
         const previewStartedAt = getPerformanceTimestamp()
         this.spatialPointPreviewService.render(this.latestSpatialObservations)
@@ -942,6 +856,82 @@ export class XRSessionService {
     )
   }
 
+  private processQueuedMeasurement(measurement: QueuedRealityMeasurement): void {
+    const { packet, acceptance, registration, cameraDirection, depthReconstructionDurationMs } = measurement
+    const densePointFrame = packet.denseFrame
+    const cameraPosition = packet.pose.position
+    const time = packet.timestamp
+
+    const coverageStartedAt = getPerformanceTimestamp()
+    this.spatialCoverageService.processDenseFrame(
+      densePointFrame,
+      cameraPosition,
+      cameraDirection,
+      time,
+      this.mappingPhase,
+    )
+    this.measurementQueue.recordStage('coverage', getPerformanceTimestamp() - coverageStartedAt)
+    this.mappingPhase = (this.mappingPhase + 1) % 4
+
+    const persistentStartedAt = getPerformanceTimestamp()
+    const persistentSurfaceResult = this.persistentLiveSurfaceService.processFrame(
+      densePointFrame,
+      cameraPosition,
+      time,
+      this.spatialCoverageService,
+      this.persistentSurfelDebugVisible,
+    )
+    this.measurementQueue.recordStage('persistent-surface', getPerformanceTimestamp() - persistentStartedAt)
+
+    if (registration) {
+      this.realitySurfelColorFusionService.process(
+        registration,
+        densePointFrame,
+        persistentSurfaceResult.matchedSurfelIds,
+        persistentSurfaceResult.matchedSurfelGenerations,
+        persistentSurfaceResult.removedSurfelIds,
+        this.persistentLiveSurfaceService,
+        cameraPosition,
+        time,
+        persistentSurfaceResult.activeSurfelCount,
+      )
+    }
+    if (this.realityCaptureEnabled) {
+      const denseStartedAt = getPerformanceTimestamp()
+      this.denseRealityReconstructionService.process(
+        registration,
+        densePointFrame,
+        this.persistentLiveSurfaceService,
+        cameraPosition,
+        time,
+        { frameSequence: packet.sequence, trackingQuality: acceptance.trackingQuality },
+      )
+      this.measurementQueue.recordStage('dense-fusion', getPerformanceTimestamp() - denseStartedAt)
+      const fusion = this.denseRealityReconstructionService.getDiagnostics()
+      this.measurementStabilityService.recordFusion(fusion.createdThisTick ?? 0, fusion.fusedThisTick ?? 0)
+    }
+
+    const renderStartedAt = getPerformanceTimestamp()
+    this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
+      persistentSurfaceResult.persistentSurfaceMesh,
+    )
+    this.spatialCoverageRenderService.updateCandidateSurfaceMesh(
+      persistentSurfaceResult.candidateSurfaceMesh,
+    )
+    if (this.rawCurrentDepthVisible) {
+      const denseMesh = this.denseSurfaceMaskService.build(
+        densePointFrame,
+        this.spatialCoverageService,
+        time,
+        depthReconstructionDurationMs,
+      )
+      this.spatialCoverageRenderService.updateDenseMesh(denseMesh)
+    } else {
+      this.spatialCoverageRenderService.clearDenseMesh()
+    }
+    this.measurementQueue.recordStage('render-preparation', getPerformanceTimestamp() - renderStartedAt)
+  }
+
   private createDiagnosticsSnapshot(time: number): ViewerPoseDebug {
     const renderDiagnostics = this.spatialCoverageRenderService.getDiagnostics()
     const denseDiagnostics = this.denseSurfaceMaskService.getDiagnostics()
@@ -978,6 +968,7 @@ export class XRSessionService {
       denseReality: this.denseRealityReconstructionService.getDiagnostics(),
       quality: this.qualityPolicy.snapshot(),
       measurement: this.measurementStabilityService.getDiagnostics(),
+      measurementQueue: this.measurementQueue.getDiagnostics(),
     }
   }
 
@@ -1027,6 +1018,7 @@ export class XRSessionService {
     this.appearanceKeyframeService.reset()
     this.qualityPolicy.reset()
     this.measurementStabilityService.reset()
+    this.measurementQueue.reset()
     this.isEnding = false
     this.performanceTracker.reset(getPerformanceTimestamp())
 
@@ -1124,6 +1116,7 @@ export class XRSessionService {
     this.appearanceKeyframeService.reset()
     this.qualityPolicy.reset()
     this.measurementStabilityService.reset()
+    this.measurementQueue.reset()
     this.performanceTracker.reset(getPerformanceTimestamp())
   }
 

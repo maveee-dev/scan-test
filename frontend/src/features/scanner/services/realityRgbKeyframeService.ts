@@ -31,7 +31,7 @@ function copyTopLeftRgb(rgba: Uint8Array, width: number, height: number): Uint8A
 }
 
 function createDiagnostics(): RealityRgbKeyframeDiagnostics {
-  return { status: 'empty', retainedCount: 0, capacity: MAX_KEYFRAMES, width: null, height: null, bytesPerKeyframe: 0, totalBytes: 0, captureCount: 0, rejectedDuplicateCount: 0, captureMs: 0 }
+  return { status: 'empty', retainedCount: 0, capacity: MAX_KEYFRAMES, width: null, height: null, bytesPerKeyframe: 0, totalBytes: 0, captureCount: 0, rejectedDuplicateCount: 0, skippedForPressureCount: 0, captureMs: 0, allocationMs: 0, shaderCopyMs: 0, readbackMs: 0 }
 }
 
 /** Owns a small, local-only set of camera RGB/pose snapshots for post-scan visual masks. */
@@ -111,8 +111,17 @@ export class RealityRgbKeyframeService {
       totalBytes: this.keyframes.reduce((sum, item) => sum + item.rgb.byteLength + item.cameraTransform.byteLength + item.inverseCameraTransform.byteLength + item.projectionMatrix.byteLength, 0),
       captureCount: this.diagnostics.captureCount + 1,
       rejectedDuplicateCount: this.diagnostics.rejectedDuplicateCount,
+      skippedForPressureCount: this.diagnostics.skippedForPressureCount,
       captureMs: Math.max(0, now() - started),
+      allocationMs: copy.allocationMs ?? 0,
+      shaderCopyMs: copy.shaderCopyMs ?? 0,
+      readbackMs: copy.readbackMs ?? 0,
     }
+  }
+
+  public recordPressureSkip(): void {
+    if (!this.appearance) return
+    this.diagnostics = { ...this.diagnostics, skippedForPressureCount: this.diagnostics.skippedForPressureCount + 1 }
   }
 
   public createSnapshot(scanId: string, cameraAvailable: boolean): FinalizedRealityRgbKeyframes {

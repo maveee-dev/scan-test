@@ -35,6 +35,9 @@ export interface RealityConfidenceFilterStats {
   readonly singleViewSamples: number
   readonly duplicateCandidates: number
   readonly duplicateCandidatesRejected: number
+  readonly duplicateCandidatesMultiViewConfirmed: number
+  readonly duplicateCandidatesSupportedSecondSurface: number
+  readonly duplicateCandidatesRetainedForRecessTopology: number
   readonly connectedComponentCount: number
   readonly floatingComponentsRejected: number
   readonly samplesRemoved: number
@@ -62,10 +65,11 @@ const addToBounds = (bounds: SpatialBounds, point: SpatialPoint): void => {
 }
 const observedFrames = (s: FinalizedRealitySurfel) => s.geometryObservationCount ?? Math.max(1, s.colorObservationCount)
 const timeSpan = (s: FinalizedRealitySurfel) => Math.max(0,(s.lastObservedAt ?? 0)-(s.firstObservedAt ?? s.lastObservedAt ?? 0))
-const isStable = (s: FinalizedRealitySurfel) => s.stabilityClass === 'high' || (
-  observedFrames(s)>=3 && timeSpan(s)>=250 && (s.trackingQuality ?? 1)>=.55 &&
-  Math.sqrt(s.positionVarianceMetersSquared ?? 0)<=.02 && Math.sqrt(s.depthVarianceMetersSquared ?? 0)<=.016
-)
+const isStable = (s: FinalizedRealitySurfel) => s.stabilityClass !== undefined
+  ? s.stabilityClass === 'high'
+  : observedFrames(s)>=3 && timeSpan(s)>=250 && (s.trackingQuality ?? 1)>=.55 &&
+    Math.sqrt(s.positionVarianceMetersSquared ?? 0)<=.02 && Math.sqrt(s.depthVarianceMetersSquared ?? 0)<=.016 &&
+    (!s.duplicateSurfaceCandidate || (s.viewObservationCount ?? 1)>=2)
 
 /**
  * Post-scan confidence filtering. It never mutates measured Reality, adds
@@ -74,7 +78,7 @@ const isStable = (s: FinalizedRealitySurfel) => s.stabilityClass === 'high' || (
  */
 export function filterRealityConfidence(source: readonly FinalizedRealitySurfel[]): RealityConfidenceFilterResult {
   const started=performance.now(), n=source.length
-  if(!n)return {surfels:[],retainedSourceIndices:new Uint32Array(),stats:{sourceSamples:0,retainedSamples:0,stableSamples:0,lowConfidenceSamples:0,viewDiverseSamples:0,singleViewSamples:0,duplicateCandidates:0,duplicateCandidatesRejected:0,connectedComponentCount:0,floatingComponentsRejected:0,samplesRemoved:0,meanPositionStdMeters:0,meanDepthStdMeters:0,meanNormalStd:0,componentAnalysisMs:0,filterMs:performance.now()-started,temporaryMemoryBytes:0,components:[],repeatability:{extentMeters:{x:0,y:0,z:0},ceilingHeightEstimateMeters:null,majorComponentCount:0,stableSampleRatio:0,lowConfidenceSampleRatio:0,floatingComponentCount:0,largestUnsupportedComponentSamples:0}}}
+  if(!n)return {surfels:[],retainedSourceIndices:new Uint32Array(),stats:{sourceSamples:0,retainedSamples:0,stableSamples:0,lowConfidenceSamples:0,viewDiverseSamples:0,singleViewSamples:0,duplicateCandidates:0,duplicateCandidatesRejected:0,duplicateCandidatesMultiViewConfirmed:0,duplicateCandidatesSupportedSecondSurface:0,duplicateCandidatesRetainedForRecessTopology:0,connectedComponentCount:0,floatingComponentsRejected:0,samplesRemoved:0,meanPositionStdMeters:0,meanDepthStdMeters:0,meanNormalStd:0,componentAnalysisMs:0,filterMs:performance.now()-started,temporaryMemoryBytes:0,components:[],repeatability:{extentMeters:{x:0,y:0,z:0},ceilingHeightEstimateMeters:null,majorComponentCount:0,stableSampleRatio:0,lowConfidenceSampleRatio:0,floatingComponentCount:0,largestUnsupportedComponentSamples:0}}}
   const stable=new Uint8Array(n), componentId=new Int32Array(n);componentId.fill(-1)
   let stableSamples=0,viewDiverse=0,singleView=0,duplicates=0
   source.forEach((s,i)=>{if(isStable(s)){stable[i]=1;stableSamples++}if((s.viewObservationCount??1)>=2)viewDiverse++;else singleView++;if(s.duplicateSurfaceCandidate)duplicates++})
@@ -84,11 +88,15 @@ export function filterRealityConfidence(source: readonly FinalizedRealitySurfel[
     const delta={x:b.position.x-a.position.x,y:b.position.y-a.position.y,z:b.position.z-a.position.z}
     return Math.abs(dot(delta,a.normal))<.035&&Math.abs(dot(delta,b.normal))<.035
   })
+  // A second, tightly bounded lookup intentionally ignores normal agreement.
+  // It is used only to prove side-face topology for a duplicate-sheet candidate;
+  // the component graph above must never bridge those discontinuities.
+  const topologySearch=findRealityNeighbors(source,.09,10,()=>true)
   const members:number[][]=[]
   for(let seed=0;seed<n;seed++)if(componentId[seed]<0){const id=members.length,list:number[]=[],queue=[seed];componentId[seed]=id
     for(let head=0;head<queue.length;head++){const current=queue[head];list.push(current);for(const neighbor of search.neighbors[current])if(componentId[neighbor.index]<0){componentId[neighbor.index]=id;queue.push(neighbor.index)}}members.push(list)}
   const largestSize=Math.max(...members.map((m)=>m.length)), components:RealityConfidenceComponent[]=[], keep=new Uint8Array(n)
-  let duplicateRejected=0,floatingRejected=0,largestUnsupported=0
+  let duplicateRejected=0,duplicateMultiView=0,duplicateSupported=0,duplicateRecess=0,floatingRejected=0,largestUnsupported=0
   members.forEach((list,id)=>{let stableCount=0,diverseCount=0,tracking=0,duplicateCount=0,confidence=0;const bounds=emptyBounds()
     for(const index of list){const s=source[index];stableCount+=stable[index];diverseCount+=(s.viewObservationCount??1)>=2?1:0;tracking+=s.trackingQuality??1;duplicateCount+=s.duplicateSurfaceCandidate?1:0;confidence+=s.geometryConfidence;addToBounds(bounds,s.position)}
     const count=list.length,stableRatio=stableCount/count,diverseRatio=diverseCount/count,duplicateRatio=duplicateCount/count,meanTracking=tracking/count,meanConfidence=confidence/count
@@ -105,7 +113,20 @@ export function filterRealityConfidence(source: readonly FinalizedRealitySurfel[
       // Retain provisional points only next to supported geometry and never a
       // sample explicitly marked as an unsupported duplicate layer.
       const locallySupported=search.neighbors[index].filter((v)=>stable[v.index]).length>=2
-      if(stable[index]||((observedFrames(s)>=2||locallySupported)&&(!s.duplicateSurfaceCandidate||stableRatio>=.35||diverseRatio>=.25)))keep[index]=1
+      const duplicateMultiViewConfirmed=s.duplicateSurfaceCandidate&&(s.viewObservationCount??1)>=2&&timeSpan(s)>=600
+      const supportedSecondSurface=duplicateMultiViewConfirmed&&observedFrames(s)>=3&&locallySupported
+      // Orthogonal/side-face support is a recess-topology signal. A parallel
+      // candidate cannot borrow confidence from the established front wall.
+      const recessTopology=s.duplicateSurfaceCandidate&&topologySearch.neighbors[index].some((v)=>
+        Math.abs(dot(s.normal,source[v.index].normal))<.45&&stable[v.index]&&
+        Math.abs(dot({x:source[v.index].position.x-s.position.x,y:source[v.index].position.y-s.position.y,z:source[v.index].position.z-s.position.z},s.normal))<.07)
+      if(duplicateMultiViewConfirmed)duplicateMultiView++
+      if(supportedSecondSurface)duplicateSupported++
+      if(recessTopology)duplicateRecess++
+      if(!s.duplicateSurfaceCandidate) {
+        if(stable[index]||(observedFrames(s)>=2||locallySupported))keep[index]=1
+      } else if(stable[index]&&duplicateMultiViewConfirmed&&(supportedSecondSurface||recessTopology)) keep[index]=1
+      else duplicateRejected++
     }
     components.push({id,sampleCount:count,areaEstimateSquareMeters:area,bounds,stableRatio,viewDiverseRatio:diverseRatio,singleViewRatio:1-diverseRatio,trackingQuality:meanTracking,duplicateCandidateRatio:duplicateRatio,meanConfidence,retained:!rejected,rejectionReason:reason})
     void span
@@ -118,6 +139,6 @@ export function filterRealityConfidence(source: readonly FinalizedRealitySurfel[
   const ceiling=horizontal.length>20?horizontal[Math.floor(horizontal.length*.9)]-horizontal[Math.floor(horizontal.length*.1)]:null
   const low=n-stableSamples, componentAnalysisMs=performance.now()-componentStarted
   const meanPositionStd=source.reduce((sum,s)=>sum+Math.sqrt(s.positionVarianceMetersSquared??0),0)/n,meanDepthStd=source.reduce((sum,s)=>sum+Math.sqrt(s.depthVarianceMetersSquared??0),0)/n,meanNormalStd=source.reduce((sum,s)=>sum+Math.sqrt(s.normalVariance??0),0)/n
-  const stats:RealityConfidenceFilterStats={sourceSamples:n,retainedSamples:retainedSurfels.length,stableSamples,lowConfidenceSamples:low,viewDiverseSamples:viewDiverse,singleViewSamples:singleView,duplicateCandidates:duplicates,duplicateCandidatesRejected:duplicateRejected,connectedComponentCount:members.length,floatingComponentsRejected:floatingRejected,samplesRemoved:n-retainedSurfels.length,meanPositionStdMeters:meanPositionStd,meanDepthStdMeters:meanDepthStd,meanNormalStd,componentAnalysisMs,filterMs:performance.now()-started,temporaryMemoryBytes:stable.byteLength+componentId.byteLength+keep.byteLength+indices.length*4,components,repeatability:{extentMeters:extent,ceilingHeightEstimateMeters:ceiling,majorComponentCount:components.filter((c)=>c.retained&&c.sampleCount>=Math.max(50,largestSize*.02)).length,stableSampleRatio:stableSamples/n,lowConfidenceSampleRatio:low/n,floatingComponentCount:floatingRejected,largestUnsupportedComponentSamples:largestUnsupported}}
+  const stats:RealityConfidenceFilterStats={sourceSamples:n,retainedSamples:retainedSurfels.length,stableSamples,lowConfidenceSamples:low,viewDiverseSamples:viewDiverse,singleViewSamples:singleView,duplicateCandidates:duplicates,duplicateCandidatesRejected:duplicateRejected,duplicateCandidatesMultiViewConfirmed:duplicateMultiView,duplicateCandidatesSupportedSecondSurface:duplicateSupported,duplicateCandidatesRetainedForRecessTopology:duplicateRecess,connectedComponentCount:members.length,floatingComponentsRejected:floatingRejected,samplesRemoved:n-retainedSurfels.length,meanPositionStdMeters:meanPositionStd,meanDepthStdMeters:meanDepthStd,meanNormalStd,componentAnalysisMs,filterMs:performance.now()-started,temporaryMemoryBytes:stable.byteLength+componentId.byteLength+keep.byteLength+indices.length*4,components,repeatability:{extentMeters:extent,ceilingHeightEstimateMeters:ceiling,majorComponentCount:components.filter((c)=>c.retained&&c.sampleCount>=Math.max(50,largestSize*.02)).length,stableSampleRatio:stableSamples/n,lowConfidenceSampleRatio:low/n,floatingComponentCount:floatingRejected,largestUnsupportedComponentSamples:largestUnsupported}}
   return {surfels:retainedSurfels,retainedSourceIndices:Uint32Array.from(indices),stats}
 }

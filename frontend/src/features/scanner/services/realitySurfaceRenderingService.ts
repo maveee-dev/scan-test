@@ -41,6 +41,11 @@ export interface RealitySurfaceRenderStats {
   readonly trianglesRejectedByNormal: number
   readonly trianglesRejectedByDepthLayer: number
   readonly trianglesRejectedByUnsupportedNeighborhood: number
+  readonly triangleCandidatePairCount: number
+  readonly trianglesRejectedDegenerate: number
+  readonly trianglesRejectedAngularGap: number
+  readonly trianglesRejectedOccupiedCircumcircle: number
+  readonly triangleNonParticipantCount: number
   readonly largestAcceptedTriangleEdgeMeters: number
   readonly p95AcceptedTriangleEdgeMeters: number
   readonly memoryBytes: number
@@ -192,6 +197,10 @@ interface TriangleGeometryResult {
   readonly rejectedNormal: number
   readonly rejectedLayer: number
   readonly rejectedUnsupported: number
+  readonly candidatePairs: number
+  readonly rejectedDegenerate: number
+  readonly rejectedAngularGap: number
+  readonly rejectedOccupied: number
   readonly largestAcceptedEdge: number
   readonly p95AcceptedEdge: number
 }
@@ -633,6 +642,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   let triangleCount = 0
   let coveredSurfelCount = 0
   let rejectedDistance=0,rejectedNormal=0,rejectedLayer=0,rejectedUnsupported=0
+  let candidatePairs=0,rejectedDegenerate=0,rejectedAngularGap=0,rejectedOccupied=0
   const acceptedEdges:number[]=[]
 
   for (let centerIndex = 0; centerIndex < surfels.length; centerIndex += 1) {
@@ -661,14 +671,15 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
     // first four distance/ID-ordered pairs. Only measured vertices are emitted.
     for (let firstNeighborIndex = 0; firstNeighborIndex < boundedNeighbors.length; firstNeighborIndex += 1) {
       for (let secondNeighborIndex = firstNeighborIndex + 1; secondNeighborIndex < boundedNeighbors.length; secondNeighborIndex += 1) {
+        candidatePairs++
         const firstNeighbor = boundedNeighbors[firstNeighborIndex]
         const secondNeighbor = boundedNeighbors[secondNeighborIndex]
         const { u: au, v: av } = firstNeighbor, { u: bu, v: bv } = secondNeighbor
         const determinant = au * bv - av * bu
         const a2 = au * au + av * av, b2 = bu * bu + bv * bv
-        if (determinant * determinant <= a2 * b2 * MIN_TRIANGLE_SINE_SQUARED || a2 * b2 <= 1e-16) { rejectedUnsupported++; continue }
+        if (determinant * determinant <= a2 * b2 * MIN_TRIANGLE_SINE_SQUARED || a2 * b2 <= 1e-16) { rejectedUnsupported++;rejectedDegenerate++;continue }
         // Do not form a fan across an unsupported half-plane / large angular hole.
-        if (au * bu + av * bv < -0.5 * Math.sqrt(a2 * b2)) { rejectedUnsupported++; continue }
+        if (au * bu + av * bv < -0.5 * Math.sqrt(a2 * b2)) { rejectedUnsupported++;rejectedAngularGap++;continue }
         const circleU = (a2 * bv - b2 * av) / (2 * determinant)
         const circleV = (au * b2 - bu * a2) / (2 * determinant)
         const radiusSquared = circleU * circleU + circleV * circleV
@@ -699,7 +710,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
             if (occupied) break
           }
         }
-        if (occupied) { rejectedUnsupported++; continue }
+        if (occupied) { rejectedUnsupported++;rejectedOccupied++;continue }
         const first = surfels[firstNeighbor.index]
         const second = surfels[secondNeighbor.index]
         const pairRelation = areLocallyCompatible(first, second)
@@ -760,6 +771,7 @@ function createDenseTriangleGeometry(index: RealityNeighborIndex, displayColors?
   acceptedEdges.sort((a,b)=>a-b)
   return { geometry, triangleCount, coveredSurfelIndices, coveredSurfelCount,
     topology: { vertexSurfelIds: new Uint32Array(vertexSurfelIds), triangleCount }, rejectedDistance,rejectedNormal,rejectedLayer,rejectedUnsupported,
+    candidatePairs,rejectedDegenerate,rejectedAngularGap,rejectedOccupied,
     largestAcceptedEdge:acceptedEdges[acceptedEdges.length-1]??0,p95AcceptedEdge:acceptedEdges[Math.floor(Math.max(0,acceptedEdges.length-1)*.95)]??0 }
 }
 
@@ -890,7 +902,7 @@ export function createRealitySurfaceRenderResources(
   let splatSuppressionMask: Uint8Array | undefined
   let triangleTopology: RealityTriangleTopology | null = null
   let triangleGeometry: THREE.BufferGeometry | null = null
-  let triangleSafety={rejectedDistance:0,rejectedNormal:0,rejectedLayer:0,rejectedUnsupported:0,largestAcceptedEdge:0,p95AcceptedEdge:0}
+  let triangleSafety={rejectedDistance:0,rejectedNormal:0,rejectedLayer:0,rejectedUnsupported:0,candidatePairs:0,rejectedDegenerate:0,rejectedAngularGap:0,rejectedOccupied:0,largestAcceptedEdge:0,p95AcceptedEdge:0}
 
   if (mode === 'points') {
     const geometry = createPointGeometry(coloredSurfels, displayColors)
@@ -983,6 +995,11 @@ export function createRealitySurfaceRenderResources(
       trianglesRejectedByNormal:triangleSafety.rejectedNormal,
       trianglesRejectedByDepthLayer:triangleSafety.rejectedLayer,
       trianglesRejectedByUnsupportedNeighborhood:triangleSafety.rejectedUnsupported,
+      triangleCandidatePairCount:triangleSafety.candidatePairs,
+      trianglesRejectedDegenerate:triangleSafety.rejectedDegenerate,
+      trianglesRejectedAngularGap:triangleSafety.rejectedAngularGap,
+      trianglesRejectedOccupiedCircumcircle:triangleSafety.rejectedOccupied,
+      triangleNonParticipantCount:Math.max(0,coloredSurfels.length-triangleCoveredSurfelCount),
       largestAcceptedTriangleEdgeMeters:triangleSafety.largestAcceptedEdge,
       p95AcceptedTriangleEdgeMeters:triangleSafety.p95AcceptedEdge,
       memoryBytes,

@@ -544,6 +544,10 @@ export interface RawCameraKeyframeCopyFrame {
   readonly mapping: RawCameraCopyMapping
   /** RGBA readback rows are in WebGL bottom-left origin order. */
   readonly pixels: Uint8Array
+  readonly allocationMs?: number
+  readonly shaderCopyMs?: number
+  readonly readbackMs?: number
+  readonly totalMs?: number
 }
 
 export interface RawCameraDebug {
@@ -771,6 +775,19 @@ export interface DenseRealityFusionDebug {
   readonly duplicateSurfaceCandidateCount?: number
   readonly viewDiverseSampleCount?: number
   readonly singleViewSampleCount?: number
+  readonly matchDistanceRejectCount?: number
+  readonly matchNormalRejectCount?: number
+  readonly matchDepthLayerRejectCount?: number
+  readonly matchBucketMissCount?: number
+  readonly matchCandidateBudgetRejectCount?: number
+  readonly matchRatioPercentage?: number
+  readonly viewBaselineP50Meters?: number
+  readonly viewBaselineP90Meters?: number
+  readonly viewAngleP50Degrees?: number
+  readonly viewAngleP90Degrees?: number
+  readonly fusionP50Ms?: number
+  readonly fusionP95Ms?: number
+  readonly fusionMaxMs?: number
   readonly status: 'idle' | 'active' | 'empty'
   readonly inputSampleCount: number
   readonly inputColorSampleCount: number
@@ -792,6 +809,7 @@ export interface FinalizedDenseRealityReconstruction {
   readonly fusedRawSurfels?: readonly FinalizedRealitySurfel[]
   readonly rawMeasurements?: readonly import('./services/realityMeasurementStabilityService').RawRealityMeasurement[]
   readonly measurementDiagnostics?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
+  readonly measurementQueueDiagnostics?: import('./services/realityMeasurementQueueService').RealityMeasurementQueueDiagnostics
   readonly appearanceKeyframes?: FinalizedRealityRgbKeyframes
   readonly qualityTelemetry?: import('./services/realityQualityPolicy').RealityQualityTelemetry
   readonly depthSource?: { width: number | null; height: number | null; scale: number | null }
@@ -835,7 +853,11 @@ export interface RealityRgbKeyframeDiagnostics {
   readonly totalBytes: number
   readonly captureCount: number
   readonly rejectedDuplicateCount: number
+  readonly skippedForPressureCount: number
   readonly captureMs: number
+  readonly allocationMs: number
+  readonly shaderCopyMs: number
+  readonly readbackMs: number
 }
 
 export interface FinalizedRealityRgbKeyframes {
@@ -854,6 +876,7 @@ export interface FinalizedScannerCapture {
 
 export interface ViewerPoseDebug {
   measurement?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
+  measurementQueue?: import('./services/realityMeasurementQueueService').RealityMeasurementQueueDiagnostics
   quality?: import('./services/realityQualityPolicy').RealityQualityTelemetry
   sessionActive: boolean
   glContextStatus: XRPresentationStatus

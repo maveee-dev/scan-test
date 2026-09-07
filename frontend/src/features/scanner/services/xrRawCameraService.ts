@@ -591,6 +591,7 @@ export class XRRawCameraService {
     timestamp: number,
     longEdge = KEYFRAME_MAX_COPY_DIMENSION,
   ): RawCameraKeyframeCopyFrame | null {
+    const totalStartedAt = getTimestamp()
     if (!this.session || !this.gl || !this.binding || !this.program || !this.fullscreenBuffer || frame.session !== this.session) return null
     const camera = view.camera
     if (!camera || !Number.isFinite(camera.width) || !Number.isFinite(camera.height) || camera.width <= 0 || camera.height <= 0) return null
@@ -601,7 +602,9 @@ export class XRRawCameraService {
       if (!cameraTexture) return null
       const boundedEdge = Math.min(640, Math.max(KEYFRAME_MAX_COPY_DIMENSION, longEdge))
       const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, boundedEdge, KEYFRAME_MAX_COPY_PIXELS * (boundedEdge / KEYFRAME_MAX_COPY_DIMENSION) ** 2)
+      const allocationStartedAt = getTimestamp()
       this.ensureKeyframeResources(width, height)
+      const allocationMs = Math.max(0, getTimestamp() - allocationStartedAt)
       if (!this.keyframeFramebuffer) return null
       previousState = this.captureGlState()
       const gl = this.gl
@@ -622,8 +625,12 @@ export class XRRawCameraService {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.fullscreenBuffer)
       gl.enableVertexAttribArray(this.positionAttribute)
       gl.vertexAttribPointer(this.positionAttribute, 2, gl.FLOAT, false, 0, 0)
+      const shaderStartedAt = getTimestamp()
       gl.drawArrays(gl.TRIANGLES, 0, 3)
+      const shaderCopyMs = Math.max(0, getTimestamp() - shaderStartedAt)
+      const readbackStartedAt = getTimestamp()
       gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, this.keyframeReadback)
+      const readbackMs = Math.max(0, getTimestamp() - readbackStartedAt)
       this.keyframeSequence += 1
       return {
         sequence: this.keyframeSequence,
@@ -637,6 +644,10 @@ export class XRRawCameraService {
           orientation: this.diagnostics.orientation,
         },
         pixels: this.keyframeReadback,
+        allocationMs,
+        shaderCopyMs,
+        readbackMs,
+        totalMs: Math.max(0, getTimestamp() - totalStartedAt),
       }
     } catch {
       return null

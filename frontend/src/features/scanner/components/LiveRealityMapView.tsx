@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { InspectionPose, type LiveRealityMap } from '../services/liveRealityMap'
+import { getLiveMapCadenceMs, InspectionPose, type LiveRealityMap } from '../services/liveRealityMap'
 
 /** Separate DOM-overlay GL context; never shares the XR framebuffer/camera. */
 export default function LiveRealityMapView({ bridge }: { bridge: LiveRealityMap }) {
@@ -39,10 +39,11 @@ export default function LiveRealityMapView({ bridge }: { bridge: LiveRealityMap 
     let lastCopy = -Infinity, lastFrame = 0, lastRender = 0, count = 0, trailCount = 0
     const obstacles = new Set<string>(), key = (x: number, y: number, z: number) => `${Math.floor(x / .1)},${Math.floor(y / .1)},${Math.floor(z / .1)}`
     const resize = new ResizeObserver(() => { const width = container.clientWidth, height = container.clientHeight; renderer.setSize(width, height); camera.aspect = width / Math.max(1, height); camera.updateProjectionMatrix() }); resize.observe(container)
-    const listener: NonNullable<LiveRealityMap['listener']> = ({ pose, copy }) => {
-      if (pose.timestamp - lastRender < 33) return
+    const listener: NonNullable<LiveRealityMap['listener']> = ({ pose, copy, underPressure = false }) => {
+      const cadence=getLiveMapCadenceMs(underPressure)
+      if (pose.timestamp - lastRender < cadence.render) return
       lastRender = pose.timestamp
-      if (pose.timestamp - lastCopy >= 350) {
+      if (pose.timestamp - lastCopy >= cadence.geometryCopy) {
         count = copy(positions, colors); geometry.setDrawRange(0, count)
         geometry.attributes.position.needsUpdate = true; geometry.attributes.color.needsUpdate = true
         obstacles.clear()
