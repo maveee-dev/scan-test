@@ -824,6 +824,8 @@ export interface FinalizedDenseRealityReconstruction {
   readonly canonicalFusionDiagnostics?: import('./services/canonicalRealityFusionService').CanonicalRealityFusionDiagnostics
   /** Bounded measured-only audit points excluded during canonical hypothesis resolution. */
   readonly provisionalExpiryMap?: import('./services/canonicalRealityFusionService').ProvisionalExpiryMap
+  /** Bounded one-per-cell samples from the actual per-frame-consolidated replay input. */
+  readonly consolidatedMeasurementMap?: import('./services/canonicalRealityFusionService').ConsolidatedMeasurementMap
   readonly finishPipelineDiagnostics?: import('./services/xrSessionService').FinishPipelineDiagnostics
   readonly fusedRawSurfels?: readonly FinalizedRealitySurfel[]
   readonly rawMeasurements?: readonly import('./services/realityMeasurementStabilityService').RawRealityMeasurement[]
@@ -868,6 +870,8 @@ export interface RealityTextureBinding {
   /** Normalized top-left UV in the owning RGB keyframe. */
   readonly u: number
   readonly v: number
+  /** Visibility/incidence/quality score used only to rank bounded real views. */
+  readonly score: number
 }
 
 export interface RealityRgbKeyframeDiagnostics {

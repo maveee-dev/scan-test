@@ -2316,6 +2316,16 @@
   background: var(--coral);
 }
 
+/* Activity only: Finish has no estimated percentage or fabricated progress. */
+.session-status-finishing .session-status-dot {
+  animation: finishing-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes finishing-pulse {
+  0%, 100% { transform: scale(1); opacity: .58; box-shadow: 0 0 4px var(--coral); }
+  50% { transform: scale(1.35); opacity: 1; box-shadow: 0 0 16px var(--coral); }
+}
+
 .session-status-error .session-status-dot {
   border-color: var(--coral);
   background: var(--coral);

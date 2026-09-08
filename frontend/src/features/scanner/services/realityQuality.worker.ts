@@ -29,6 +29,19 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       firstObservedAt: sample.timestamp, lastObservedAt: sample.timestamp, stabilityClass: 'provisional',
     }))
     const acceptedMeasured = measured.filter((_surfel, index) => raw!.rawMeasurements?.[index]?.accepted)
+    const consolidatedMap = raw.consolidatedMeasurementMap
+    const consolidatedMeasured: FinalizedRealitySurfel[] = consolidatedMap
+      ? Array.from({ length: Math.min(consolidatedMap.sampled, Math.floor(consolidatedMap.positions.length / 3)) }, (_unused, index) => {
+        const offset = index * 3
+        return {
+          id: index,
+          position: { x: consolidatedMap.positions[offset], y: consolidatedMap.positions[offset + 1], z: consolidatedMap.positions[offset + 2] },
+          normal: { x: 0, y: 0, z: 1 }, radius: .006,
+          colorRgb: { r: .12, g: .82, b: .42 }, colorSpace: 'srgb', geometryConfidence: .8,
+          colorConfidence: 1, colorObservationCount: 1, geometryObservationCount: 1, stabilityClass: 'provisional',
+        }
+      })
+      : acceptedMeasured
     const expiryMap = raw.provisionalExpiryMap ?? raw.canonicalFusionDiagnostics?.provisionalExpiryMap
     const expiryColors: Record<number, { r: number; g: number; b: number }> = {
       [PROVISIONAL_EXPIRY_REASON.insufficientTemporalSupport]: { r: 1, g: .63, b: .08 },
@@ -56,7 +69,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       })
       : []
     const surfels = mode === 'raw-accepted' ? acceptedMeasured
-      : mode === 'retained' ? acceptedMeasured
+      : mode === 'retained' ? consolidatedMeasured
       : mode === 'raw-measured' ? measured
       : mode === 'live' || mode === 'fused-raw' || mode === 'raw' || mode === 'density' ? live
       : mode === 'canonical' ? canonical
@@ -87,7 +100,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
     const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
     const renderMode = pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
     const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
-    if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, refined.textureBindings, raw.appearanceKeyframes?.keyframes ?? [])
+    if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, refined.textureBindingCandidates, raw.appearanceKeyframes?.keyframes ?? [])
     const prepared = packRealitySurface(resources)
     const transfers = [...new Set([
       ...prepared.geometries.flatMap((g) => g.attributes.map((a) => a.array.buffer as ArrayBuffer)),

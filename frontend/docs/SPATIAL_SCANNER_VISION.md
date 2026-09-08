@@ -1,12 +1,12 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1.4**. Live scanning uses a
+Current implementation: **Scanner Build M8.7.1.5**. Live scanning uses a
 bounded lightweight map while production Reality is rebuilt after Finish from
 coverage-aware retained accepted measurements. Canonical lifecycle, measured
 hybrid display, real-RGB fallback and Finish progress are now separately
 observable. M8.6.7.2 customization remains frozen pending physical
 reconstruction validation; see the M8.7/M8.7.1 sections below and the
-[M8.7.1.4 implementation report](M8_7_1_4_IMPLEMENTATION_REPORT.md).
+[M8.7.1.5 implementation report](M8_7_1_5_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2693,3 +2693,34 @@ finalization and worker-post latency. Retention coverage snapshots are linear,
 canonical buckets use numeric maps, and worker/snapshot stage timings expose the
 remaining device bottleneck. Build limits remain 2.5 cm, 40 × 90, 60,000 and 96
 frames. M7 and customization remain frozen pending one M8.7.1.4 POCO scan.
+
+### M8.7.1.5 — Measured Footprint Continuity & Common-View Texture
+
+The M8.7.1.4 POCO result proved that sample-identity representation was not a
+surface-completeness metric. A surfel was considered mesh-covered after joining
+one triangle, and its entire measured disc was then removed. Partially
+triangulated neighborhoods could consequently show triangular/cell-like holes
+while diagnostics claimed zero undisplayed samples. Dense Reality now retains
+every measured canonical disc as a depth-biased underlay beneath the unchanged
+safe triangle skin. This adds no position and does not bridge unknown space.
+
+Appearance now retains at most three visibility-, measured-depth-, incidence-
+and quality-approved real-camera candidates per surfel. Each existing triangle
+chooses the best common candidate across its three vertices. This recovers safe
+second-choice image ownership that the former independently-best rule discarded;
+conflicts and geometry edges still fall back to registered vertex RGB.
+
+The old Stage 3 was a bounded raw acceptance audit, not the retained replay
+input. Stage 3 now shows a bounded one-real-measurement-per-cell sample of actual
+per-frame-consolidated replay evidence. The completeness funnel separately
+labels cumulative provisional admission events, unique admitted cells, matched
+observation events, rare outlier/capacity cell outcomes and final canonical
+cells. It no longer presents final survivor coverage as creation-stage coverage.
+
+Finish keeps the measured first-paint boundary and adds a continuously animated
+busy state for the long real worker stages. Safe successful-match temporaries are
+scalarized, but no physical runtime improvement is claimed before remeasurement.
+An exact bucket-pruning experiment was removed because it slowed the cold
+synthetic worker. Live capture configuration remains unchanged, second-layer
+policy is not globally tightened without spatial physical evidence, and M7 and
+customization remain frozen pending one M8.7.1.5 POCO scan.

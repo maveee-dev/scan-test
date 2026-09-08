@@ -22,6 +22,9 @@ export interface RealitySurfaceRenderStats {
   readonly renderedTriangleCount: number
   readonly coloredTriangleVertexCount: number
   readonly uncoloredTriangleVertexCount: number
+  /** Measured canonical discs kept beneath the optional dense triangle skin. */
+  readonly measuredUnderlaySplatCount: number
+  /** Measured samples that do not participate in any accepted triangle. */
   readonly fallbackSplatCount: number
   readonly meshCoveredCanonicalSamples: number
   readonly splatCoveredCanonicalSamples: number
@@ -903,24 +906,34 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
 export function appendRealityTextureBatches(
   resources: RealitySurfaceRenderResources,
   surfels: readonly FinalizedRealitySurfel[],
-  bindings: readonly (RealityTextureBinding | null)[],
+  bindings: readonly (RealityTextureBinding | null | readonly RealityTextureBinding[])[],
   keyframes: readonly RealityRgbKeyframe[],
 ): void {
   if (!resources.triangleTopology || !resources.triangleGeometry || bindings.length !== surfels.length) return
-  const surfelById = new Map(surfels.map((surfel, index) => [surfel.id, { surfel, binding: bindings[index] }]))
+  const surfelById = new Map(surfels.map((surfel, index) => {
+    const value = bindings[index]
+    return [surfel.id, { surfel, bindings: Array.isArray(value) ? value : value ? [value] : [] }]
+  }))
   const frameById = new Map(keyframes.map((frame) => [frame.id, frame]))
   const buckets = new Map<number, { positions: number[]; uvs: number[] }>()
   const ids = resources.triangleTopology.vertexSurfelIds
   for (let offset = 0; offset + 2 < ids.length; offset += 3) {
     const vertices = [surfelById.get(ids[offset]), surfelById.get(ids[offset + 1]), surfelById.get(ids[offset + 2])]
-    const first = vertices[0]?.binding
-    if (!first || !vertices.every((vertex) => vertex?.binding?.keyframeId === first.keyframeId) || !frameById.has(first.keyframeId)) continue
-    const bucket = buckets.get(first.keyframeId) ?? { positions: [], uvs: [] }
+    if (!vertices.every(Boolean)) continue
+    const common = vertices[0]!.bindings.map((binding) => binding.keyframeId).filter((keyframeId) =>
+      frameById.has(keyframeId) && vertices.every((vertex) => vertex!.bindings.some((binding) => binding.keyframeId === keyframeId)),
+    )
+    if (!common.length) continue
+    const keyframeId = common.sort((left, right) => {
+      const score = (id: number) => vertices.reduce((sum, vertex) => sum + (vertex!.bindings.find((binding) => binding.keyframeId === id)?.score ?? 0), 0)
+      return score(right) - score(left) || left - right
+    })[0]
+    const bucket = buckets.get(keyframeId) ?? { positions: [], uvs: [] }
     for (const vertex of vertices) {
-      const point = vertex!.surfel.position, uv = vertex!.binding!
+      const point = vertex!.surfel.position, uv = vertex!.bindings.find((binding) => binding.keyframeId === keyframeId)!
       bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, 1 - uv.v)
     }
-    buckets.set(first.keyframeId, bucket)
+    buckets.set(keyframeId, bucket)
   }
   if (!buckets.size) return
   const mutable = resources as unknown as { group: THREE.Group; geometries: THREE.BufferGeometry[]; materials: THREE.Material[] }
@@ -991,7 +1004,9 @@ export function createRealitySurfaceRenderResources(
       renderedTriangleCount = triangleResult.triangleCount
       coloredTriangleVertexCount = triangleResult.triangleCount * 3
       triangleCoveredSurfelCount = triangleResult.coveredSurfelCount
-      splatSuppressionMask = triangleResult.coveredSurfelIndices
+      // Triangles are an optional safe skin, never a replacement for measured
+      // discs. Keep every canonical surfel's footprint under the mesh.
+      splatSuppressionMask = undefined
       triangleTopology = triangleResult.topology
       triangleGeometry = triangleResult.geometry
       triangleSafety=triangleResult
@@ -1008,6 +1023,15 @@ export function createRealitySurfaceRenderResources(
       splatGeometryMs = Math.max(0, getTimestamp() - splatStartedAt)
       const splatCoreMaterial = createSplatMaterial(1, true)
       const splatFeatherMaterial = createSplatMaterial(mode === 'dense' ? 0.92 : 1, false)
+      if (mode === 'dense') {
+        // The measured discs are a coverage underlay. Push them slightly behind
+        // the safe triangle skin so retained support cannot z-fight with it.
+        for (const material of [splatCoreMaterial, splatFeatherMaterial]) {
+          material.polygonOffset = true
+          material.polygonOffsetFactor = 1
+          material.polygonOffsetUnits = 1
+        }
+      }
       group.add(
         new THREE.Mesh(splatResult.geometry, splatCoreMaterial),
         new THREE.Mesh(splatResult.geometry, splatFeatherMaterial),
@@ -1015,7 +1039,9 @@ export function createRealitySurfaceRenderResources(
       geometries.push(splatResult.geometry)
       materials.push(splatCoreMaterial, splatFeatherMaterial)
       renderedSplatCount = splatResult.renderedSplatCount
-      fallbackSplatCount = mode === 'dense' ? splatResult.renderedSplatCount : 0
+      fallbackSplatCount = mode === 'dense'
+        ? Math.max(0, coloredSurfels.length - triangleCoveredSurfelCount)
+        : 0
       splatsSuppressedByTriangles = splatResult.suppressedSplatCount
       visualRadiusScale = splatResult.averageVisualRadiusScale
     }
@@ -1036,21 +1062,23 @@ export function createRealitySurfaceRenderResources(
       mode,
       sourceSurfelCount: reconstruction.surfels.length,
       coloredSurfelCount: coloredSurfels.length,
-      renderedSurfelCount: mode === 'dense' || mode === 'triangles'
-        ? triangleCoveredSurfelCount + renderedSplatCount
+      renderedSurfelCount: mode === 'dense'
+        ? renderedSplatCount
+        : mode === 'triangles' ? triangleCoveredSurfelCount
         : coloredSurfels.length,
       renderedSplatCount,
       renderedTriangleCount,
       coloredTriangleVertexCount,
       uncoloredTriangleVertexCount: 0,
+      measuredUnderlaySplatCount: mode === 'dense' ? renderedSplatCount : 0,
       fallbackSplatCount,
       meshCoveredCanonicalSamples: triangleCoveredSurfelCount,
-      splatCoveredCanonicalSamples: fallbackSplatCount,
+      splatCoveredCanonicalSamples: mode === 'dense' ? renderedSplatCount : fallbackSplatCount,
       visuallyRepresentedSamples: mode === 'dense'
-        ? triangleCoveredSurfelCount + fallbackSplatCount
+        ? renderedSplatCount
         : mode === 'triangles' ? triangleCoveredSurfelCount : coloredSurfels.length,
       trulyUndisplayedSamples: Math.max(0, reconstruction.surfels.length - (mode === 'dense'
-        ? triangleCoveredSurfelCount + fallbackSplatCount
+        ? renderedSplatCount
         : mode === 'triangles' ? triangleCoveredSurfelCount : coloredSurfels.length)),
       uncoloredFallbackSplatCount: 0,
       splatsSuppressedByTriangles,

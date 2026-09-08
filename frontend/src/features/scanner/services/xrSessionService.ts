@@ -480,6 +480,7 @@ export class XRSessionService {
         retainedMeasurementDiagnostics: retainedMeasurements.diagnostics,
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
         provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
+        consolidatedMeasurementMap: canonicalReality?.consolidatedMeasurementMap,
       } : null
       const resultAssemblyMs = getPerformanceTimestamp() - assemblyStartedAt
 

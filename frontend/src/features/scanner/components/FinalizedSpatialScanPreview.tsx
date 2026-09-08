@@ -2260,7 +2260,7 @@ function FinalizedSpatialScanPreview({
               ) : null}
               {realityRenderStats?.mode === realityRenderMode ? (
                 <span>
-                  Triangle vertices colored {realityRenderStats.coloredTriangleVertexCount} / uncolored {realityRenderStats.uncoloredTriangleVertexCount} / colored splats {realityRenderStats.renderedSplatCount} / fallback splats {realityRenderStats.fallbackSplatCount} / uncolored fallback {realityRenderStats.uncoloredFallbackSplatCount} / splats suppressed by triangles {realityRenderStats.splatsSuppressedByTriangles}
+                  Triangle vertices colored {realityRenderStats.coloredTriangleVertexCount} / uncolored {realityRenderStats.uncoloredTriangleVertexCount} / measured underlay splats {realityRenderStats.measuredUnderlaySplatCount} / non-participant fallback splats {realityRenderStats.fallbackSplatCount} / uncolored fallback {realityRenderStats.uncoloredFallbackSplatCount} / splats suppressed by triangles {realityRenderStats.splatsSuppressedByTriangles}
                 </span>
               ) : null}
           {denseRealityReconstruction?.status === 'available' ? (

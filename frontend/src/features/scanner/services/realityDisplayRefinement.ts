@@ -13,6 +13,8 @@ export interface RealityDisplayRefinement {
   geometry: FinalizedRealitySurfel[]; appearance: FinalizedRealitySurfel[]; combined: FinalizedRealitySurfel[]
   /** One unambiguous, measured-depth-visible keyframe per surfel, or null. */
   textureBindings: readonly (RealityTextureBinding | null)[]
+  /** At most three safe real-camera candidates, ranked descending per surfel. */
+  textureBindingCandidates: readonly (readonly RealityTextureBinding[])[]
   stats: RealityRefinementStats
 }
 const dot = (a: SpatialPoint, b: SpatialPoint) => a.x * b.x + a.y * b.y + a.z * b.z
@@ -96,6 +98,7 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
   const colorStarted = performance.now(), bestScore = new Float32Array(source.length), observations = new Uint8Array(source.length)
   const appearance = source.slice(), pixel = { x: 0, y: 0 }
   const textureBindings: (RealityTextureBinding | null)[] = Array(source.length).fill(null)
+  const textureBindingCandidates: RealityTextureBinding[][] = Array.from({ length: source.length }, () => [])
   const conflict = new Uint8Array(source.length)
   // One frame at a time: bounded temporary visibility raster, never N*frames.
   for (const frame of frames.slice(0, 8)) {
@@ -139,16 +142,23 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
       if (bestScore[i] > 0 && prior && Math.min(score, bestScore[i]) >= Math.max(score, bestScore[i]) * .85) {
         if (Math.hypot(prior.r - frame.rgb[k] / 255, prior.g - frame.rgb[k + 1] / 255, prior.b - frame.rgb[k + 2] / 255) > .45) conflict[i] = 1
       } else if (score > bestScore[i] / .85) conflict[i] = 0
+      const binding = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height, score }
+      const candidates = textureBindingCandidates[i]
+      const existing = candidates.findIndex((candidate) => candidate.keyframeId === binding.keyframeId)
+      if (existing >= 0) candidates.splice(existing, 1)
+      candidates.push(binding)
+      candidates.sort((left, right) => right.score - left.score || left.keyframeId - right.keyframeId)
+      candidates.splice(3)
       if (score <= bestScore[i]) return
       bestScore[i] = score
       appearance[i] = { ...s, colorRgb: { r: frame.rgb[k] / 255, g: frame.rgb[k + 1] / 255, b: frame.rgb[k + 2] / 255 } }
-      textureBindings[i] = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height }
+      textureBindings[i] = candidates[0] ?? null
     })
   }
   observations.forEach((count, i) => {
-    if (conflict[i]) { appearance[i] = source[i]; textureBindings[i] = null; stats.colorConflictRejects++; return }
+    if (conflict[i]) { appearance[i] = source[i]; textureBindings[i] = null; textureBindingCandidates[i] = []; stats.colorConflictRejects++; return }
     if (count) stats.refinedColors++; if (count === 1) stats.singleView++; if (count > 1) stats.multipleViews++
   })
   stats.colorMs = performance.now() - colorStarted
-  return { discontinuities, geometry, appearance, textureBindings, combined: geometry.map((s, i) => ({ ...s, colorRgb: appearance[i].colorRgb })), stats }
+  return { discontinuities, geometry, appearance, textureBindings, textureBindingCandidates: textureBindingCandidates.map((candidates) => Object.freeze([...candidates])), combined: geometry.map((s, i) => ({ ...s, colorRgb: appearance[i].colorRgb })), stats }
 }
