@@ -9,6 +9,13 @@ export type ScanSessionStatus =
   | 'finished'
   | 'error'
 
+export type ScannerFinishStage =
+  | 'preparing-scan'
+  | 'reconstructing-geometry'
+  | 'cleaning-surfaces'
+  | 'applying-room-appearance'
+  | 'building-final-model'
+
 export type ScannerReferenceSpaceType = 'local-floor' | 'local'
 
 export type DomOverlayStatus = 'unknown' | 'active' | 'unavailable'
@@ -809,12 +816,15 @@ export interface DenseRealityFusionDebug {
 }
 
 export interface FinalizedDenseRealityReconstruction {
-  /** M8.7.1.2 bounded live preview fusion, retained only for stage comparison. */
+  /** M8.7.1.3 bounded live preview fusion, retained only for stage comparison. */
   readonly liveLightweightSurfels?: readonly FinalizedRealitySurfel[]
   /** Deterministic post-scan worker output used by production Final Reality. */
   readonly canonicalSurfels?: readonly FinalizedRealitySurfel[]
   readonly retainedMeasurementDiagnostics?: import('./services/retainedRealityMeasurementService').RetainedRealityMeasurementDiagnostics
   readonly canonicalFusionDiagnostics?: import('./services/canonicalRealityFusionService').CanonicalRealityFusionDiagnostics
+  /** Bounded measured-only audit points excluded during canonical hypothesis resolution. */
+  readonly provisionalExpiryMap?: import('./services/canonicalRealityFusionService').ProvisionalExpiryMap
+  readonly finishPipelineDiagnostics?: import('./services/xrSessionService').FinishPipelineDiagnostics
   readonly fusedRawSurfels?: readonly FinalizedRealitySurfel[]
   readonly rawMeasurements?: readonly import('./services/realityMeasurementStabilityService').RawRealityMeasurement[]
   readonly measurementDiagnostics?: import('./services/realityMeasurementStabilityService').RealityMeasurementDiagnostics
@@ -863,6 +873,16 @@ export interface RealityRgbKeyframeDiagnostics {
   readonly captureCount: number
   readonly rejectedDuplicateCount: number
   readonly skippedForPressureCount: number
+  /** Number of high-resolution appearance candidates attributed to one outcome. */
+  readonly candidateCount: number
+  readonly candidateOutcomes: {
+    readonly captured: number
+    readonly pressureSkipped: number
+    readonly motionSkipped: number
+    readonly duplicateViewSkipped: number
+    readonly cameraUnavailable: number
+    readonly other: number
+  }
   readonly captureMs: number
   readonly allocationMs: number
   readonly shaderCopyMs: number
@@ -910,6 +930,7 @@ export interface ViewerPoseDebug {
 
 export interface ScannerSessionState {
   status: ScanSessionStatus
+  finishStage: ScannerFinishStage | null
   debug: ViewerPoseDebug
   domOverlayStatus: DomOverlayStatus
   error: string | null

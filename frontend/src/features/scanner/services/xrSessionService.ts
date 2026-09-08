@@ -4,6 +4,7 @@ import type {
   RawCameraCopyFrame,
   ReferenceSpaceStatus,
   ScannerReferenceSpaceType,
+  ScannerFinishStage,
   SpatialPointDebug,
   SpatialPointObservation,
   DenseMaskStabilizationOptions,
@@ -80,6 +81,17 @@ export interface XRSessionCallbacks {
   onDiagnostics: (diagnostics: ViewerPoseDebug) => void
   onError: (error: XRSessionError) => void
   onSessionEnded: (reason: XRSessionEndReason) => void
+  onFinishStage: (stage: ScannerFinishStage) => void
+}
+
+export interface FinishPipelineDiagnostics {
+  readonly stopAndCaptureDrainMs: number
+  readonly retainedMeasurementFinalizationMs: number
+  readonly canonicalWorkerRoundTripMs: number
+  readonly canonicalWorkerMs: number
+  readonly resultAssemblyMs: number
+  readonly xrSessionEndMs: number
+  readonly totalFinishMs: number
 }
 
 export interface XRSessionStartOptions {
@@ -337,6 +349,7 @@ export class XRSessionService {
   }
 
   public async finish(): Promise<FinalizedScannerCapture> {
+    const finishStartedAt = getPerformanceTimestamp()
     if (this.startPromise) {
       throw new XRSessionError(
         'The scan session is still starting and cannot be finalized yet.',
@@ -363,9 +376,13 @@ export class XRSessionService {
     this.isEnding = true
     this.stopFrameProcessing(session)
     this.rawCameraCopyPhase = 0
+    this.callbacks?.onFinishStage('preparing-scan')
 
     try {
+      const drainStartedAt = getPerformanceTimestamp()
       await this.measurementQueue.flush()
+      const stopAndCaptureDrainMs = getPerformanceTimestamp() - drainStartedAt
+      const finalizationStartedAt = getPerformanceTimestamp()
       const finishedAt = Date.now()
       const fusedSurfaceSurfels = this.persistentLiveSurfaceService.getFinalizationSurfels(
         this.spatialCoverageService,
@@ -400,13 +417,19 @@ export class XRSessionService {
       const liveRgb = this.rawCameraService.getDiagnostics(false)
       const appearanceKeyframes = this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable())
       const retainedMeasurements = this.retainedMeasurementService.createSnapshot()
+      const retainedMeasurementFinalizationMs = getPerformanceTimestamp() - finalizationStartedAt
+      const canonicalStartedAt = getPerformanceTimestamp()
       const canonicalReality = rawDenseReality && retainedMeasurements.frames.length > 0
-        ? await reconstructCanonicalReality(retainedMeasurements)
+        ? await reconstructCanonicalReality(retainedMeasurements, (stage) => this.callbacks?.onFinishStage(stage))
         : null
+      const canonicalWorkerRoundTripMs = getPerformanceTimestamp() - canonicalStartedAt
+      this.callbacks?.onFinishStage('building-final-model')
+      const assemblyStartedAt = getPerformanceTimestamp()
       const canonicalSurfels = canonicalReality?.surfels ?? rawDenseReality?.surfels ?? []
       const canonicalColored = canonicalSurfels.filter((surfel) => surfel.colorRgb !== null)
-      const denseRealityReconstruction = rawDenseReality ? Object.freeze({ ...rawDenseReality,
-        status: canonicalColored.length > 0 ? 'available' as const : 'empty' as const,
+      const denseRealityBase = rawDenseReality ? { ...rawDenseReality,
+        // Geometry availability is independent of optional camera color.
+        status: canonicalSurfels.length > 0 ? 'available' as const : 'empty' as const,
         surfels: canonicalSurfels,
         canonicalSurfels,
         liveLightweightSurfels: rawDenseReality.fusedRawSurfels ?? rawDenseReality.surfels,
@@ -428,9 +451,25 @@ export class XRSessionService {
         measurementQueueDiagnostics: Object.freeze(this.measurementQueue.getDiagnostics()),
         retainedMeasurementDiagnostics: retainedMeasurements.diagnostics,
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
-      }) : null
+        provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
+      } : null
+      const resultAssemblyMs = getPerformanceTimestamp() - assemblyStartedAt
 
+      const endStartedAt = getPerformanceTimestamp()
       await this.endActiveSession(session)
+      const xrSessionEndMs = getPerformanceTimestamp() - endStartedAt
+      const finishPipelineDiagnostics: FinishPipelineDiagnostics = Object.freeze({
+        stopAndCaptureDrainMs,
+        retainedMeasurementFinalizationMs,
+        canonicalWorkerRoundTripMs,
+        canonicalWorkerMs: canonicalReality?.diagnostics.workerTimeMs ?? 0,
+        resultAssemblyMs,
+        xrSessionEndMs,
+        totalFinishMs: getPerformanceTimestamp() - finishStartedAt,
+      })
+      const denseRealityReconstruction = denseRealityBase
+        ? Object.freeze({ ...denseRealityBase, finishPipelineDiagnostics })
+        : null
       return {
         spatialScan: finalizedScan,
         realityReconstruction,
@@ -741,16 +780,15 @@ export class XRSessionService {
           const densePointFrame=packet.denseFrame
           if (acceptance.accepted) {
             this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
-            const queueIdle = this.measurementQueue.getDiagnostics().queueDepth === 0
+            const appearanceDecision = this.qualityPolicy.appearanceCaptureDecision(this.measurementQueue.getDiagnostics().queueDepth)
             // High-resolution appearance is optional and yields first under
             // pressure. The M8.6 mask keyframe cadence remains unchanged.
-            if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1 && queueIdle &&
-              this.qualityPolicy.shouldCaptureAppearance(0)) {
+            if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1 && appearanceDecision.allowed) {
               const appearanceStartedAt=getPerformanceTimestamp()
               this.appearanceKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position, this.viewerDirection,
                 densePointFrame.validPointCount * 3600 / (sampling.columns * sampling.rows), this.rawCameraService, this.qualityPolicy.appearanceMotion())
               this.measurementQueue.recordStage('appearance-copy',getPerformanceTimestamp()-appearanceStartedAt)
-            } else if(this.realityCaptureEnabled&&this.rawCameraCopyPhase===1) this.appearanceKeyframeService.recordPressureSkip()
+            } else if(this.realityCaptureEnabled&&this.rawCameraCopyPhase===1) this.appearanceKeyframeService.recordCandidateOutcome('pressure-skipped')
             let currentRawCameraFrame: RawCameraCopyFrame | null = null
             let currentRgbDepthResult: RgbDepthRegistrationResult | null = null
             const realityCaptureAvailable = this.realityCaptureEnabled && this.rawCameraService.isAvailable()
@@ -786,9 +824,10 @@ export class XRSessionService {
             const queuedRegistration=currentRgbDepthResult?{...currentRgbDepthResult,
               sourceSampleIndices:new Int32Array(currentRgbDepthResult.sourceSampleIndices),
               srgbColors:new Uint8Array(currentRgbDepthResult.srgbColors)}:null
-            if (this.realityCaptureEnabled) {
-              this.retainedMeasurementService.consider(packet, acceptance.trackingQuality, queuedRegistration)
-            }
+            // Final geometry must not depend on optional raw-camera access.
+            // RGB evidence remains optional and is retained only when an
+            // accepted packet owns a matching registration result.
+            this.retainedMeasurementService.consider(packet, acceptance.trackingQuality, queuedRegistration)
             const result=this.measurementQueue.enqueue({packet,acceptance,registration:queuedRegistration,
               cameraDirection:{...(this.viewerDirection??{x:0,y:0,z:-1})},depthReconstructionDurationMs,sampling})
             if(result==='replaced'||result==='dropped')this.measurementStabilityService.recordBackpressureSkipped()

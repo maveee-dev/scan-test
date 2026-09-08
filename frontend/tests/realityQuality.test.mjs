@@ -20,7 +20,7 @@ const { SpatialPointService } = await load('spatialPointService')
 const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
 const { filterRealityConfidence } = await load('realityConfidenceFiltering')
 const { RealityMeasurementQueueService } = await load('realityMeasurementQueueService')
-const { CanonicalRealityFusionService, CANONICAL_REALITY_CONFIG } = await load('canonicalRealityFusionService')
+const { CanonicalRealityFusionService, CANONICAL_REALITY_CONFIG, PROVISIONAL_EXPIRY_MAP_CAPACITY, PROVISIONAL_EXPIRY_REASON } = await load('canonicalRealityFusionService')
 const { RetainedRealityMeasurementService, RETAINED_REALITY_CONFIG } = await load('retainedRealityMeasurementService')
 const identity = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
 const perspective = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,-1,-1, 0,0,-.1,0])
@@ -168,6 +168,25 @@ test('fast motion defers appearance copy without stopping physical geometry capt
   const service=new RealityRgbKeyframeService(true);let copies=0
   service.considerCapture({}, {},2000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,{copyKeyframe:()=>{copies++;return null}},{translationMetersPerSecond:2,rotationDegreesPerSecond:80})
   assert.equal(copies,0);assert.equal(service.createSnapshot('empty',true).diagnostics.capacity,8)
+})
+
+test('appearance candidates have mutually attributable bounded scheduling outcomes',()=>{
+  const service=new RealityRgbKeyframeService(true),view={transform:{matrix:identity(),inverse:{matrix:identity()}},projectionMatrix:perspective()},frame=keyframe(8)
+  const available={isAvailable:()=>true,copyKeyframe:()=>({sequence:1,mapping:frame.mapping,pixels:new Uint8Array(8*8*4).fill(128)})}
+  service.recordCandidateOutcome('pressure-skipped')
+  service.considerCapture({},view,2000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:2,rotationDegreesPerSecond:0})
+  service.considerCapture({},view,4000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,{isAvailable:()=>false,copyKeyframe:()=>null})
+  service.considerCapture({},view,6000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:0,rotationDegreesPerSecond:0})
+  service.considerCapture({},view,8000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:0,rotationDegreesPerSecond:0})
+  const d=service.getDiagnostics(),sum=Object.values(d.candidateOutcomes).reduce((total,value)=>total+value,0)
+  assert.equal(sum,d.candidateCount);assert.equal(d.candidateOutcomes.pressureSkipped,1);assert.equal(d.candidateOutcomes.motionSkipped,1);assert.equal(d.candidateOutcomes.cameraUnavailable,1);assert.equal(d.candidateOutcomes.captured,1);assert.equal(d.candidateOutcomes.duplicateViewSkipped,1)
+})
+
+test('Finish reports actual worker stages and retains physical-style timing fields',()=>{
+  const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
+  const worker=readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusion.worker.ts',import.meta.url),'utf8')
+  assert.match(session,/onFinishStage\('preparing-scan'\)/);assert.match(session,/onFinishStage\('building-final-model'\)/);assert.match(session,/canonicalWorkerRoundTripMs/)
+  assert.match(worker,/self\.postMessage\(\{ id: event\.data\.id, stage \}\)/)
 })
 test('immutable measurement packet owns exact frame pose, depth, phase and matrices',()=>{
   const gate=new RealityMeasurementStabilityService(),input=measurementInput(7,.25,700),packet=gate.createPacket(input)
@@ -333,6 +352,7 @@ test('unsupported explicit duplicate cannot become stable by repeated same-view 
 test('triangle rejection diagnostics distinguish combinatorial candidates from missing surfels',()=>{
   const resources=createRealitySurfaceRenderResources({surfels:plane(12).map(s=>supported(s))},'dense'),s=resources.stats
   assert.ok(s.triangleCandidatePairCount>=s.renderedTriangleCount);assert.equal(s.trianglesRejectedByUnsupportedNeighborhood,s.trianglesRejectedDegenerate+s.trianglesRejectedAngularGap+s.trianglesRejectedOccupiedCircumcircle);assert.equal(s.triangleNonParticipantCount,s.coloredSurfelCount-s.triangleParticipantCount);assert.equal(s.fallbackSplatCount,s.triangleNonParticipantCount)
+  assert.equal(s.meshCoveredCanonicalSamples,s.triangleParticipantCount);assert.equal(s.splatCoveredCanonicalSamples,s.fallbackSplatCount);assert.equal(s.visuallyRepresentedSamples,s.sourceSurfelCount);assert.equal(s.trulyUndisplayedSamples,0)
   resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })
 
@@ -347,12 +367,48 @@ test('canonical flat wall reinforces one surface instead of temporal-phase churn
   for(let sequence=1;sequence<=6;sequence++){const shift=[0,.006,.012,.003][sequence%4];frames.push(retainedFrame(wall.map((s,i)=>sample(i,s.position.x+shift,s.position.y,s.position.z)),sequence))}
   const result=canonical(frames)
   assert.ok(result.surfels.length>=80&&result.surfels.length<=130);assert.ok(result.diagnostics.matchedExisting>result.diagnostics.provisionalCreated);assert.ok(result.diagnostics.observationsPerCanonicalSurfel>=3)
+  assert.ok(result.diagnostics.provisionalPromoted>0);assert.ok(result.diagnostics.canonicalMerges>0);assert.ok(result.diagnostics.transitionExistingCanonical>0)
+  const reinforced=result.surfels.find(s=>s.geometryObservationCount>=5);assert.ok(reinforced);assert.ok((reinforced.lastObservedAt??0)>(reinforced.firstObservedAt??0));assert.ok((reinforced.viewObservationCount??0)>=2);assert.ok((reinforced.positionVarianceMetersSquared??0)>0)
+})
+
+test('later frames reinforce promoted canonical state without recreating provisional surfels',()=>{
+  const measured=[sample(1,0,0,-2)]
+  const frames=Array.from({length:7},(_,index)=>retainedFrame(measured.map(s=>sample(1,s.position.x+(index%2)*.002,0,-2+(index%3)*.001)),index+1,index*.1))
+  const result=canonical(frames),surfel=result.surfels[0]
+  assert.equal(result.surfels.length,1);assert.equal(result.diagnostics.provisionalCreated,1);assert.equal(result.diagnostics.provisionalPromoted,1)
+  assert.ok(result.diagnostics.canonicalMerges>=3);assert.equal(result.diagnostics.canonicalMerges,result.diagnostics.transitionExistingCanonical)
+  assert.equal(surfel.geometryObservationCount,7);assert.ok((surfel.positionVarianceMetersSquared??0)>0);assert.ok((surfel.depthVarianceMetersSquared??0)>0);assert.ok((surfel.viewObservationCount??0)>=2)
+})
+
+test('per-frame consolidation preserves real RGB when the first measured voxel representative is uncolored',()=>{
+  const patch=[sample(0,0,0,-2),sample(1,.001,.001,-2)]
+  const frames=Array.from({length:4},(_,index)=>{
+    const frame=retainedFrame(patch,index+1,index*.1)
+    frame.colorSourceIndices=new Int32Array([1]);frame.srgbColors=new Uint8Array([220,40,20])
+    return frame
+  })
+  const result=canonical(frames)
+  assert.equal(result.surfels.length,1);assert.ok(result.surfels[0].colorRgb);assert.ok(result.surfels[0].colorRgb.r>.8)
+  assert.equal(result.diagnostics.baseColorCanonicalSurfels,1);assert.equal(result.diagnostics.baseColorCoveragePercentage,100)
 })
 
 test('robust canonical update resists one corrupt frame and provisional surface does not become Final',()=>{
   const wall=plane(8),frames=[retainedFrame(wall,1),retainedFrame(wall,2),retainedFrame(plane(8,-1.95),3),retainedFrame(wall,4),retainedFrame(wall,5)]
   const result=canonical(frames),z=result.surfels.map(s=>s.position.z)
   assert.ok(z.length>0);assert.ok(z.every(value=>Math.abs(value+2)<.018));assert.ok(result.diagnostics.provisionalExpired>0)
+})
+
+test('provisional expiry map is bounded packed measured positions with deterministic reason accounting',()=>{
+  const perFrame=1600,frameCount=8,total=perFrame*frameCount
+  const frames=Array.from({length:frameCount},(_unused,frameIndex)=>retainedFrame(Array.from({length:perFrame},(_ignored,index)=>sample(index,(frameIndex*perFrame+index)*.09,0,-2)),frameIndex+1))
+  const result=canonical(frames)
+  const map=result.diagnostics.provisionalExpiryMap,reasons=result.diagnostics.expiryReasons
+  const reasonTotal=Object.values(reasons).reduce((total,value)=>total+value,0)
+  assert.equal(map.total,reasonTotal);assert.equal(map.total,total);assert.equal(map.sampled,PROVISIONAL_EXPIRY_MAP_CAPACITY);assert.equal(map.omitted,total-PROVISIONAL_EXPIRY_MAP_CAPACITY)
+  assert.ok(map.sampled<=map.capacity);assert.equal(map.capacity,PROVISIONAL_EXPIRY_MAP_CAPACITY)
+  assert.equal(map.positions.length,map.sampled*3);assert.equal(map.reasonCodes.length,map.sampled)
+  assert.ok([...map.positions].every(Number.isFinite));assert.ok([...map.reasonCodes].every(code=>code===PROVISIONAL_EXPIRY_REASON.insufficientTemporalSupport))
+  assert.equal(reasons.insufficientTemporalSupport,total);assert.equal(reasons.replacedByCanonical,0)
 })
 
 test('false forward five-centimeter wall disappears after correct support resumes',()=>{
@@ -410,6 +466,14 @@ test('retained accepted geometry frames are bounded and preserve the full tempor
   const store=new RetainedRealityMeasurementService(),gate=new RealityMeasurementStabilityService()
   for(let i=1;i<=140;i++){const packet=gate.createPacket(measurementInput(i,i*.03,i*200));store.consider(packet,.9,null)}
   const snapshot=store.createSnapshot();assert.ok(snapshot.frames.length<=RETAINED_REALITY_CONFIG.maxFrames);assert.ok(snapshot.diagnostics.temporalCompactions>0);assert.ok(snapshot.frames.at(-1).sequence>120);assert.ok(snapshot.diagnostics.memoryBytes>0)
+  assert.equal(snapshot.diagnostics.retainedColorEvidenceCount,0);assert.equal(snapshot.diagnostics.retainedFrameCoverage.length,snapshot.frames.length);assert.ok(snapshot.diagnostics.compactionReplacements>0)
+})
+
+test('accepted geometry retention is camera-independent and the XR path does not gate it on RGB availability',()=>{
+  const store=new RetainedRealityMeasurementService(),gate=new RealityMeasurementStabilityService(),packet=gate.createPacket(measurementInput(1,0,250))
+  assert.equal(store.consider(packet,.9,null),true);const snapshot=store.createSnapshot();assert.equal(snapshot.frames.length,1);assert.equal(snapshot.frames[0].srgbColors.length,0);assert.equal(snapshot.diagnostics.samplesRetained,400)
+  const xr=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
+  assert.match(xr,/Final geometry must not depend on optional raw-camera access/);assert.doesNotMatch(xr,/if \(this\.realityCaptureEnabled\) \{\s*this\.retainedMeasurementService\.consider/)
 })
 
 test('live Dense fusion uses a bounded preview budget while canonical retains full input',()=>{

@@ -138,6 +138,11 @@ function ScannerPage({
   const isStarting = sessionState.status === 'starting'
   const isScanning = sessionState.status === 'scanning'
   const isFinishing = sessionState.status === 'finishing'
+  const finishStageLabel = sessionState.finishStage === 'preparing-scan' ? 'Preparing scan…'
+    : sessionState.finishStage === 'reconstructing-geometry' ? 'Reconstructing geometry…'
+      : sessionState.finishStage === 'cleaning-surfaces' ? 'Cleaning surfaces…'
+        : sessionState.finishStage === 'applying-room-appearance' ? 'Applying room appearance…'
+          : 'Building final model…'
   const isCancelling = sessionState.status === 'cancelling'
   const isActive = isStarting || isScanning || isFinishing || isCancelling
   const isEnding = isFinishing || isCancelling
@@ -149,7 +154,7 @@ function ScannerPage({
   const statusLabel = isStarting
     ? 'Starting session'
     : isFinishing
-      ? 'Building clean 3D room…'
+      ? finishStageLabel
       : isCancelling
         ? 'Cancelling scan'
       : isActive
@@ -162,7 +167,7 @@ function ScannerPage({
   const statusDescription = isStarting
     ? 'Requesting camera and spatial tracking access.'
     : isFinishing
-      ? 'Building clean 3D room from retained measurements…'
+      ? `${finishStageLabel} Your measured room data is being processed off the live XR path.`
       : isCancelling
         ? 'Discarding the active scan and ending XR.'
       : isActive
@@ -343,7 +348,7 @@ function ScannerPage({
                       disabled={isEnding}
                       onClick={onFinishScan}
                     >
-                      {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
+                      {isFinishing ? finishStageLabel : 'Finish Scan'}
                     </button>
                   ) : null}
                 </div>

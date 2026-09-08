@@ -44,6 +44,7 @@ const createInitialDebug = (): ViewerPoseDebug => ({
 
 const createInitialState = (): ScannerSessionState => ({
   status: 'ready',
+  finishStage: null,
   debug: createInitialDebug(),
   domOverlayStatus: 'unknown',
   error: null,
@@ -143,6 +144,10 @@ export function useScannerSession(
 
             setSessionState((currentState) => ({ ...currentState, debug }))
           },
+          onFinishStage: (finishStage) => {
+            if (!mountedRef.current) return
+            setSessionState((currentState) => ({ ...currentState, finishStage }))
+          },
           onError: (error) => {
             if (!mountedRef.current) {
               return
@@ -164,6 +169,7 @@ export function useScannerSession(
               setSessionState((currentState) => ({
                 ...currentState,
                 status: 'finishing',
+                finishStage: currentState.finishStage ?? 'preparing-scan',
                 debug: createInitialDebug(),
                 domOverlayStatus: 'unknown',
                 error: null,
@@ -301,6 +307,7 @@ export function useScannerSession(
     setSessionState((currentState) => ({
       ...currentState,
       status: 'finishing',
+      finishStage: 'preparing-scan',
       error: null,
     }))
 
@@ -315,6 +322,7 @@ export function useScannerSession(
         setSessionState((currentState) => ({
           ...currentState,
           status: 'finished',
+          finishStage: null,
           debug: createInitialDebug(),
           domOverlayStatus: 'unknown',
           finalizedScan: capture.spatialScan,

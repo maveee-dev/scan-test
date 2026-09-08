@@ -4,7 +4,9 @@ import type { RetainedRealityMeasurementSnapshot } from './retainedRealityMeasur
 
 self.onmessage = (event: MessageEvent<{ id: number; snapshot: RetainedRealityMeasurementSnapshot }>) => {
   try {
-    const result = new CanonicalRealityFusionService().reconstruct(event.data.snapshot)
+    const result = new CanonicalRealityFusionService().reconstruct(event.data.snapshot, (stage) => {
+      self.postMessage({ id: event.data.id, stage })
+    })
     self.postMessage({ id: event.data.id, result })
   } catch (error) {
     self.postMessage({
@@ -13,4 +15,3 @@ self.onmessage = (event: MessageEvent<{ id: number; snapshot: RetainedRealityMea
     })
   }
 }
-

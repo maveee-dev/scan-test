@@ -1,10 +1,12 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1.2**. Live scanning now uses a
+Current implementation: **Scanner Build M8.7.1.3**. Live scanning uses a
 bounded lightweight map while production Reality is rebuilt after Finish from
-retained accepted measurements. M8.6.7.2 customization remains frozen pending
-physical reconstruction validation; see the M8.7/M8.7.1 sections below and the
-[M8.7.1.2 implementation report](M8_7_1_2_IMPLEMENTATION_REPORT.md).
+coverage-aware retained accepted measurements. Canonical lifecycle, measured
+hybrid display, real-RGB fallback and Finish progress are now separately
+observable. M8.6.7.2 customization remains frozen pending physical
+reconstruction validation; see the M8.7/M8.7.1 sections below and the
+[M8.7.1.3 implementation report](M8_7_1_3_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2597,3 +2599,62 @@ wall, object-envelope and customization behavior remain frozen. Desktop
 synthetic tests cannot establish physical success; flat-wall edge-on thickness,
 a single ceiling, real protrusions, recess topology, responsive live scanning
 and three-scan repeatability must be verified on POCO F5 before further work.
+
+### M8.7.1.3 — Canonical Completeness, Appearance & Finish UX
+
+The two M8.7.1.2 POCO scans preserve the live/final split and confirm thinner
+walls and substantially cheaper live fusion, but show large visual holes,
+missing base color and an 8–9 second Finish pause. M8.7.1.3 stabilizes those
+boundaries without increasing depth resolution, the 96-frame bound, 2.5 cm
+canonical cells, 60,000-surface capacity or layer count.
+
+Canonical hypotheses can now promote during deterministic replay once their
+temporal and local/view support is established. Later compatible frames
+therefore reinforce an actual canonical surfel and update support, variance,
+viewpoint and real-color state. The prior zero canonical-reinforcement report
+was caused by deferring every promotion until replay had ended, even though
+provisional hypotheses had already accumulated multiple observations.
+
+Accepted geometry retention no longer depends on optional raw-camera access.
+A bounded selection proxy considers both viewpoint novelty and newly measured
+coarse spatial coverage; at capacity it replaces the least useful interior
+frame rather than blindly halving temporal history. Diagnostics expose rejected
+redundancy, replacements, per-frame contribution, proxy coverage lost and real
+RGB evidence retained. Per-frame consolidation keeps a measured position but
+merges available registered RGB within its 18 mm voxel, so an uncolored first
+sample cannot discard later real-camera evidence.
+
+Final display is explicitly hybrid and measured-only: safe triangles are drawn
+where local topology supports them, while canonical oriented splats represent
+measured samples that cannot safely enter a triangle. Triangle-only and hybrid
+stages remain separate. Counters distinguish mesh-covered, splat-covered,
+visually represented and truly undisplayed canonical samples; true unobserved
+space is never filled.
+
+The quality preview now exposes nine production stages from accepted
+measurements through baseline real RGB, optional high-resolution refinement and
+Final M8.7.1.3. A bounded Provisional Expiry Map shows measured omitted
+hypotheses by attributable reason. The canonical funnel reports count,
+prior-stage percentage, spatial-cell coverage and area proxy. Dominant locally
+planar thickness is separated from the global mixed-surface proxy, and defended
+second-layer reasons are counted without semantic fabrication.
+
+High-resolution appearance remains optional and bounded to eight 640-pixel
+keyframes. Stable opportunities require an empty queue, bounded XR/processing
+timing, low motion, interval and view novelty. Candidate outcomes are counted
+as captured, pressure, motion, duplicate-view, camera-unavailable or other.
+These keyframes refine the registered real-RGB baseline; they no longer define
+whether Final has any color.
+
+Finish immediately enters an actual staged processing state: Preparing scan,
+Reconstructing geometry, Cleaning surfaces, Applying room appearance and
+Building final model. Worker stage messages drive the labels. Diagnostics time
+capture drain, retained finalization, worker round trip/compute, result
+assembly, XR end and total Finish. Confidence, refinement, color and rendering
+timings remain visible when the preview worker mounts.
+
+Physical acceptance remains one 20–30 second POCO F5 scan of the familiar
+wall/curtain/painting/shelf/ceiling scene. Continue to repeatability only after
+that first result has no giant hole where measured canonical samples exist,
+recognizable base color with zero high-resolution keyframes, responsive Finish
+stages, coherent ceiling and preserved protrusions/recesses.

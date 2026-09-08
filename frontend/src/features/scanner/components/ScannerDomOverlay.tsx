@@ -262,6 +262,11 @@ function ScannerDomOverlay({
   )
   const isStarting = sessionState.status === 'starting'
   const isFinishing = sessionState.status === 'finishing'
+  const finishStageLabel = sessionState.finishStage === 'preparing-scan' ? 'Preparing scan…'
+    : sessionState.finishStage === 'reconstructing-geometry' ? 'Reconstructing geometry…'
+      : sessionState.finishStage === 'cleaning-surfaces' ? 'Cleaning surfaces…'
+        : sessionState.finishStage === 'applying-room-appearance' ? 'Applying room appearance…'
+          : 'Building final model…'
   const isCancelling = sessionState.status === 'cancelling'
   const isEnding = isFinishing || isCancelling
   const trackingIsActive = sessionState.debug.trackingStatus === 'active'
@@ -455,7 +460,7 @@ function ScannerDomOverlay({
               disabled={isEnding}
               onClick={handleFinishScan}
             >
-              {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
+              {isFinishing ? finishStageLabel : 'Finish Scan'}
             </button>
           ) : null}
         </div>
@@ -1636,7 +1641,7 @@ function ScannerDomOverlay({
               disabled={isEnding}
               onClick={handleFinishScan}
             >
-              {isFinishing ? 'Building clean 3D room…' : 'Finish Scan'}
+              {isFinishing ? finishStageLabel : 'Finish Scan'}
             </button>
           ) : null}
         </div>

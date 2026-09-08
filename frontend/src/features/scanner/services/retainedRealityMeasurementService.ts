@@ -11,6 +11,12 @@ export const RETAINED_REALITY_CONFIG = Object.freeze({
   consolidationCellMeters: 0.018,
 })
 
+// This is deliberately only a bounded retention-selection proxy. It does not
+// participate in depth sampling, canonical cells, or reconstruction matching.
+const COVERAGE_PROXY_CELL_METERS = .25
+const MAX_COVERAGE_PROXY_CELLS_PER_FRAME = 96
+const MAX_COVERAGE_PROXY_PROBES_PER_FRAME = 384
+
 export interface RetainedRealityMeasurementFrame {
   readonly sequence: number
   readonly timestamp: number
@@ -23,18 +29,35 @@ export interface RetainedRealityMeasurementFrame {
   readonly normalValid: Uint8Array
   readonly colorSourceIndices: Int32Array
   readonly srgbColors: Uint8Array
+  /** Bounded spatial signature used only to preserve useful retained views. */
+  readonly coverageProxyKeys: readonly string[]
+  readonly viewpointProxyKey: string
+}
+
+export interface RetainedRealityFrameCoverageSummary {
+  readonly sequence: number
+  readonly timestamp: number
+  readonly proxyCellCount: number
+  readonly uniqueProxyCellContribution: number
+  readonly colorEvidenceCount: number
 }
 
 export interface RetainedRealityMeasurementDiagnostics {
   readonly framesConsidered: number
   readonly framesRetained: number
   readonly duplicateFramesRejected: number
+  readonly redundancyRejects: number
   readonly temporalCompactions: number
+  readonly compactionReplacements: number
+  readonly coverageLostDueToRemoval: number
   readonly samplesRetained: number
+  readonly retainedColorEvidenceCount: number
+  readonly retainedColorFrameCount: number
   readonly memoryBytes: number
   readonly viewpointBinCount: number
   readonly earliestTimestamp: number | null
   readonly latestTimestamp: number | null
+  readonly retainedFrameCoverage: readonly RetainedRealityFrameCoverageSummary[]
 }
 
 export interface RetainedRealityMeasurementSnapshot {
@@ -57,17 +80,46 @@ function frameMemoryBytes(frame: RetainedRealityMeasurementFrame): number {
     frame.normalValid.byteLength + frame.colorSourceIndices.byteLength + frame.srgbColors.byteLength
 }
 
+function createCoverageProxyKeys(frame: DenseSpatialPointFrame): readonly string[] {
+  const keys = new Set<string>()
+  const stride = Math.max(1, Math.floor(frame.valid.length / MAX_COVERAGE_PROXY_PROBES_PER_FRAME))
+  for (let sourceIndex = 0; sourceIndex < frame.valid.length && keys.size < MAX_COVERAGE_PROXY_CELLS_PER_FRAME; sourceIndex += stride) {
+    if (!frame.valid[sourceIndex]) continue
+    const offset = sourceIndex * 3
+    const x = frame.points[offset], y = frame.points[offset + 1], z = frame.points[offset + 2]
+    if (![x, y, z].every(Number.isFinite)) continue
+    keys.add(`${Math.floor(x / COVERAGE_PROXY_CELL_METERS)}:${Math.floor(y / COVERAGE_PROXY_CELL_METERS)}:${Math.floor(z / COVERAGE_PROXY_CELL_METERS)}`)
+  }
+  return Object.freeze([...keys].sort())
+}
+
+function viewpointProxyKey(frame: Pick<RetainedRealityMeasurementFrame, 'cameraPosition' | 'cameraOrientation'>): string {
+  const position = frame.cameraPosition, orientation = frame.cameraOrientation
+  return `${Math.floor(position.x / .25)}:${Math.floor(position.y / .25)}:${Math.floor(position.z / .25)}:${Math.round(orientation.x * 8)}:${Math.round(orientation.y * 8)}:${Math.round(orientation.z * 8)}:${Math.round(orientation.w * 8)}`
+}
+
+function coverageContribution(frame: RetainedRealityMeasurementFrame, frames: readonly RetainedRealityMeasurementFrame[]): number {
+  const shared = new Set<string>()
+  for (const other of frames) if (other !== frame) for (const key of other.coverageProxyKeys) shared.add(key)
+  let contribution = 0
+  for (const key of frame.coverageProxyKeys) if (!shared.has(key)) contribution += 1
+  return contribution
+}
+
 /**
  * Retains application-owned accepted measurement packets for deterministic
- * post-scan replay. Retention is O(1) on an accepted XR tick: packet arrays are
- * already immutable copies, and consolidation is deliberately deferred to the
- * reconstruction worker.
+ * post-scan replay. Packet arrays are already immutable copies, and the
+ * selection proxy has fixed probe/frame bounds; consolidation is deliberately
+ * deferred to the reconstruction worker.
  */
 export class RetainedRealityMeasurementService {
   private frames: RetainedRealityMeasurementFrame[] = []
   private framesConsidered = 0
   private duplicateFramesRejected = 0
+  private redundancyRejects = 0
   private temporalCompactions = 0
+  private compactionReplacements = 0
+  private coverageLostDueToRemoval = 0
 
   public consider(
     packet: RealityMeasurementPacket,
@@ -87,33 +139,65 @@ export class RetainedRealityMeasurementService {
       normalValid: packet.normalValid,
       colorSourceIndices: registration?.sourceSampleIndices ?? new Int32Array(0),
       srgbColors: registration?.srgbColors ?? new Uint8Array(0),
+      coverageProxyKeys: createCoverageProxyKeys(packet.denseFrame),
+      viewpointProxyKey: '',
     })
-    const previous = this.frames.at(-1)
-    if (previous) {
-      const elapsed = candidate.timestamp - previous.timestamp
+    const withViewpoint = Object.freeze({ ...candidate, viewpointProxyKey: viewpointProxyKey(candidate) })
+    const candidateCoverageGain = coverageContribution(withViewpoint, this.frames)
+    const redundant = this.frames.some((previous) => {
+      const elapsed = Math.abs(withViewpoint.timestamp - previous.timestamp)
       const translation = Math.hypot(
-        candidate.cameraPosition.x - previous.cameraPosition.x,
-        candidate.cameraPosition.y - previous.cameraPosition.y,
-        candidate.cameraPosition.z - previous.cameraPosition.z,
+        withViewpoint.cameraPosition.x - previous.cameraPosition.x,
+        withViewpoint.cameraPosition.y - previous.cameraPosition.y,
+        withViewpoint.cameraPosition.z - previous.cameraPosition.z,
       )
-      const rotation = quaternionDifferenceDegrees(candidate.cameraOrientation, previous.cameraOrientation)
-      if (elapsed < RETAINED_REALITY_CONFIG.minimumTimeSpacingMs &&
+      const rotation = quaternionDifferenceDegrees(withViewpoint.cameraOrientation, previous.cameraOrientation)
+      return elapsed < RETAINED_REALITY_CONFIG.minimumTimeSpacingMs &&
         translation < RETAINED_REALITY_CONFIG.minimumTranslationMeters &&
         rotation < RETAINED_REALITY_CONFIG.minimumRotationDegrees &&
-        candidate.samplingPhase === previous.samplingPhase) {
-        this.duplicateFramesRejected += 1
-        return false
-      }
+        withViewpoint.samplingPhase === previous.samplingPhase &&
+        candidateCoverageGain === 0
+    })
+    if (redundant) {
+      this.duplicateFramesRejected += 1
+      this.redundancyRejects += 1
+      return false
     }
 
     if (this.frames.length >= RETAINED_REALITY_CONFIG.maxFrames) {
-      // Preserve the complete walk rather than retaining only its beginning.
-      // Deterministic temporal decimation keeps endpoints and every second
-      // interior frame before accepting newer viewpoints.
-      this.frames = this.frames.filter((_frame, index) => index === 0 || index === this.frames.length - 1 || index % 2 === 0)
+      // Keep the opening and newest endpoint. Among bounded interior history,
+      // replace the least useful view using coverage first, then viewpoint and
+      // temporal diversity. This is at most 96 x 96 proxy keys per accepted
+      // tick and never touches reconstruction resolution or capacity.
+      let replacementIndex = 1
+      let replacementScore = Infinity
+      for (let index = 1; index < this.frames.length - 1; index += 1) {
+        const frame = this.frames[index]
+        const contribution = coverageContribution(frame, this.frames)
+        const sameViewpoints = this.frames.filter((other) => other !== frame && other.viewpointProxyKey === frame.viewpointProxyKey).length
+        const previousTime = this.frames[index - 1]?.timestamp ?? frame.timestamp
+        const nextTime = this.frames[index + 1]?.timestamp ?? frame.timestamp
+        const temporalSpan = Math.min(frame.timestamp - previousTime, nextTime - frame.timestamp)
+        // Lower is less valuable. Earlier entries break otherwise equal ties.
+        const score = contribution * 100 + (sameViewpoints === 0 ? 20 : 0) + Math.min(20, Math.max(0, temporalSpan) / 100)
+        if (score < replacementScore) { replacementScore = score; replacementIndex = index }
+      }
+      const removed = this.frames[replacementIndex]
+      const candidateHasNovelViewpoint = !this.frames.some((frame) => frame.viewpointProxyKey === withViewpoint.viewpointProxyKey)
+      const previousTimestamp = this.frames.at(-1)?.timestamp ?? withViewpoint.timestamp
+      const candidateTemporalDiversity = Math.min(20, Math.max(0, withViewpoint.timestamp - previousTimestamp) / 100)
+      const candidateScore = candidateCoverageGain * 100 + (candidateHasNovelViewpoint ? 20 : 0) + candidateTemporalDiversity
+      if (candidateScore < replacementScore) {
+        this.duplicateFramesRejected += 1
+        this.redundancyRejects += 1
+        return false
+      }
+      this.coverageLostDueToRemoval += coverageContribution(removed, [...this.frames, withViewpoint])
+      this.frames.splice(replacementIndex, 1)
       this.temporalCompactions += 1
+      this.compactionReplacements += 1
     }
-    this.frames.push(candidate)
+    this.frames.push(withViewpoint)
     return true
   }
 
@@ -121,23 +205,40 @@ export class RetainedRealityMeasurementService {
     const bins = new Set<string>()
     let samplesRetained = 0
     let memoryBytes = 0
+    let retainedColorEvidenceCount = 0
+    let retainedColorFrameCount = 0
     for (const frame of this.frames) {
       samplesRetained += frame.denseFrame.validPointCount
       memoryBytes += frameMemoryBytes(frame)
-      bins.add(`${Math.floor(frame.cameraPosition.x / .25)}:${Math.floor(frame.cameraPosition.y / .25)}:${Math.floor(frame.cameraPosition.z / .25)}`)
+      retainedColorEvidenceCount += frame.colorSourceIndices.length
+      if (frame.colorSourceIndices.length > 0) retainedColorFrameCount += 1
+      bins.add(frame.viewpointProxyKey)
     }
+    const retainedFrameCoverage = Object.freeze(this.frames.map((frame) => Object.freeze({
+      sequence: frame.sequence,
+      timestamp: frame.timestamp,
+      proxyCellCount: frame.coverageProxyKeys.length,
+      uniqueProxyCellContribution: coverageContribution(frame, this.frames),
+      colorEvidenceCount: frame.colorSourceIndices.length,
+    })))
     return Object.freeze({
       frames: Object.freeze([...this.frames]),
       diagnostics: Object.freeze({
         framesConsidered: this.framesConsidered,
         framesRetained: this.frames.length,
         duplicateFramesRejected: this.duplicateFramesRejected,
+        redundancyRejects: this.redundancyRejects,
         temporalCompactions: this.temporalCompactions,
+        compactionReplacements: this.compactionReplacements,
+        coverageLostDueToRemoval: this.coverageLostDueToRemoval,
         samplesRetained,
+        retainedColorEvidenceCount,
+        retainedColorFrameCount,
         memoryBytes,
         viewpointBinCount: bins.size,
         earliestTimestamp: this.frames[0]?.timestamp ?? null,
         latestTimestamp: this.frames.at(-1)?.timestamp ?? null,
+        retainedFrameCoverage,
       }),
     })
   }
@@ -146,6 +247,9 @@ export class RetainedRealityMeasurementService {
     this.frames = []
     this.framesConsidered = 0
     this.duplicateFramesRejected = 0
+    this.redundancyRejects = 0
     this.temporalCompactions = 0
+    this.compactionReplacements = 0
+    this.coverageLostDueToRemoval = 0
   }
 }

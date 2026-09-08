@@ -1,7 +1,6 @@
 import type {
   FinalizedRealitySurfel,
   RealityColorStatistics,
-  RealityRgbColor,
   SpatialBounds,
   SpatialPoint,
 } from '../types'
@@ -22,6 +21,35 @@ export const CANONICAL_REALITY_CONFIG = Object.freeze({
   falseParallelMinimumMeters: 0.028,
   falseParallelMaximumMeters: 0.105,
 })
+
+/**
+ * A deliberately small, transfer-safe audit trail for measured hypotheses that
+ * were not carried into Final Reality.  This is diagnostic data only: no point
+ * in this map is fed back into reconstruction or rendering of the Final model.
+ */
+export const PROVISIONAL_EXPIRY_MAP_CAPACITY = 12000
+export const PROVISIONAL_EXPIRY_REASON = Object.freeze({
+  insufficientTemporalSupport: 1,
+  insufficientMultiViewSupport: 2,
+  replacedByCanonical: 3,
+  duplicateParallelLayer: 4,
+  isolatedOrNoisy: 5,
+  capacityOrLayerPolicy: 6,
+  other: 7,
+} as const)
+export type ProvisionalExpiryReason = keyof typeof PROVISIONAL_EXPIRY_REASON
+export interface ProvisionalExpiryMap {
+  readonly capacity: number
+  /** All measured hypotheses accounted for, including samples beyond capacity. */
+  readonly total: number
+  /** Prefix retained in the packed arrays; deterministic replay order. */
+  readonly sampled: number
+  readonly omitted: number
+  /** xyz triples of actual observed hypothesis positions. */
+  readonly positions: Float32Array
+  /** One value per xyz triple, using PROVISIONAL_EXPIRY_REASON. */
+  readonly reasonCodes: Uint8Array
+}
 
 export interface CanonicalRealityFusionDiagnostics {
   readonly inputFrames: number
@@ -50,6 +78,39 @@ export interface CanonicalRealityFusionDiagnostics {
   readonly transitionPossibleParallelDuplicate: number
   readonly transitionTrueSeparatedLayer: number
   readonly transitionOutlier: number
+  readonly baseColorInputObservations: number
+  readonly baseColorConsolidatedObservations: number
+  readonly baseColorCanonicalSurfels: number
+  readonly baseColorCoveragePercentage: number
+  readonly expiryReasons: Readonly<{
+    insufficientTemporalSupport: number
+    insufficientMultiViewSupport: number
+    replacedByCanonical: number
+    isolatedOrNoisy: number
+    duplicateParallelLayer: number
+    capacityOrLayerPolicy: number
+    other: number
+  }>
+  readonly provisionalExpiryMap: ProvisionalExpiryMap
+  readonly trueSecondLayerReasons: Readonly<{
+    recessTopology: number
+    objectOrOccludingSurface: number
+    separateWall: number
+    unknown: number
+  }>
+  readonly dominantPlanarThicknessP50Meters: number
+  readonly dominantPlanarThicknessP90Meters: number
+  readonly dominantPlanarThicknessP95Meters: number
+  readonly dominantPlanarSurfelCount: number
+  readonly completenessStages: readonly CanonicalCompletenessStage[]
+}
+
+export interface CanonicalCompletenessStage {
+  readonly name: 'retained-measured' | 'per-frame-consolidated' | 'provisional-created' | 'promoted-canonical'
+  readonly count: number
+  readonly percentageOfPrior: number
+  readonly spatialCoverageCells: number
+  readonly surfaceAreaProxySquareMeters: number
 }
 
 export interface CanonicalRealityFusionResult {
@@ -59,11 +120,14 @@ export interface CanonicalRealityFusionResult {
   readonly colorStatistics: RealityColorStatistics
 }
 
+export type CanonicalReconstructionStage = 'reconstructing-geometry' | 'cleaning-surfaces' | 'applying-room-appearance'
+
 interface ConsolidatedObservation {
   readonly sourceIndex: number
   readonly position: SpatialPoint
   readonly normal: SpatialPoint
-  readonly color: RealityRgbColor | null
+  color: MutableColor | null
+  colorCount: number
 }
 
 interface MutableColor { r: number; g: number; b: number }
@@ -137,18 +201,36 @@ function consolidateFrame(frame: RetainedRealityMeasurementFrame): ConsolidatedO
     if (![position.x, position.y, position.z, normal.x, normal.y, normal.z].every(Number.isFinite)) continue
     const consolidationCell = RETAINED_REALITY_CONFIG.consolidationCellMeters
     const spatialKey = `${Math.floor(position.x / consolidationCell)}:${Math.floor(position.y / consolidationCell)}:${Math.floor(position.z / consolidationCell)}`
-    if (representatives.has(spatialKey)) continue
     const colorIndex = sourceToColor[sourceIndex]
     const colorOffset = colorIndex * 3
+    const color = colorIndex >= 0 ? {
+      r: frame.srgbColors[colorOffset] / 255,
+      g: frame.srgbColors[colorOffset + 1] / 255,
+      b: frame.srgbColors[colorOffset + 2] / 255,
+    } : null
+    const existing = representatives.get(spatialKey)
+    if (existing) {
+      // Geometry remains an actual measured representative. Real registered
+      // RGB is accumulated independently so an earlier uncolored sample in the
+      // same voxel cannot erase available camera evidence.
+      if (color) {
+        if (!existing.color) existing.color = color
+        else {
+          const nextCount = existing.colorCount + 1
+          existing.color.r += (color.r - existing.color.r) / nextCount
+          existing.color.g += (color.g - existing.color.g) / nextCount
+          existing.color.b += (color.b - existing.color.b) / nextCount
+        }
+        existing.colorCount += 1
+      }
+      continue
+    }
     representatives.set(spatialKey, {
       sourceIndex,
       position,
       normal,
-      color: colorIndex >= 0 ? {
-        r: frame.srgbColors[colorOffset] / 255,
-        g: frame.srgbColors[colorOffset + 1] / 255,
-        b: frame.srgbColors[colorOffset + 2] / 255,
-      } : null,
+      color,
+      colorCount: color ? 1 : 0,
     })
   }
   const observations = [...representatives.values()]
@@ -185,8 +267,12 @@ function calculateColorStatistics(surfels: readonly FinalizedRealitySurfel[]): R
 
 /** Deterministic, order-normalized post-scan surfel fusion. No structural/M7 input is accepted. */
 export class CanonicalRealityFusionService {
-  public reconstruct(snapshot: RetainedRealityMeasurementSnapshot): CanonicalRealityFusionResult {
+  public reconstruct(
+    snapshot: RetainedRealityMeasurementSnapshot,
+    onStage?: (stage: CanonicalReconstructionStage) => void,
+  ): CanonicalRealityFusionResult {
     const startedAt = performance.now()
+    onStage?.('reconstructing-geometry')
     const frames = [...snapshot.frames].sort((left, right) => left.sequence - right.sequence || left.timestamp - right.timestamp)
     const surfels: MutableCanonicalSurfel[] = []
     const buckets = new Map<string, number[]>()
@@ -195,6 +281,23 @@ export class CanonicalRealityFusionService {
     let falseParallelLayersCollapsed = 0, trueSeparateLayersRetained = 0, outliersRejected = 0, layerCapacityRejected = 0
     let transitionExistingCanonical = 0, transitionExistingProvisional = 0, transitionNewCoherent = 0
     let transitionPossibleParallelDuplicate = 0, transitionTrueSeparatedLayer = 0, transitionOutlier = 0
+    let baseColorInputObservations = 0, baseColorConsolidatedObservations = 0
+    const retainedCoverage = new Set<string>(), consolidatedCoverage = new Set<string>()
+    const expiryReasons = { insufficientTemporalSupport: 0, insufficientMultiViewSupport: 0,
+      replacedByCanonical: 0, isolatedOrNoisy: 0, duplicateParallelLayer: 0, capacityOrLayerPolicy: 0, other: 0 }
+    const expiryMapPositions: number[] = []
+    const expiryMapReasonCodes: number[] = []
+    let expiryMapTotal = 0
+    const recordExpiry = (position: SpatialPoint, reason: ProvisionalExpiryReason): void => {
+      expiryReasons[reason] += 1
+      expiryMapTotal += 1
+      if (expiryMapReasonCodes.length >= PROVISIONAL_EXPIRY_MAP_CAPACITY) return
+      // Position is the measured observation/hypothesis position at the moment
+      // it is removed; it is never inferred from a neighboring canonical surfel.
+      expiryMapPositions.push(position.x, position.y, position.z)
+      expiryMapReasonCodes.push(PROVISIONAL_EXPIRY_REASON[reason])
+    }
+    const trueSecondLayerReasons = { recessTopology: 0, objectOrOccludingSurface: 0, separateWall: 0, unknown: 0 }
 
     const addToBucket = (index: number): void => {
       const bucketKey = pointKey(surfels[index].position), entries = buckets.get(bucketKey)
@@ -207,11 +310,42 @@ export class CanonicalRealityFusionService {
       if (at >= 0) entries.splice(at, 1)
       if (!entries.length) buckets.delete(oldKey)
     }
+    const coherentSupportCount = (index: number): number => {
+      const source = surfels[index], cx = cell(source.position.x), cy = cell(source.position.y), cz = cell(source.position.z)
+      let count = 0
+      for (const [dxCell, dyCell, dzCell] of MATCH_OFFSETS) {
+        const entries = buckets.get(key(cx + dxCell, cy + dyCell, cz + dzCell))
+        if (!entries) continue
+        for (const other of entries) {
+          if (other === index || surfels[other].removed) continue
+          const target = surfels[other]
+          const distance = Math.hypot(source.position.x - target.position.x, source.position.y - target.position.y, source.position.z - target.position.z)
+          const dot = Math.abs(source.normal.x * target.normal.x + source.normal.y * target.normal.y + source.normal.z * target.normal.z)
+          if (distance <= .065 && dot >= .78 && target.observationCount >= 2) count += 1
+          if (count >= 2) return count
+        }
+      }
+      return count
+    }
+    const promoteDuringReplay = (index: number): void => {
+      const surfel = surfels[index]
+      if (!surfel.provisional || surfel.observationCount < 3 || surfel.lastTimestamp - surfel.firstTimestamp < 220) return
+      if (surfel.viewCount < 2 && coherentSupportCount(index) < 2) return
+      surfel.provisional = false
+      provisionalPromoted += 1
+    }
 
     for (const frame of frames) {
       inputObservations += frame.denseFrame.validPointCount
+      baseColorInputObservations += frame.colorSourceIndices.length
+      for (let sourceIndex = 0; sourceIndex < frame.denseFrame.valid.length; sourceIndex += 1) if (frame.denseFrame.valid[sourceIndex]) {
+        const offset = sourceIndex * 3
+        retainedCoverage.add(key(cell(frame.denseFrame.points[offset]), cell(frame.denseFrame.points[offset + 1]), cell(frame.denseFrame.points[offset + 2])))
+      }
       const observations = consolidateFrame(frame)
       consolidatedObservations += observations.length
+      baseColorConsolidatedObservations += observations.reduce((count, observation) => count + (observation.color ? 1 : 0), 0)
+      observations.forEach((observation) => consolidatedCoverage.add(pointKey(observation.position)))
       sameFrameConsolidated += Math.max(0, frame.denseFrame.validPointCount - observations.length)
       for (const observation of observations) {
         const cellX = cell(observation.position.x), cellY = cell(observation.position.y), cellZ = cell(observation.position.z)
@@ -294,12 +428,13 @@ export class CanonicalRealityFusionService {
           const newKey = pointKey(candidate.position)
           if (newKey !== oldKey) { removeFromBucket(best, oldKey); addToBucket(best) }
           matchedExisting += 1
+          promoteDuringReplay(best)
           continue
         }
 
-        if (surfels.length >= CANONICAL_REALITY_CONFIG.maxSurfels) { layerCapacityRejected += 1; continue }
+        if (surfels.length >= CANONICAL_REALITY_CONFIG.maxSurfels) { layerCapacityRejected += 1; recordExpiry(observation.position, 'capacityOrLayerPolicy'); continue }
         const localBucket = buckets.get(pointKey(observation.position))
-        if (localBucket && localBucket.filter((index) => !surfels[index].removed).length >= CANONICAL_REALITY_CONFIG.maxLayersPerCell) { layerCapacityRejected += 1; continue }
+        if (localBucket && localBucket.filter((index) => !surfels[index].removed).length >= CANONICAL_REALITY_CONFIG.maxLayersPerCell) { layerCapacityRejected += 1; recordExpiry(observation.position, 'capacityOrLayerPolicy'); continue }
         const viewDirection = normalize({
           x: frame.cameraPosition.x - observation.position.x,
           y: frame.cameraPosition.y - observation.position.y,
@@ -318,6 +453,7 @@ export class CanonicalRealityFusionService {
       }
     }
 
+    onStage?.('cleaning-surfaces')
     const topologyBuckets = new Map<string, number[]>()
     const topologyCell = .08
     for (let index = 0; index < surfels.length; index += 1) {
@@ -351,8 +487,15 @@ export class CanonicalRealityFusionService {
       })
       const span = surfel.lastTimestamp - surfel.firstTimestamp
       const promotable = surfel.observationCount >= 3 && span >= 220 && (coherentNeighbors >= 2 || surfel.viewCount >= 2)
+      if (!surfel.provisional) continue
       if (promotable) { surfel.provisional = false; provisionalPromoted += 1 }
-      else { surfel.removed = true; provisionalExpired += 1 }
+      else {
+        surfel.removed = true; provisionalExpired += 1
+        if (surfel.observationCount < 3 || span < 220) recordExpiry(surfel.position, 'insufficientTemporalSupport')
+        else if (coherentNeighbors === 0 && surfel.viewCount < 2) recordExpiry(surfel.position, 'isolatedOrNoisy')
+        else if (surfel.viewCount < 2) recordExpiry(surfel.position, 'insufficientMultiViewSupport')
+        else recordExpiry(surfel.position, 'other')
+      }
     }
 
     // Resolve overlapping near-parallel hypotheses only after all frames have
@@ -376,13 +519,20 @@ export class CanonicalRealityFusionService {
         const weaker = surfelStrength <= targetStrength ? surfel : target
         const stronger = weaker === surfel ? target : surfel
         const defendedPhysicalLayer = weaker.sideSupport || (separation >= .07 && weaker.viewCount >= 2 && weaker.observationCount >= 3)
-        if (defendedPhysicalLayer) { trueSeparateLayersRetained += 1; transitionTrueSeparatedLayer += 1; return }
+        if (defendedPhysicalLayer) {
+          trueSeparateLayersRetained += 1; transitionTrueSeparatedLayer += 1
+          if (weaker.sideSupport) trueSecondLayerReasons.recessTopology += 1
+          else if (separation < .095) trueSecondLayerReasons.objectOrOccludingSurface += 1
+          else trueSecondLayerReasons.unknown += 1
+          return
+        }
         if (stronger.observationCount >= weaker.observationCount * 1.45 || stronger.viewCount > weaker.viewCount) {
-          weaker.removed = true; falseParallelLayersCollapsed += 1
+          weaker.removed = true; falseParallelLayersCollapsed += 1; recordExpiry(weaker.position, 'duplicateParallelLayer')
         }
       })
     }
 
+    onStage?.('applying-room-appearance')
     const retained = surfels.filter((surfel) => !surfel.removed && !surfel.provisional)
     const finalSurfels = retained.map((surfel, id): FinalizedRealitySurfel => {
       const denominator = Math.max(1, surfel.observationCount - 1)
@@ -410,7 +560,26 @@ export class CanonicalRealityFusionService {
       })
     })
     const thickness = retained.map((surfel) => Math.sqrt(surfel.depthResidualSquaredSum / Math.max(1, surfel.observationCount - 1)) * 2)
+    const dominantPlanarThickness: number[] = []
+    for (let index = 0; index < surfels.length; index += 1) {
+      const surfel = surfels[index]
+      if (surfel.removed || surfel.provisional || coherentSupportCount(index) < 2) continue
+      dominantPlanarThickness.push(Math.sqrt(surfel.depthResidualSquaredSum / Math.max(1, surfel.observationCount - 1)) * 2)
+    }
     const observations = retained.reduce((total, surfel) => total + surfel.observationCount, 0)
+    const baseColorCanonicalSurfels = retained.reduce((count, surfel) => count + (surfel.color ? 1 : 0), 0)
+    const summarizeStage = (name: CanonicalCompletenessStage['name'], count: number, prior: number, coverage: number): CanonicalCompletenessStage => Object.freeze({
+      name, count, percentageOfPrior: prior > 0 ? count / prior * 100 : 0, spatialCoverageCells: coverage,
+      surfaceAreaProxySquareMeters: coverage * CANONICAL_REALITY_CONFIG.cellSizeMeters ** 2,
+    })
+    const provisionalCoverage = new Set(surfels.map((surfel) => pointKey(surfel.position))).size
+    const promotedCoverage = new Set(retained.map((surfel) => pointKey(surfel.position))).size
+    const completenessStages = Object.freeze([
+      summarizeStage('retained-measured', inputObservations, inputObservations, retainedCoverage.size),
+      summarizeStage('per-frame-consolidated', consolidatedObservations, inputObservations, consolidatedCoverage.size),
+      summarizeStage('provisional-created', provisionalCreated, consolidatedObservations, provisionalCoverage),
+      summarizeStage('promoted-canonical', finalSurfels.length, provisionalCreated, promotedCoverage),
+    ])
     const diagnostics: CanonicalRealityFusionDiagnostics = Object.freeze({
       inputFrames: frames.length, inputObservations, consolidatedObservations, sameFrameConsolidated, matchedExisting,
       provisionalCreated, provisionalPromoted, provisionalExpired, canonicalMerges, falseParallelLayersCollapsed,
@@ -421,6 +590,23 @@ export class CanonicalRealityFusionService {
       numericMemoryBytes: snapshot.diagnostics.memoryBytes + surfels.length * 128,
       transitionExistingCanonical, transitionExistingProvisional, transitionNewCoherent,
       transitionPossibleParallelDuplicate, transitionTrueSeparatedLayer, transitionOutlier,
+      baseColorInputObservations, baseColorConsolidatedObservations, baseColorCanonicalSurfels,
+      baseColorCoveragePercentage: baseColorCanonicalSurfels / Math.max(1, finalSurfels.length) * 100,
+      expiryReasons: Object.freeze(expiryReasons),
+      provisionalExpiryMap: Object.freeze({
+        capacity: PROVISIONAL_EXPIRY_MAP_CAPACITY,
+        total: expiryMapTotal,
+        sampled: expiryMapReasonCodes.length,
+        omitted: expiryMapTotal - expiryMapReasonCodes.length,
+        positions: new Float32Array(expiryMapPositions),
+        reasonCodes: new Uint8Array(expiryMapReasonCodes),
+      }),
+      trueSecondLayerReasons: Object.freeze(trueSecondLayerReasons),
+      dominantPlanarThicknessP50Meters: percentile(dominantPlanarThickness, .5),
+      dominantPlanarThicknessP90Meters: percentile(dominantPlanarThickness, .9),
+      dominantPlanarThicknessP95Meters: percentile(dominantPlanarThickness, .95),
+      dominantPlanarSurfelCount: dominantPlanarThickness.length,
+      completenessStages,
     })
     return Object.freeze({ surfels: Object.freeze(finalSurfels), diagnostics, bounds: calculateBounds(finalSurfels), colorStatistics: calculateColorStatistics(finalSurfels) })
   }

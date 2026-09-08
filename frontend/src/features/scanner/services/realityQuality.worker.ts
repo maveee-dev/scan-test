@@ -3,6 +3,7 @@ import { filterRealityConfidence, type RealityConfidenceFilterResult } from './r
 import { refineRealityDisplay, type RealityDisplayRefinement } from './realityDisplayRefinement'
 import { createRealitySurfaceRenderResources, packRealitySurface } from './realitySurfaceRenderingService'
 import type { FinalizedDenseRealityReconstruction, FinalizedRealitySurfel } from '../types'
+import { PROVISIONAL_EXPIRY_REASON } from './canonicalRealityFusionService'
 
 let raw: FinalizedDenseRealityReconstruction | null = null
 let filtered: RealityConfidenceFilterResult | null = null
@@ -28,24 +29,52 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       firstObservedAt: sample.timestamp, lastObservedAt: sample.timestamp, stabilityClass: 'provisional',
     }))
     const acceptedMeasured = measured.filter((_surfel, index) => raw!.rawMeasurements?.[index]?.accepted)
+    const expiryMap = raw.provisionalExpiryMap ?? raw.canonicalFusionDiagnostics?.provisionalExpiryMap
+    const expiryColors: Record<number, { r: number; g: number; b: number }> = {
+      [PROVISIONAL_EXPIRY_REASON.insufficientTemporalSupport]: { r: 1, g: .63, b: .08 },
+      [PROVISIONAL_EXPIRY_REASON.insufficientMultiViewSupport]: { r: .9, g: .22, b: .9 },
+      [PROVISIONAL_EXPIRY_REASON.replacedByCanonical]: { r: .2, g: .85, b: 1 },
+      [PROVISIONAL_EXPIRY_REASON.duplicateParallelLayer]: { r: 1, g: .18, b: .2 },
+      [PROVISIONAL_EXPIRY_REASON.isolatedOrNoisy]: { r: .55, g: .55, b: .6 },
+      [PROVISIONAL_EXPIRY_REASON.capacityOrLayerPolicy]: { r: 1, g: .95, b: .12 },
+      [PROVISIONAL_EXPIRY_REASON.other]: { r: .95, g: .95, b: .95 },
+    }
+    // These are packed positions from actual measurements/hypotheses only. The
+    // renderer never creates a point for omitted map entries.
+    const expirySurfels: FinalizedRealitySurfel[] = expiryMap
+      ? Array.from({ length: Math.min(expiryMap.sampled, expiryMap.reasonCodes.length, Math.floor(expiryMap.positions.length / 3)) }, (_unused, index) => {
+        const offset = index * 3
+        return {
+          id: index,
+          position: { x: expiryMap.positions[offset], y: expiryMap.positions[offset + 1], z: expiryMap.positions[offset + 2] },
+          normal: { x: 0, y: 0, z: 1 }, radius: .009,
+          colorRgb: expiryColors[expiryMap.reasonCodes[index]] ?? expiryColors[PROVISIONAL_EXPIRY_REASON.other],
+          colorSpace: 'srgb', geometryConfidence: .5, colorConfidence: 1, colorObservationCount: 1,
+          geometryObservationCount: 1, stabilityClass: 'provisional',
+        }
+      })
+      : []
     const surfels = mode === 'raw-accepted' ? acceptedMeasured
+      : mode === 'retained' ? acceptedMeasured
       : mode === 'raw-measured' ? measured
       : mode === 'live' || mode === 'fused-raw' || mode === 'raw' || mode === 'density' ? live
       : mode === 'canonical' ? canonical
+      : mode === 'provisional-expiry' ? expirySurfels
       : mode === 'confidence' ? filtered.surfels
+      : mode === 'base-color' ? refined.geometry
       : mode === 'geometry' ? refined.geometry
       : mode === 'canonical-triangulated' || mode === 'triangulated' ? refined.geometry
-      : mode === 'color' ? refined.appearance : refined.combined
-    const diagnostic = ['raw-accepted', 'raw-measured', 'live', 'fused-raw', 'canonical', 'confidence', 'layers', 'discontinuities', 'new', 'views', 'reveal', 'trajectory'].includes(mode)
+      : mode === 'color' || mode === 'high-res' ? refined.appearance : refined.combined
+    const diagnostic = ['raw-accepted', 'raw-measured', 'live', 'fused-raw', 'canonical', 'confidence', 'provisional-expiry', 'layers', 'discontinuities', 'new', 'views', 'reveal', 'trajectory'].includes(mode)
     const latest = canonical.reduce((time, s) => Math.max(time, s.firstObservedAt ?? 0), 0)
     const earliest = canonical.reduce((time, s) => Math.min(time, s.firstObservedAt ?? 0), latest)
     const observer = raw.qualityTelemetry?.trajectory[0]?.position ?? { x: 0, y: 0, z: 0 }
     const stageDisplay = mode === 'live' || mode === 'fused-raw' ? live.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : s.stabilityClass === 'low' ? { r: 1, g: .65, b: .08 } : { r: 1, g: .15, b: .08 } }))
       : mode === 'canonical' ? canonical.map((s) => ({ ...s, colorRgb: { r: .15, g: .75, b: 1 } }))
       : mode === 'confidence' ? filtered.surfels.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : { r: .15, g: .55, b: 1 } }))
-      : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'color' || mode === 'final'
+      : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'hybrid' || mode === 'base-color' || mode === 'color' || mode === 'high-res' || mode === 'final'
         ? surfels.map((s) => ({ ...s, colorRgb: s.colorRgb ?? { r: .34, g: .39, b: .43 } })) : surfels
-    const display = diagnostic && !['raw-accepted','raw-measured','live','fused-raw','canonical','confidence'].includes(mode) ? canonical.map((s, index) => {
+    const display = mode === 'provisional-expiry' ? expirySurfels : diagnostic && !['raw-accepted','raw-measured','live','fused-raw','canonical','confidence'].includes(mode) ? canonical.map((s, index) => {
       let color = { r: .15, g: .2, b: .25 }
       if (mode === 'discontinuities') color = refined!.discontinuities[index] ? { r: 1, g: .2, b: .05 } : { r: .1, g: .7, b: .4 }
       if (mode === 'new' && (s.firstObservedAt ?? 0) >= latest - 180) color = { r: 0, g: 1, b: 1 }
@@ -54,8 +83,9 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       if (mode === 'reveal') { const t = ((s.firstObservedAt ?? 0) - earliest) / Math.max(1, latest - earliest); color = { r: t, g: 1 - t, b: .8 } }
       return { ...s, colorRgb: color }
     }) : stageDisplay
-    const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical'
-    const resources = createRealitySurfaceRenderResources({ surfels: display }, pointsOnly ? 'points' : 'dense')
+    const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
+    const renderMode = pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
+    const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
     const prepared = packRealitySurface(resources)
     const transfers = [...new Set(prepared.geometries.flatMap((g) => g.attributes.map((a) => a.array.buffer as ArrayBuffer)))]
     self.postMessage({ id, prepared, stats: refined.stats, filterStats: filtered.stats }, { transfer: transfers })

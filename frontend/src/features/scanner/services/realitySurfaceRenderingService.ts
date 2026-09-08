@@ -21,6 +21,10 @@ export interface RealitySurfaceRenderStats {
   readonly coloredTriangleVertexCount: number
   readonly uncoloredTriangleVertexCount: number
   readonly fallbackSplatCount: number
+  readonly meshCoveredCanonicalSamples: number
+  readonly splatCoveredCanonicalSamples: number
+  readonly visuallyRepresentedSamples: number
+  readonly trulyUndisplayedSamples: number
   readonly uncoloredFallbackSplatCount: number
   readonly splatsSuppressedByTriangles: number
   readonly visualRadiusScale: number
@@ -975,6 +979,14 @@ export function createRealitySurfaceRenderResources(
       coloredTriangleVertexCount,
       uncoloredTriangleVertexCount: 0,
       fallbackSplatCount,
+      meshCoveredCanonicalSamples: triangleCoveredSurfelCount,
+      splatCoveredCanonicalSamples: fallbackSplatCount,
+      visuallyRepresentedSamples: mode === 'dense'
+        ? triangleCoveredSurfelCount + fallbackSplatCount
+        : mode === 'triangles' ? triangleCoveredSurfelCount : coloredSurfels.length,
+      trulyUndisplayedSamples: Math.max(0, reconstruction.surfels.length - (mode === 'dense'
+        ? triangleCoveredSurfelCount + fallbackSplatCount
+        : mode === 'triangles' ? triangleCoveredSurfelCount : coloredSurfels.length)),
       uncoloredFallbackSplatCount: 0,
       splatsSuppressedByTriangles,
       visualRadiusScale,

@@ -11,6 +11,17 @@ export interface RealityQualityTelemetry {
   trajectory: readonly ScanTrajectoryPoint[]
 }
 
+export type AppearanceCaptureDecisionReason =
+  | 'stable-opportunity'
+  | 'queue-pressure'
+  | 'xr-timing-pressure'
+  | 'processing-pressure'
+
+export interface AppearanceCaptureDecision {
+  readonly allowed: boolean
+  readonly reason: AppearanceCaptureDecisionReason
+}
+
 /** Timing feedback uses whole processing ticks, with slow-down hysteresis. */
 export class RealityQualityPolicy {
   private tier = 0
@@ -68,8 +79,25 @@ export class RealityQualityPolicy {
     return sampling
   }
 
+  /**
+   * Gives the XR scheduler a non-mutating, attributable timing decision. The
+   * limits are intentionally modestly wider than M8.7.1.2: an empty queue is
+   * still the hard backpressure gate, while the cheaper bounded live path can
+   * use stable ~40 ms frames without starving all appearance opportunities.
+   */
+  public appearanceCaptureDecision(queueDepth: number): AppearanceCaptureDecision {
+    if (queueDepth > 0) return { allowed: false, reason: 'queue-pressure' }
+    if ((this.telemetry.xrFrameIntervalMs ?? 0) >= 48) return { allowed: false, reason: 'xr-timing-pressure' }
+    if (this.telemetry.processingMs >= 42) return { allowed: false, reason: 'processing-pressure' }
+    return { allowed: true, reason: 'stable-opportunity' }
+  }
+
+  public getAppearanceCaptureDecision(queueDepth: number): AppearanceCaptureDecision {
+    return this.appearanceCaptureDecision(queueDepth)
+  }
+
   public shouldCaptureAppearance(queueDepth: number): boolean {
-    return queueDepth === 0 && (this.telemetry.xrFrameIntervalMs ?? 0) < 34 && this.telemetry.processingMs < 32
+    return this.appearanceCaptureDecision(queueDepth).allowed
   }
 
   public recordTick(ms: number, attempted: number, valid: number, grid: { columns: number; rows: number; phase?: number } = DEPTH_TIERS[this.tier], phaseAlreadyClaimed = false): void {
