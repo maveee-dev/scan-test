@@ -14,7 +14,7 @@ const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG } = await load('
 const { refineRealityDisplay } = await load('realityDisplayRefinement')
 const { InspectionPose, LiveRealityMap, getLiveMapCadenceMs } = await load('liveRealityMap')
 const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
-const { createRealitySurfaceRenderResources } = await load('realitySurfaceRenderingService')
+const { appendRealityTextureBatches, createRealitySurfaceRenderResources, packRealitySurface } = await load('realitySurfaceRenderingService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
 const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
@@ -22,6 +22,7 @@ const { filterRealityConfidence } = await load('realityConfidenceFiltering')
 const { RealityMeasurementQueueService } = await load('realityMeasurementQueueService')
 const { CanonicalRealityFusionService, CANONICAL_REALITY_CONFIG, PROVISIONAL_EXPIRY_MAP_CAPACITY, PROVISIONAL_EXPIRY_REASON } = await load('canonicalRealityFusionService')
 const { RetainedRealityMeasurementService, RETAINED_REALITY_CONFIG } = await load('retainedRealityMeasurementService')
+const { waitForFinishPaintBoundary } = await import(moduleUrl(new URL('../src/features/scanner/hooks/useScannerSession.ts', import.meta.url)))
 const identity = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
 const perspective = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,-1,-1, 0,0,-.1,0])
 const pose = (x = 0, timestamp = 0) => ({ position: { x, y: 1, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 }, timestamp })
@@ -132,8 +133,35 @@ test('triangulation retains doorway/unsupported gap and never synthesizes vertic
 test('supported small gaps use existing measured triangulation without hole vertices', () => {
   const wall=plane(12).filter((s)=>s.id!==78), r=createRealitySurfaceRenderResources({surfels:wall},'dense');assert.ok(r.stats.renderedTriangleCount>0);assert.ok([...r.triangleTopology.vertexSurfelIds].every((id)=>id!==78));r.geometries.forEach((g)=>g.dispose());r.materials.forEach((m)=>m.dispose())
 })
-test('high-resolution appearance uses actual RGB and proven reprojection', () => { const source=plane(8), frame=keyframe(128), before=JSON.stringify(source);const r=refineRealityDisplay(source,[frame]);assert.ok(r.stats.refinedColors>0);assert.equal(r.appearance[30].colorRgb.r,210/255);assert.equal(JSON.stringify(source),before) })
-test('occluded back layer rejects foreground keyframe color', () => {const front=[sample(0,0,0,-1)],back=[sample(1,0,0,-2)];const r=refineRealityDisplay([...front,...back],[keyframe()]);assert.equal(r.appearance[1].colorRgb.r,.5);assert.ok(r.stats.visibilityRejects>0)})
+test('high-resolution appearance uses actual RGB and proven reprojection', () => { const source=plane(8), frame=keyframe(128), before=JSON.stringify(source);const r=refineRealityDisplay(source,[frame]);assert.ok(r.stats.refinedColors>0);assert.equal(r.appearance[30].colorRgb.r,210/255);assert.equal(r.textureBindings[30]?.keyframeId,1);assert.ok(r.textureBindings[30]?.u>0&&r.textureBindings[30]?.u<1);assert.equal(JSON.stringify(source),before) })
+test('occluded back layer rejects foreground keyframe color and texture ownership', () => {const front=[sample(0,0,0,-1)],back=[sample(1,0,0,-2)];const r=refineRealityDisplay([...front,...back],[keyframe()]);assert.equal(r.appearance[1].colorRgb.r,.5);assert.equal(r.textureBindings[1],null);assert.ok(r.stats.visibilityRejects>0)})
+test('textured stage is bounded real-keyframe triangles with base RGB fallback',()=>{
+  const worker=readFileSync(new URL('../src/features/scanner/services/realityQuality.worker.ts',import.meta.url),'utf8')
+  const renderer=readFileSync(new URL('../src/features/scanner/services/realitySurfaceRenderingService.ts',import.meta.url),'utf8')
+  const page=readFileSync(new URL('../src/features/scanner/components/RealityQualityPreview.tsx',import.meta.url),'utf8')
+  assert.match(worker,/mode === 'textured'.*appendRealityTextureBatches/)
+  assert.match(renderer,/vertices\.every\(\(vertex\) => vertex\?\.binding\?\.keyframeId === first\.keyframeId\)/)
+  assert.match(renderer,/texture\.wrapS = THREE\.ClampToEdgeWrapping/)
+  assert.match(page,/10\. Textured Canonical Reality/)
+})
+test('texture batches contain only same-keyframe visible triangles and bounded real RGB',()=>{
+  const source=plane(8).map(s=>supported(s)),frames=[keyframe()],refined=refineRealityDisplay(source,frames)
+  const resources=createRealitySurfaceRenderResources({surfels:refined.appearance},'dense')
+  appendRealityTextureBatches(resources,refined.appearance,refined.textureBindings,frames)
+  const prepared=packRealitySurface(resources),textured=prepared.layers.filter(layer=>layer.kind==='textured')
+  assert.ok(textured.length<=frames.length);assert.ok((prepared.textureBatches?.length??0)<=8)
+  for(const batch of prepared.textureBatches??[]){assert.equal(batch.rgb.length,batch.width*batch.height*3);assert.deepEqual(batch.rgb,frames[0].rgb)}
+  for(const layer of textured)assert.ok(prepared.geometries[layer.geometry].attributes.some(attribute=>attribute.name==='uv'))
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
+test('depth edge or conflicting keyframe ownership cannot form a bleeding texture triangle',()=>{
+  const source=[supported(sample(0,-.01,0,-1)),supported(sample(1,.01,0,-1)),supported(sample(2,0,.02,-1.08))]
+  const resources=createRealitySurfaceRenderResources({surfels:source},'dense')
+  const bindings=[{keyframeId:1,u:.4,v:.4},{keyframeId:1,u:.5,v:.4},{keyframeId:2,u:.45,v:.5}]
+  appendRealityTextureBatches(resources,source,bindings,[keyframe(),{...keyframe(),id:2}])
+  assert.equal(packRealitySurface(resources).textureBatches?.length??0,0)
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
 test('no useful keyframe keeps original color and no fake appearance',()=>{const source=plane(8),r=refineRealityDisplay(source,[]);assert.equal(r.stats.refinedColors,0);assert.deepEqual(r.appearance,source)})
 test('best captured view is selected, not averaged with lower quality views',()=>{const a=keyframe(),b={...keyframe(),id:2,qualityScore:.1,rgb:new Uint8Array(64*64*3).fill(20)};const r=refineRealityDisplay(plane(8),[a,b]);assert.equal(r.appearance[30].colorRgb.r,210/255)})
 test('appearance keyframe cap, long edge, duplicate rejection and session reset',()=>{
@@ -187,6 +215,15 @@ test('Finish reports actual worker stages and retains physical-style timing fiel
   const worker=readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusion.worker.ts',import.meta.url),'utf8')
   assert.match(session,/onFinishStage\('preparing-scan'\)/);assert.match(session,/onFinishStage\('building-final-model'\)/);assert.match(session,/canonicalWorkerRoundTripMs/)
   assert.match(worker,/self\.postMessage\(\{ id: event\.data\.id, stage \}\)/)
+})
+test('finish click publishes processing state before the paint/task boundary',async()=>{
+  const source=readFileSync(new URL('../src/features/scanner/hooks/useScannerSession.ts',import.meta.url),'utf8'),finish=source.slice(source.indexOf('const finishScan'))
+  assert.ok(finish.indexOf("status: 'finishing'")<finish.indexOf('waitForFinishPaintBoundary()'))
+  assert.ok(finish.indexOf('waitForFinishPaintBoundary()')<finish.indexOf('service.finish({'))
+  const previousWindow=globalThis.window,events=[]
+  globalThis.window={requestAnimationFrame(callback){events.push('raf');callback();return 1},setTimeout(callback){events.push('task');return setTimeout(callback,0)}}
+  try { await waitForFinishPaintBoundary();assert.deepEqual(events,['raf','task']) }
+  finally { if(previousWindow===undefined)delete globalThis.window;else globalThis.window=previousWindow }
 })
 test('immutable measurement packet owns exact frame pose, depth, phase and matrices',()=>{
   const gate=new RealityMeasurementStabilityService(),input=measurementInput(7,.25,700),packet=gate.createPacket(input)
@@ -365,10 +402,30 @@ test('M8.7.1.2 same-frame spatial consolidation is bounded and preserves measure
 test('canonical flat wall reinforces one surface instead of temporal-phase churn',()=>{
   const wall=plane(10),frames=[]
   for(let sequence=1;sequence<=6;sequence++){const shift=[0,.006,.012,.003][sequence%4];frames.push(retainedFrame(wall.map((s,i)=>sample(i,s.position.x+shift,s.position.y,s.position.z)),sequence))}
+  frames[0].cameraPosition={x:0,y:0,z:0};frames[1].cameraPosition={x:.2,y:0,z:0};frames[2].cameraPosition={x:.4,y:0,z:0};frames[3].cameraPosition={x:.5,y:0,z:0};frames[4].cameraPosition={x:.55,y:0,z:0}
   const result=canonical(frames)
   assert.ok(result.surfels.length>=80&&result.surfels.length<=130);assert.ok(result.diagnostics.matchedExisting>result.diagnostics.provisionalCreated);assert.ok(result.diagnostics.observationsPerCanonicalSurfel>=3)
   assert.ok(result.diagnostics.provisionalPromoted>0);assert.ok(result.diagnostics.canonicalMerges>0);assert.ok(result.diagnostics.transitionExistingCanonical>0)
   const reinforced=result.surfels.find(s=>s.geometryObservationCount>=5);assert.ok(reinforced);assert.ok((reinforced.lastObservedAt??0)>(reinforced.firstObservedAt??0));assert.ok((reinforced.viewObservationCount??0)>=2);assert.ok((reinforced.positionVarianceMetersSquared??0)>0)
+})
+
+test('temporally sparse retained frames reinforce without adjacent retained indices',()=>{
+  const measured=[sample(1,0,0,-2)],frames=[retainedFrame(measured,1),retainedFrame(measured,20),retainedFrame(measured,100)]
+  const result=canonical(frames)
+  assert.equal(result.surfels.length,1);assert.equal(result.surfels[0].geometryObservationCount,3)
+  assert.equal(result.diagnostics.promotionAudit.maximumRetainedSequenceSpan,2)
+  assert.equal(result.diagnostics.promotionAudit.maximumOriginalFrameSpan,99)
+})
+
+test('established coherent wall neighbors promote two-frame measured coverage without inventing positions',()=>{
+  const anchors=[sample(1,-.055,0,-2),sample(2,.0275,.0476,-2),sample(3,.0275,-.0476,-2)]
+  const center=[sample(4,0,0,-2)],frames=[retainedFrame(anchors,1),retainedFrame(anchors,2),retainedFrame(anchors,3),retainedFrame(center,4),retainedFrame(center,5)]
+  frames[0].cameraPosition={x:0,y:0,z:0};frames[1].cameraPosition={x:.2,y:0,z:0};frames[2].cameraPosition={x:.4,y:0,z:0};frames[3].cameraPosition={x:.5,y:0,z:0};frames[4].cameraPosition={x:.55,y:0,z:0}
+  const result=canonical(frames)
+  assert.equal(result.surfels.length,4);assert.ok(result.diagnostics.surfaceCoherentPromotions>=1)
+  assert.ok(result.surfels.some(s=>Math.hypot(s.position.x,s.position.y)<.005))
+  assert.ok(result.diagnostics.canonicalCoverageOfConsolidatedPercentage>0)
+  assert.ok(result.diagnostics.coverageLossRegions.some(region=>region.promoted>0))
 })
 
 test('later frames reinforce promoted canonical state without recreating provisional surfels',()=>{
@@ -437,6 +494,39 @@ test('canonical local layer storage is fixed and bounded',()=>{
   assert.equal(CANONICAL_REALITY_CONFIG.maxLayersPerCell,4);assert.ok(result.diagnostics.layerCapacityRejected>=0);assert.ok(result.surfels.length<=4)
 })
 
+test('full local layer bucket still reinforces a compatible hypothesis',()=>{
+  const initial=[sample(1,.001,.001,.001),sample(2,.019,.001,.001),sample(3,.001,.019,.001),sample(4,.019,.019,.001)]
+  const repeated=[sample(1,.001,.001,.001)]
+  const frames=[retainedFrame(initial,1),retainedFrame(repeated,2),retainedFrame(repeated,3)]
+  frames[0].cameraPosition={x:0,y:0,z:0};frames[1].cameraPosition={x:.2,y:0,z:0};frames[2].cameraPosition={x:.4,y:0,z:0}
+  const result=canonical(frames)
+  assert.equal(result.diagnostics.localLayerCapacityRejected,0);assert.equal(result.surfels.length,1);assert.equal(result.surfels[0].geometryObservationCount,3)
+})
+
+test('stale weakest provisional in a full local bucket is deterministically recycled',()=>{
+  const initial=[sample(1,.001,.001,.001),sample(2,.019,.001,.001),sample(3,.001,.019,.001),sample(4,.019,.019,.001)]
+  const replacement=[sample(5,.012,.012,.024,{x:0,y:1,z:0})]
+  const result=canonical([retainedFrame(initial,1),retainedFrame(replacement,10)])
+  assert.equal(result.diagnostics.weakProvisionalsRecycled,1);assert.equal(result.diagnostics.localLayerCapacityRejected,0)
+})
+
+test('global provisional capacity recycles stale one-frame noise so a later wall can promote',()=>{
+  const frames=[]
+  for(let frame=0;frame<38;frame++)frames.push(retainedFrame(Array.from({length:1600},(_,i)=>sample(i,(frame*1600+i)*.09,0,-2)),frame+1))
+  const wall=[sample(90000,0,2,-2)]
+  frames.push(retainedFrame(wall,100),retainedFrame(wall,101),retainedFrame(wall,102))
+  const result=canonical(frames)
+  assert.ok(result.diagnostics.weakProvisionalsRecycled>0);assert.ok(result.surfels.some(s=>Math.abs(s.position.y-2)<.001))
+  assert.ok(result.diagnostics.provisionalCreated>CANONICAL_REALITY_CONFIG.maxSurfels)
+})
+
+test('sparse weak multi-view parallel sheet is rejected without topology evidence',()=>{
+  const wall=plane(8),sheet=Array.from({length:9},(_,i)=>sample(2000+i,(i%3-1)*.075,(Math.floor(i/3)-1)*.075,-1.94))
+  const result=canonical([retainedFrame([...wall,...sheet],1),retainedFrame([...wall,...sheet],2),retainedFrame([...wall,...sheet],3)])
+  assert.equal(result.surfels.filter(s=>s.position.z>-1.97).length,0)
+  assert.ok(result.diagnostics.falseParallelLayersCollapsed>0);assert.ok(result.diagnostics.secondLayerClassification.falseDuplicate+result.diagnostics.secondLayerClassification.uncertainParallelLayer>0)
+})
+
 test('canonical replay is approximately invariant to legal retained-frame order',()=>{
   const wall=plane(8),frames=[1,2,3,4,5].map(i=>retainedFrame(wall.map((s,j)=>sample(j,s.position.x+(i%2)*.005,s.position.y,s.position.z)),i))
   const normal=canonical(frames),reordered=canonical([frames[2],frames[0],frames[4],frames[1],frames[3]])
@@ -467,6 +557,12 @@ test('retained accepted geometry frames are bounded and preserve the full tempor
   for(let i=1;i<=140;i++){const packet=gate.createPacket(measurementInput(i,i*.03,i*200));store.consider(packet,.9,null)}
   const snapshot=store.createSnapshot();assert.ok(snapshot.frames.length<=RETAINED_REALITY_CONFIG.maxFrames);assert.ok(snapshot.diagnostics.temporalCompactions>0);assert.ok(snapshot.frames.at(-1).sequence>120);assert.ok(snapshot.diagnostics.memoryBytes>0)
   assert.equal(snapshot.diagnostics.retainedColorEvidenceCount,0);assert.equal(snapshot.diagnostics.retainedFrameCoverage.length,snapshot.frames.length);assert.ok(snapshot.diagnostics.compactionReplacements>0)
+})
+test('retained snapshot coverage contributions match unique proxy-cell semantics',()=>{
+  const store=new RetainedRealityMeasurementService(),gate=new RealityMeasurementStabilityService()
+  for(let i=1;i<=8;i++)store.consider(gate.createPacket(measurementInput(i,i*.03,i*200)),.9,null)
+  const snapshot=store.createSnapshot(),expected=snapshot.frames.map((frame)=>frame.coverageProxyKeys.filter((key)=>snapshot.frames.every((other)=>other===frame||!other.coverageProxyKeys.includes(key))).length)
+  assert.deepEqual(snapshot.diagnostics.retainedFrameCoverage.map((frame)=>frame.uniqueProxyCellContribution),expected)
 })
 
 test('accepted geometry retention is camera-independent and the XR path does not gate it on RGB availability',()=>{

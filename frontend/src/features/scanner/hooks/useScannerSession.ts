@@ -66,6 +66,24 @@ function getErrorMessage(error: unknown, fallbackMessage: string): string {
   return fallbackMessage
 }
 
+/**
+ * Gives React one browser paint for the finishing state before synchronous
+ * capture finalization starts. The task hop after rAF keeps the service call
+ * out of the paint callback itself; SSR and test environments use the task
+ * boundary directly when rAF is unavailable.
+ */
+export function waitForFinishPaintBoundary(): Promise<void> {
+  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, 0)
+    })
+  })
+}
+
 export interface ScannerSessionController {
   liveMap: XRSessionService['liveMap']
   sessionState: ScannerSessionState
@@ -303,6 +321,7 @@ export function useScannerSession(
       return
     }
 
+    const finishClickedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
     statusRef.current = 'finishing'
     setSessionState((currentState) => ({
       ...currentState,
@@ -311,8 +330,10 @@ export function useScannerSession(
       error: null,
     }))
 
-    void service
-      .finish()
+    void waitForFinishPaintBoundary()
+      .then(() => service.finish({
+        clickToProcessingUiFirstPaintMs: (typeof performance === 'undefined' ? Date.now() : performance.now()) - finishClickedAt,
+      }))
       .then((capture: FinalizedScannerCapture) => {
         if (!mountedRef.current || statusRef.current !== 'finishing') {
           return

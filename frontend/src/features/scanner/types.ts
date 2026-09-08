@@ -862,6 +862,14 @@ export interface RealityRgbKeyframe {
   readonly validDepthFraction: number
 }
 
+/** A visibility-approved reference into one bounded, application-owned RGB keyframe. */
+export interface RealityTextureBinding {
+  readonly keyframeId: number
+  /** Normalized top-left UV in the owning RGB keyframe. */
+  readonly u: number
+  readonly v: number
+}
+
 export interface RealityRgbKeyframeDiagnostics {
   readonly status: 'active' | 'unavailable' | 'empty'
   readonly retainedCount: number

@@ -107,6 +107,29 @@ function coverageContribution(frame: RetainedRealityMeasurementFrame, frames: re
 }
 
 /**
+ * Computes every retained frame's unique proxy-cell contribution in one pass.
+ * A proxy key contributes to exactly one frame iff it occurs once in the
+ * retained set, which is equivalent to coverageContribution(frame, frames)
+ * while avoiding a complete scan of the other frames for every frame.
+ */
+function coverageContributions(frames: readonly RetainedRealityMeasurementFrame[]): readonly number[] {
+  const occurrences = new Map<string, number>()
+  for (const frame of frames) {
+    for (const key of frame.coverageProxyKeys) {
+      occurrences.set(key, (occurrences.get(key) ?? 0) + 1)
+    }
+  }
+
+  return frames.map((frame) => {
+    let contribution = 0
+    for (const key of frame.coverageProxyKeys) {
+      if (occurrences.get(key) === 1) contribution += 1
+    }
+    return contribution
+  })
+}
+
+/**
  * Retains application-owned accepted measurement packets for deterministic
  * post-scan replay. Packet arrays are already immutable copies, and the
  * selection proxy has fixed probe/frame bounds; consolidation is deliberately
@@ -207,6 +230,7 @@ export class RetainedRealityMeasurementService {
     let memoryBytes = 0
     let retainedColorEvidenceCount = 0
     let retainedColorFrameCount = 0
+    const uniqueProxyCellContributions = coverageContributions(this.frames)
     for (const frame of this.frames) {
       samplesRetained += frame.denseFrame.validPointCount
       memoryBytes += frameMemoryBytes(frame)
@@ -214,11 +238,11 @@ export class RetainedRealityMeasurementService {
       if (frame.colorSourceIndices.length > 0) retainedColorFrameCount += 1
       bins.add(frame.viewpointProxyKey)
     }
-    const retainedFrameCoverage = Object.freeze(this.frames.map((frame) => Object.freeze({
+    const retainedFrameCoverage = Object.freeze(this.frames.map((frame, index) => Object.freeze({
       sequence: frame.sequence,
       timestamp: frame.timestamp,
       proxyCellCount: frame.coverageProxyKeys.length,
-      uniqueProxyCellContribution: coverageContribution(frame, this.frames),
+      uniqueProxyCellContribution: uniqueProxyCellContributions[index] ?? 0,
       colorEvidenceCount: frame.colorSourceIndices.length,
     })))
     return Object.freeze({

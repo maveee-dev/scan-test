@@ -1,4 +1,4 @@
-import type { FinalizedRealitySurfel, RealityRgbKeyframe, SpatialPoint } from '../types'
+import type { FinalizedRealitySurfel, RealityRgbKeyframe, RealityTextureBinding, SpatialPoint } from '../types'
 import { projectWorldPointToKeyframePixel } from './visibleWallMaskProvider'
 
 export interface RealityRefinementStats {
@@ -11,11 +11,27 @@ export interface RealityRefinementStats {
 export interface RealityDisplayRefinement {
   discontinuities: Uint8Array
   geometry: FinalizedRealitySurfel[]; appearance: FinalizedRealitySurfel[]; combined: FinalizedRealitySurfel[]
+  /** One unambiguous, measured-depth-visible keyframe per surfel, or null. */
+  textureBindings: readonly (RealityTextureBinding | null)[]
   stats: RealityRefinementStats
 }
 const dot = (a: SpatialPoint, b: SpatialPoint) => a.x * b.x + a.y * b.y + a.z * b.z
 const distance = (a: SpatialPoint, b: SpatialPoint) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`
+function imageSelectionFactor(frame: RealityRgbKeyframe): number {
+  const pixelStride = Math.max(1, Math.floor(frame.width * frame.height / 2048))
+  let luminance = 0, gradient = 0, samples = 0
+  for (let pixel = 0; pixel + pixelStride < frame.width * frame.height; pixel += pixelStride) {
+    const offset = pixel * 3, neighbor = (pixel + pixelStride) * 3
+    const current = frame.rgb[offset] * .299 + frame.rgb[offset + 1] * .587 + frame.rgb[offset + 2] * .114
+    const next = frame.rgb[neighbor] * .299 + frame.rgb[neighbor + 1] * .587 + frame.rgb[neighbor + 2] * .114
+    luminance += current; gradient += Math.abs(current - next); samples += 1
+  }
+  const mean = luminance / Math.max(1, samples) / 255
+  const exposure = Math.max(.45, 1 - Math.abs(mean - .5) * 1.1)
+  const sharpness = Math.min(1, gradient / Math.max(1, samples) / 28)
+  return exposure * (.6 + .4 * sharpness)
+}
 
 /** Local measured-neighbor refinement only. No M7 input and no added samples. */
 export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], frames: readonly RealityRgbKeyframe[]): RealityDisplayRefinement {
@@ -79,9 +95,11 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
   stats.geometryMs = performance.now() - started
   const colorStarted = performance.now(), bestScore = new Float32Array(source.length), observations = new Uint8Array(source.length)
   const appearance = source.slice(), pixel = { x: 0, y: 0 }
+  const textureBindings: (RealityTextureBinding | null)[] = Array(source.length).fill(null)
   const conflict = new Uint8Array(source.length)
   // One frame at a time: bounded temporary visibility raster, never N*frames.
   for (const frame of frames.slice(0, 8)) {
+    const capturedImageQuality = imageSelectionFactor(frame)
     const pixels = frame.width * frame.height, depth = new Float32Array(pixels); depth.fill(Infinity)
     const projected = new Int32Array(source.length); projected.fill(-1)
     const distances = new Float32Array(source.length)
@@ -111,8 +129,11 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
       for (const delta of [-1, 1, -frame.width, frame.width]) if (Number.isFinite(depth[index + delta]) && Math.abs(z - depth[index + delta]) > .04) visible = false
       if (!visible || incidence < .45) { stats.visibilityRejects++; return }
       const edge = Math.min(1, Math.min(x, y, frame.width - 1 - x, frame.height - 1 - y) / 8)
-      const score = incidence * edge * (.5 + .5 * frame.qualityScore) / (1 + d * d * .15)
-      if (score < .18) return
+      const visibilityScore = incidence * edge * (.5 + .5 * frame.qualityScore) / (1 + d * d * .15)
+      if (visibilityScore < .18) return
+      // Sharpness/exposure break otherwise similar safe-view ties without
+      // turning a low-texture but valid wall image into missing appearance.
+      const score = visibilityScore * (.9 + .1 * capturedImageQuality)
       observations[i]++
       const k = index * 3, prior = appearance[i].colorRgb
       if (bestScore[i] > 0 && prior && Math.min(score, bestScore[i]) >= Math.max(score, bestScore[i]) * .85) {
@@ -121,12 +142,13 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
       if (score <= bestScore[i]) return
       bestScore[i] = score
       appearance[i] = { ...s, colorRgb: { r: frame.rgb[k] / 255, g: frame.rgb[k + 1] / 255, b: frame.rgb[k + 2] / 255 } }
+      textureBindings[i] = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height }
     })
   }
   observations.forEach((count, i) => {
-    if (conflict[i]) { appearance[i] = source[i]; stats.colorConflictRejects++; return }
+    if (conflict[i]) { appearance[i] = source[i]; textureBindings[i] = null; stats.colorConflictRejects++; return }
     if (count) stats.refinedColors++; if (count === 1) stats.singleView++; if (count > 1) stats.multipleViews++
   })
   stats.colorMs = performance.now() - colorStarted
-  return { discontinuities, geometry, appearance, combined: geometry.map((s, i) => ({ ...s, colorRgb: appearance[i].colorRgb })), stats }
+  return { discontinuities, geometry, appearance, textureBindings, combined: geometry.map((s, i) => ({ ...s, colorRgb: appearance[i].colorRgb })), stats }
 }

@@ -36,8 +36,10 @@ export const PROVISIONAL_EXPIRY_REASON = Object.freeze({
   isolatedOrNoisy: 5,
   capacityOrLayerPolicy: 6,
   other: 7,
+  successfulPromotion: 8,
 } as const)
 export type ProvisionalExpiryReason = keyof typeof PROVISIONAL_EXPIRY_REASON
+type ProvisionalFailureReason = Exclude<ProvisionalExpiryReason, 'successfulPromotion'>
 export interface ProvisionalExpiryMap {
   readonly capacity: number
   /** All measured hypotheses accounted for, including samples beyond capacity. */
@@ -65,6 +67,11 @@ export interface CanonicalRealityFusionDiagnostics {
   readonly trueSeparateLayersRetained: number
   readonly outliersRejected: number
   readonly layerCapacityRejected: number
+  readonly globalCapacityRejected: number
+  readonly localLayerCapacityRejected: number
+  readonly weakProvisionalsRecycled: number
+  readonly surfaceCoherentPromotions: number
+  readonly unresolvedParallelLayers: number
   readonly canonicalSurfels: number
   readonly observationsPerCanonicalSurfel: number
   readonly wallThicknessP50Meters: number
@@ -103,6 +110,42 @@ export interface CanonicalRealityFusionDiagnostics {
   readonly dominantPlanarThicknessP95Meters: number
   readonly dominantPlanarSurfelCount: number
   readonly completenessStages: readonly CanonicalCompletenessStage[]
+  readonly canonicalCoverageOfConsolidatedPercentage: number
+  readonly promotionAudit: Readonly<{
+    standardPromotions: number
+    surfaceCoherentPromotions: number
+    expiredBelowThreeFrames: number
+    expiredShortCaptureSpan: number
+    expiredWithoutCanonicalNeighbors: number
+    maximumRetainedSequenceSpan: number
+    maximumOriginalFrameSpan: number
+    maximumViewpointBaselineMeters: number
+  }>
+  readonly workerStageTimingsMs: Readonly<{
+    unpackInput: number
+    perFrameConsolidation: number
+    replayMatching: number
+    promotionAndCleaning: number
+    layerResolution: number
+    parallelCollapse: number
+    finalPacking: number
+  }>
+  readonly coverageLossRegions: readonly Readonly<{
+    regionKey: string
+    expired: number
+    promoted: number
+    capacityRejected: number
+  }>[]
+  readonly secondLayerClassification: Readonly<{
+    wallOrPrimarySurface: number
+    objectProtrusion: number
+    occludingSurface: number
+    recessBack: number
+    recessSide: number
+    genuineSecondWall: number
+    uncertainParallelLayer: number
+    falseDuplicate: number
+  }>
 }
 
 export interface CanonicalCompletenessStage {
@@ -141,6 +184,10 @@ interface MutableCanonicalSurfel {
   firstTimestamp: number
   lastTimestamp: number
   lastFrameSequence: number
+  firstRetainedSequence: number
+  lastRetainedSequence: number
+  firstOriginalFrameSequence: number
+  lastOriginalFrameSequence: number
   firstCamera: SpatialPoint
   firstViewDirection: SpatialPoint
   viewCount: number
@@ -154,11 +201,29 @@ interface MutableCanonicalSurfel {
   removed: boolean
   suspectedParallel: boolean
   sideSupport: boolean
+  sideSupportCount: number
+  coherentNeighborCount: number
 }
 
 const MATCH_OFFSETS = (() => {
   const values: Array<readonly [number, number, number]> = []
-  for (let x = -2; x <= 2; x += 1) for (let y = -2; y <= 2; y += 1) for (let z = -2; z <= 2; z += 1) values.push([x, y, z])
+  const maximumDistance = Math.hypot(CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters, CANONICAL_REALITY_CONFIG.matchPlaneResidualMeters)
+  for (let x = -2; x <= 2; x += 1) for (let y = -2; y <= 2; y += 1) for (let z = -2; z <= 2; z += 1) {
+    const minimumX = Math.max(0, Math.abs(x) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    const minimumY = Math.max(0, Math.abs(y) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    const minimumZ = Math.max(0, Math.abs(z) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    if (Math.hypot(minimumX, minimumY, minimumZ) <= maximumDistance) values.push([x, y, z])
+  }
+  return values.sort((left, right) => left[0] ** 2 + left[1] ** 2 + left[2] ** 2 - right[0] ** 2 - right[1] ** 2 - right[2] ** 2)
+})()
+const COHERENCE_OFFSETS = (() => {
+  const values: Array<readonly [number, number, number]> = []
+  for (let x = -3; x <= 3; x += 1) for (let y = -3; y <= 3; y += 1) for (let z = -3; z <= 3; z += 1) {
+    const minimumX = Math.max(0, Math.abs(x) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    const minimumY = Math.max(0, Math.abs(y) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    const minimumZ = Math.max(0, Math.abs(z) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
+    if (Math.hypot(minimumX, minimumY, minimumZ) <= .065) values.push([x, y, z])
+  }
   return values.sort((left, right) => left[0] ** 2 + left[1] ** 2 + left[2] ** 2 - right[0] ** 2 - right[1] ** 2 - right[2] ** 2)
 })()
 
@@ -167,6 +232,24 @@ const cell = (value: number): number => Math.floor(value / CANONICAL_REALITY_CON
 const key = (x: number, y: number, z: number): string => `${x}:${y}:${z}`
 const pointKey = (point: SpatialPoint): string => key(cell(point.x), cell(point.y), cell(point.z))
 const length = (point: SpatialPoint): number => Math.hypot(point.x, point.y, point.z)
+type SpatialBucketGrid = Map<number, Map<number, Map<number, number[]>>>
+const getBucket = (grid: SpatialBucketGrid, x: number, y: number, z: number): number[] | undefined => grid.get(x)?.get(y)?.get(z)
+function ensureBucket(grid: SpatialBucketGrid, x: number, y: number, z: number): number[] {
+  let ys = grid.get(x)
+  if (!ys) { ys = new Map(); grid.set(x, ys) }
+  let zs = ys.get(y)
+  if (!zs) { zs = new Map(); ys.set(y, zs) }
+  let entries = zs.get(z)
+  if (!entries) { entries = []; zs.set(z, entries) }
+  return entries
+}
+function deleteBucket(grid: SpatialBucketGrid, x: number, y: number, z: number): void {
+  const ys = grid.get(x), zs = ys?.get(y)
+  if (!ys || !zs) return
+  zs.delete(z)
+  if (!zs.size) ys.delete(y)
+  if (!ys.size) grid.delete(x)
+}
 
 function normalize(point: SpatialPoint): SpatialPoint {
   const magnitude = length(point)
@@ -274,11 +357,19 @@ export class CanonicalRealityFusionService {
     const startedAt = performance.now()
     onStage?.('reconstructing-geometry')
     const frames = [...snapshot.frames].sort((left, right) => left.sequence - right.sequence || left.timestamp - right.timestamp)
+    const inputReadyAt = performance.now()
     const surfels: MutableCanonicalSurfel[] = []
-    const buckets = new Map<string, number[]>()
+    const buckets: SpatialBucketGrid = new Map()
+    const recyclableProvisionals: { index: number; createdAtSequence: number }[] = []
+    let recyclableCursor = 0
+    let consolidationTimeMs = 0
     let inputObservations = 0, consolidatedObservations = 0, sameFrameConsolidated = 0, matchedExisting = 0
     let provisionalCreated = 0, provisionalPromoted = 0, provisionalExpired = 0, canonicalMerges = 0
     let falseParallelLayersCollapsed = 0, trueSeparateLayersRetained = 0, outliersRejected = 0, layerCapacityRejected = 0
+    let globalCapacityRejected = 0, localLayerCapacityRejected = 0, weakProvisionalsRecycled = 0
+    let standardPromotions = 0, surfaceCoherentPromotions = 0, unresolvedParallelLayers = 0
+    let expiredBelowThreeFrames = 0, expiredShortCaptureSpan = 0, expiredWithoutCanonicalNeighbors = 0
+    let maximumRetainedSequenceSpan = 0, maximumOriginalFrameSpan = 0, maximumViewpointBaselineMeters = 0
     let transitionExistingCanonical = 0, transitionExistingProvisional = 0, transitionNewCoherent = 0
     let transitionPossibleParallelDuplicate = 0, transitionTrueSeparatedLayer = 0, transitionOutlier = 0
     let baseColorInputObservations = 0, baseColorConsolidatedObservations = 0
@@ -288,61 +379,106 @@ export class CanonicalRealityFusionService {
     const expiryMapPositions: number[] = []
     const expiryMapReasonCodes: number[] = []
     let expiryMapTotal = 0
-    const recordExpiry = (position: SpatialPoint, reason: ProvisionalExpiryReason): void => {
-      expiryReasons[reason] += 1
+    const regionOutcomes = new Map<string, { expired: number; promoted: number; capacityRejected: number }>()
+    const regionKeyFor = (position: SpatialPoint): string => key(Math.floor(position.x / .25), Math.floor(position.y / .25), Math.floor(position.z / .25))
+    const recordRegion = (position: SpatialPoint, outcome: 'expired' | 'promoted' | 'capacityRejected'): void => {
+      const regionKey = regionKeyFor(position)
+      const region = regionOutcomes.get(regionKey) ?? { expired: 0, promoted: 0, capacityRejected: 0 }
+      region[outcome] += 1
+      regionOutcomes.set(regionKey, region)
+    }
+    const recordMapOutcome = (position: SpatialPoint, reason: ProvisionalExpiryReason): void => {
       expiryMapTotal += 1
       if (expiryMapReasonCodes.length >= PROVISIONAL_EXPIRY_MAP_CAPACITY) return
-      // Position is the measured observation/hypothesis position at the moment
-      // it is removed; it is never inferred from a neighboring canonical surfel.
       expiryMapPositions.push(position.x, position.y, position.z)
       expiryMapReasonCodes.push(PROVISIONAL_EXPIRY_REASON[reason])
     }
+    const recordExpiry = (position: SpatialPoint, reason: ProvisionalFailureReason): void => {
+      expiryReasons[reason] += 1
+      recordRegion(position, 'expired')
+      recordMapOutcome(position, reason)
+    }
+    const recordPromotion = (position: SpatialPoint): void => {
+      recordRegion(position, 'promoted')
+      recordMapOutcome(position, 'successfulPromotion')
+    }
+    const recordCapacityRejection = (position: SpatialPoint): void => {
+      recordRegion(position, 'capacityRejected')
+      recordMapOutcome(position, 'capacityOrLayerPolicy')
+    }
     const trueSecondLayerReasons = { recessTopology: 0, objectOrOccludingSurface: 0, separateWall: 0, unknown: 0 }
+    const secondLayerClassification = {
+      wallOrPrimarySurface: 0, objectProtrusion: 0, occludingSurface: 0, recessBack: 0,
+      recessSide: 0, genuineSecondWall: 0, uncertainParallelLayer: 0, falseDuplicate: 0,
+    }
 
     const addToBucket = (index: number): void => {
-      const bucketKey = pointKey(surfels[index].position), entries = buckets.get(bucketKey)
-      if (entries) entries.push(index); else buckets.set(bucketKey, [index])
+      const position = surfels[index].position
+      ensureBucket(buckets, cell(position.x), cell(position.y), cell(position.z)).push(index)
     }
-    const removeFromBucket = (index: number, oldKey: string): void => {
-      const entries = buckets.get(oldKey)
+    const removeFromBucket = (index: number, oldPosition: SpatialPoint): void => {
+      const x = cell(oldPosition.x), y = cell(oldPosition.y), z = cell(oldPosition.z)
+      const entries = getBucket(buckets, x, y, z)
       if (!entries) return
       const at = entries.indexOf(index)
       if (at >= 0) entries.splice(at, 1)
-      if (!entries.length) buckets.delete(oldKey)
+      if (!entries.length) deleteBucket(buckets, x, y, z)
     }
-    const coherentSupportCount = (index: number): number => {
+    const coherentSupport = (index: number): { coherent: number; canonical: number } => {
       const source = surfels[index], cx = cell(source.position.x), cy = cell(source.position.y), cz = cell(source.position.z)
-      let count = 0
-      for (const [dxCell, dyCell, dzCell] of MATCH_OFFSETS) {
-        const entries = buckets.get(key(cx + dxCell, cy + dyCell, cz + dzCell))
+      let coherent = 0, canonical = 0
+      for (const [dxCell, dyCell, dzCell] of COHERENCE_OFFSETS) {
+        const entries = getBucket(buckets, cx + dxCell, cy + dyCell, cz + dzCell)
         if (!entries) continue
         for (const other of entries) {
           if (other === index || surfels[other].removed) continue
           const target = surfels[other]
           const distance = Math.hypot(source.position.x - target.position.x, source.position.y - target.position.y, source.position.z - target.position.z)
           const dot = Math.abs(source.normal.x * target.normal.x + source.normal.y * target.normal.y + source.normal.z * target.normal.z)
-          if (distance <= .065 && dot >= .78 && target.observationCount >= 2) count += 1
-          if (count >= 2) return count
+          const planeResidual = Math.abs((source.position.x - target.position.x) * target.normal.x + (source.position.y - target.position.y) * target.normal.y + (source.position.z - target.position.z) * target.normal.z)
+          if (distance <= .065 && dot >= .90 && planeResidual <= .018 && target.observationCount >= 2) {
+            coherent += 1
+            if (!target.provisional) canonical += 1
+          }
+          if (coherent >= 4 && canonical >= 3) return { coherent, canonical }
         }
       }
-      return count
+      return { coherent, canonical }
     }
     const promoteDuringReplay = (index: number): void => {
       const surfel = surfels[index]
-      if (!surfel.provisional || surfel.observationCount < 3 || surfel.lastTimestamp - surfel.firstTimestamp < 220) return
-      if (surfel.viewCount < 2 && coherentSupportCount(index) < 2) return
+      if (!surfel.provisional || surfel.observationCount < 2 || surfel.lastTimestamp - surfel.firstTimestamp < 220) return
+      const support = coherentSupport(index)
+      const standard = surfel.observationCount >= 3 && (surfel.viewCount >= 2 || support.coherent >= 2)
+      const surfaceCoherent = surfel.observationCount >= 2 && support.canonical >= 3
+      if (!standard && !surfaceCoherent) return
       surfel.provisional = false
       provisionalPromoted += 1
+      if (surfaceCoherent && !standard) surfaceCoherentPromotions += 1
+      else standardPromotions += 1
+      recordPromotion(surfel.position)
     }
 
-    for (const frame of frames) {
+    const recycleWeakProvisional = (index: number): void => {
+      const surfel = surfels[index]
+      removeFromBucket(index, surfel.position)
+      surfel.removed = true
+      provisionalExpired += 1
+      weakProvisionalsRecycled += 1
+      recordExpiry(surfel.position, 'insufficientTemporalSupport')
+    }
+
+    for (let retainedIndex = 0; retainedIndex < frames.length; retainedIndex += 1) {
+      const frame = frames[retainedIndex]
       inputObservations += frame.denseFrame.validPointCount
       baseColorInputObservations += frame.colorSourceIndices.length
       for (let sourceIndex = 0; sourceIndex < frame.denseFrame.valid.length; sourceIndex += 1) if (frame.denseFrame.valid[sourceIndex]) {
         const offset = sourceIndex * 3
         retainedCoverage.add(key(cell(frame.denseFrame.points[offset]), cell(frame.denseFrame.points[offset + 1]), cell(frame.denseFrame.points[offset + 2])))
       }
+      const consolidationStartedAt = performance.now()
       const observations = consolidateFrame(frame)
+      consolidationTimeMs += performance.now() - consolidationStartedAt
       consolidatedObservations += observations.length
       baseColorConsolidatedObservations += observations.reduce((count, observation) => count + (observation.color ? 1 : 0), 0)
       observations.forEach((observation) => consolidatedCoverage.add(pointKey(observation.position)))
@@ -351,7 +487,7 @@ export class CanonicalRealityFusionService {
         const cellX = cell(observation.position.x), cellY = cell(observation.position.y), cellZ = cell(observation.position.z)
         let best = -1, bestScore = Infinity
         for (const [dxCell, dyCell, dzCell] of MATCH_OFFSETS) {
-          const candidates = buckets.get(key(cellX + dxCell, cellY + dyCell, cellZ + dzCell))
+          const candidates = getBucket(buckets, cellX + dxCell, cellY + dyCell, cellZ + dzCell)
           if (!candidates) continue
           for (const index of candidates) {
             const candidate = surfels[index]
@@ -386,7 +522,7 @@ export class CanonicalRealityFusionService {
           }
           if (candidate.provisional) transitionExistingProvisional += 1
           else { transitionExistingCanonical += 1; canonicalMerges += 1 }
-          const oldKey = pointKey(candidate.position)
+          const oldPosition = { ...candidate.position }
           const blend = Math.min(.22, 1 / (candidate.observationCount + 1))
           const proposed = { x: dx * blend, y: dy * blend, z: dz * blend }
           const proposedLength = length(proposed)
@@ -405,6 +541,8 @@ export class CanonicalRealityFusionService {
           candidate.observationCount += 1
           candidate.lastTimestamp = frame.timestamp
           candidate.lastFrameSequence = frame.sequence
+          candidate.lastRetainedSequence = retainedIndex
+          candidate.lastOriginalFrameSequence = frame.sequence
           const cameraDelta = {
             x: frame.cameraPosition.x - candidate.firstCamera.x,
             y: frame.cameraPosition.y - candidate.firstCamera.y,
@@ -414,6 +552,9 @@ export class CanonicalRealityFusionService {
           const direction = normalize({ x: frame.cameraPosition.x - candidate.position.x, y: frame.cameraPosition.y - candidate.position.y, z: frame.cameraPosition.z - candidate.position.z })
           const angle = Math.acos(clamp(direction.x * candidate.firstViewDirection.x + direction.y * candidate.firstViewDirection.y + direction.z * candidate.firstViewDirection.z, -1, 1))
           candidate.maxBaseline = Math.max(candidate.maxBaseline, baseline); candidate.maxViewAngle = Math.max(candidate.maxViewAngle, angle)
+          maximumViewpointBaselineMeters = Math.max(maximumViewpointBaselineMeters, candidate.maxBaseline)
+          maximumRetainedSequenceSpan = Math.max(maximumRetainedSequenceSpan, candidate.lastRetainedSequence - candidate.firstRetainedSequence)
+          maximumOriginalFrameSpan = Math.max(maximumOriginalFrameSpan, candidate.lastOriginalFrameSequence - candidate.firstOriginalFrameSequence)
           candidate.viewCount = baseline >= .3 && angle >= 5 * Math.PI / 180 ? 3 : baseline >= .08 || angle >= 3 * Math.PI / 180 ? Math.max(2, candidate.viewCount) : candidate.viewCount
           if (observation.color) {
             if (!candidate.color) candidate.color = { ...observation.color }
@@ -425,48 +566,84 @@ export class CanonicalRealityFusionService {
             }
             candidate.colorCount += 1
           }
-          const newKey = pointKey(candidate.position)
-          if (newKey !== oldKey) { removeFromBucket(best, oldKey); addToBucket(best) }
+          if (pointKey(candidate.position) !== pointKey(oldPosition)) { removeFromBucket(best, oldPosition); addToBucket(best) }
           matchedExisting += 1
           promoteDuringReplay(best)
           continue
         }
 
-        if (surfels.length >= CANONICAL_REALITY_CONFIG.maxSurfels) { layerCapacityRejected += 1; recordExpiry(observation.position, 'capacityOrLayerPolicy'); continue }
-        const localBucket = buckets.get(pointKey(observation.position))
-        if (localBucket && localBucket.filter((index) => !surfels[index].removed).length >= CANONICAL_REALITY_CONFIG.maxLayersPerCell) { layerCapacityRejected += 1; recordExpiry(observation.position, 'capacityOrLayerPolicy'); continue }
+        const localBucket = getBucket(buckets, cellX, cellY, cellZ)
+        let reusableIndex = -1
+        if (localBucket) {
+          let liveLayers = 0, weakest = -1
+          for (const index of localBucket) {
+            const candidate = surfels[index]
+            if (candidate.removed) continue
+            liveLayers += 1
+            if (candidate.provisional && candidate.observationCount === 1 && frame.timestamp - candidate.lastTimestamp >= 1200 &&
+                (weakest < 0 || candidate.lastTimestamp < surfels[weakest].lastTimestamp)) weakest = index
+          }
+          if (liveLayers >= CANONICAL_REALITY_CONFIG.maxLayersPerCell) {
+            if (weakest >= 0) { recycleWeakProvisional(weakest); reusableIndex = weakest }
+            else {
+              layerCapacityRejected += 1; localLayerCapacityRejected += 1
+              recordCapacityRejection(observation.position); continue
+            }
+          }
+        }
+        if (reusableIndex < 0 && surfels.length >= CANONICAL_REALITY_CONFIG.maxSurfels) {
+          while (recyclableCursor < recyclableProvisionals.length) {
+            const queued = recyclableProvisionals[recyclableCursor++]
+            const candidate = surfels[queued.index]
+            if (candidate && candidate.firstOriginalFrameSequence === queued.createdAtSequence && candidate.provisional && !candidate.removed &&
+                candidate.observationCount === 1 && frame.timestamp - candidate.lastTimestamp >= 1200) {
+              recycleWeakProvisional(queued.index); reusableIndex = queued.index; break
+            }
+          }
+          if (reusableIndex < 0) {
+            layerCapacityRejected += 1; globalCapacityRejected += 1
+            recordCapacityRejection(observation.position); continue
+          }
+        }
         const viewDirection = normalize({
           x: frame.cameraPosition.x - observation.position.x,
           y: frame.cameraPosition.y - observation.position.y,
           z: frame.cameraPosition.z - observation.position.z,
         })
-        const index = surfels.length
-        surfels.push({
+        const index = reusableIndex >= 0 ? reusableIndex : surfels.length
+        const nextSurfel: MutableCanonicalSurfel = {
           position: { ...observation.position }, normal: { ...observation.normal }, color: observation.color ? { ...observation.color } : null,
           colorCount: observation.color ? 1 : 0, observationCount: 1, firstTimestamp: frame.timestamp, lastTimestamp: frame.timestamp,
-          lastFrameSequence: frame.sequence, firstCamera: { ...frame.cameraPosition }, firstViewDirection: viewDirection, viewCount: 1,
+          lastFrameSequence: frame.sequence, firstRetainedSequence: retainedIndex, lastRetainedSequence: retainedIndex,
+          firstOriginalFrameSequence: frame.sequence, lastOriginalFrameSequence: frame.sequence,
+          firstCamera: { ...frame.cameraPosition }, firstViewDirection: viewDirection, viewCount: 1,
           maxBaseline: 0, maxViewAngle: 0, trackingQualitySum: frame.trackingQuality, positionResidualSquaredSum: 0,
           depthResidualSquaredSum: 0, normalResidualSquaredSum: 0, provisional: true, removed: false,
-          suspectedParallel: false, sideSupport: false,
-        })
+          suspectedParallel: false, sideSupport: false, sideSupportCount: 0, coherentNeighborCount: 0,
+        }
+        if (reusableIndex >= 0) surfels[index] = nextSurfel
+        else surfels.push(nextSurfel)
         addToBucket(index); provisionalCreated += 1; transitionNewCoherent += 1
+        recyclableProvisionals.push({ index, createdAtSequence: frame.sequence })
       }
     }
 
+    const replayCompletedAt = performance.now()
+
     onStage?.('cleaning-surfaces')
-    const topologyBuckets = new Map<string, number[]>()
+    const promotionStartedAt = performance.now()
+    const topologyBuckets: SpatialBucketGrid = new Map()
     const topologyCell = .08
     for (let index = 0; index < surfels.length; index += 1) {
       const surfel = surfels[index]
-      const topologyKey = key(Math.floor(surfel.position.x / topologyCell), Math.floor(surfel.position.y / topologyCell), Math.floor(surfel.position.z / topologyCell))
-      const entries = topologyBuckets.get(topologyKey)
-      if (entries) entries.push(index); else topologyBuckets.set(topologyKey, [index])
+      ensureBucket(topologyBuckets, Math.floor(surfel.position.x / topologyCell), Math.floor(surfel.position.y / topologyCell), Math.floor(surfel.position.z / topologyCell)).push(index)
     }
+    const topologyBuiltAt = performance.now()
     const nearby = (index: number, radius: number, visitor: (other: number, distance: number) => void): void => {
       const surfel = surfels[index], cx = Math.floor(surfel.position.x / topologyCell), cy = Math.floor(surfel.position.y / topologyCell), cz = Math.floor(surfel.position.z / topologyCell)
       const cells = Math.ceil(radius / topologyCell)
       for (let x = -cells; x <= cells; x += 1) for (let y = -cells; y <= cells; y += 1) for (let z = -cells; z <= cells; z += 1) {
-        const entries = topologyBuckets.get(key(cx + x, cy + y, cz + z))
+        const entries = getBucket(topologyBuckets, cx + x, cy + y, cz + z)
         if (!entries) continue
         for (const other of entries) if (other !== index && !surfels[other].removed) {
           const target = surfels[other]
@@ -483,24 +660,35 @@ export class CanonicalRealityFusionService {
         const target = surfels[other]
         const dot = Math.abs(surfel.normal.x * target.normal.x + surfel.normal.y * target.normal.y + surfel.normal.z * target.normal.z)
         if (dot >= .78 && target.observationCount >= 2) coherentNeighbors += 1
-        if (dot <= .62 && target.observationCount >= 2) surfel.sideSupport = true
+        if (dot <= .62 && target.observationCount >= 2) surfel.sideSupportCount += 1
       })
+      surfel.coherentNeighborCount = coherentNeighbors
+      surfel.sideSupport = surfel.sideSupportCount >= 2 && coherentNeighbors >= 2
       const span = surfel.lastTimestamp - surfel.firstTimestamp
-      const promotable = surfel.observationCount >= 3 && span >= 220 && (coherentNeighbors >= 2 || surfel.viewCount >= 2)
+      const standardPromotable = surfel.observationCount >= 3 && span >= 220 && (coherentNeighbors >= 2 || surfel.viewCount >= 2)
+      const surfaceCoherentPromotable = surfel.observationCount >= 2 && span >= 220 && coherentSupport(index).canonical >= 3
       if (!surfel.provisional) continue
-      if (promotable) { surfel.provisional = false; provisionalPromoted += 1 }
+      if (standardPromotable || surfaceCoherentPromotable) {
+        surfel.provisional = false; provisionalPromoted += 1
+        if (surfaceCoherentPromotable && !standardPromotable) surfaceCoherentPromotions += 1
+        else standardPromotions += 1
+        recordPromotion(surfel.position)
+      }
       else {
         surfel.removed = true; provisionalExpired += 1
-        if (surfel.observationCount < 3 || span < 220) recordExpiry(surfel.position, 'insufficientTemporalSupport')
-        else if (coherentNeighbors === 0 && surfel.viewCount < 2) recordExpiry(surfel.position, 'isolatedOrNoisy')
+        if (surfel.observationCount < 3) { expiredBelowThreeFrames += 1; recordExpiry(surfel.position, 'insufficientTemporalSupport') }
+        else if (span < 220) { expiredShortCaptureSpan += 1; recordExpiry(surfel.position, 'insufficientTemporalSupport') }
+        else if (coherentNeighbors === 0 && surfel.viewCount < 2) { expiredWithoutCanonicalNeighbors += 1; recordExpiry(surfel.position, 'isolatedOrNoisy') }
         else if (surfel.viewCount < 2) recordExpiry(surfel.position, 'insufficientMultiViewSupport')
         else recordExpiry(surfel.position, 'other')
       }
     }
+    const promotionCompletedAt = performance.now()
 
     // Resolve overlapping near-parallel hypotheses only after all frames have
     // contributed. This avoids arrival-order ownership and lets real side-face
     // topology or diverse views defend a physical second surface.
+    const parallelStartedAt = performance.now()
     for (let index = 0; index < surfels.length; index += 1) {
       const surfel = surfels[index]
       if (surfel.removed) continue
@@ -516,23 +704,42 @@ export class CanonicalRealityFusionService {
         surfel.suspectedParallel = true; target.suspectedParallel = true; transitionPossibleParallelDuplicate += 1
         const surfelStrength = surfel.observationCount + surfel.viewCount * 2 + (surfel.sideSupport ? 4 : 0)
         const targetStrength = target.observationCount + target.viewCount * 2 + (target.sideSupport ? 4 : 0)
-        const weaker = surfelStrength <= targetStrength ? surfel : target
+        // Equal support keeps the earlier deterministic primary hypothesis and
+        // treats the later parallel candidate as the uncertain duplicate.
+        const weaker = surfelStrength < targetStrength ? surfel : target
         const stronger = weaker === surfel ? target : surfel
-        const defendedPhysicalLayer = weaker.sideSupport || (separation >= .07 && weaker.viewCount >= 2 && weaker.observationCount >= 3)
+        const defendedByTopology = weaker.sideSupport && weaker.observationCount >= 3 && weaker.viewCount >= 2
+        const defendedObjectSurface = separation >= .035 && separation < .09 && weaker.viewCount >= 2 &&
+          weaker.observationCount >= 3 && weaker.coherentNeighborCount >= 3
+        const defendedSeparateWall = separation >= .09 && weaker.viewCount >= 3 && weaker.observationCount >= 5 && weaker.coherentNeighborCount >= 3
+        const defendedPhysicalLayer = defendedByTopology || defendedObjectSurface || defendedSeparateWall
         if (defendedPhysicalLayer) {
           trueSeparateLayersRetained += 1; transitionTrueSeparatedLayer += 1
-          if (weaker.sideSupport) trueSecondLayerReasons.recessTopology += 1
-          else if (separation < .095) trueSecondLayerReasons.objectOrOccludingSurface += 1
-          else trueSecondLayerReasons.unknown += 1
+          if (defendedByTopology) {
+            trueSecondLayerReasons.recessTopology += 1
+            if (separation < .055) secondLayerClassification.objectProtrusion += 1
+            else if (separation < .085) secondLayerClassification.recessSide += 1
+            else secondLayerClassification.recessBack += 1
+          } else if (defendedObjectSurface) {
+            trueSecondLayerReasons.objectOrOccludingSurface += 1
+            secondLayerClassification.objectProtrusion += 1
+          } else {
+            trueSecondLayerReasons.separateWall += 1
+            secondLayerClassification.genuineSecondWall += 1
+          }
           return
         }
-        if (stronger.observationCount >= weaker.observationCount * 1.45 || stronger.viewCount > weaker.viewCount) {
-          weaker.removed = true; falseParallelLayersCollapsed += 1; recordExpiry(weaker.position, 'duplicateParallelLayer')
-        }
+        const clearlyWeaker = stronger.observationCount >= weaker.observationCount * 1.45 || stronger.viewCount > weaker.viewCount
+        if (!clearlyWeaker) { unresolvedParallelLayers += 1; secondLayerClassification.uncertainParallelLayer += 1 }
+        else secondLayerClassification.falseDuplicate += 1
+        weaker.removed = true; falseParallelLayersCollapsed += 1; recordExpiry(weaker.position, 'duplicateParallelLayer')
       })
     }
+    secondLayerClassification.wallOrPrimarySurface = surfels.reduce((count, surfel) => count + (!surfel.removed && !surfel.provisional && !surfel.suspectedParallel ? 1 : 0), 0)
+    const parallelCompletedAt = performance.now()
 
     onStage?.('applying-room-appearance')
+    const finalPackingStartedAt = performance.now()
     const retained = surfels.filter((surfel) => !surfel.removed && !surfel.provisional)
     const finalSurfels = retained.map((surfel, id): FinalizedRealitySurfel => {
       const denominator = Math.max(1, surfel.observationCount - 1)
@@ -563,7 +770,7 @@ export class CanonicalRealityFusionService {
     const dominantPlanarThickness: number[] = []
     for (let index = 0; index < surfels.length; index += 1) {
       const surfel = surfels[index]
-      if (surfel.removed || surfel.provisional || coherentSupportCount(index) < 2) continue
+      if (surfel.removed || surfel.provisional || coherentSupport(index).coherent < 2) continue
       dominantPlanarThickness.push(Math.sqrt(surfel.depthResidualSquaredSum / Math.max(1, surfel.observationCount - 1)) * 2)
     }
     const observations = retained.reduce((total, surfel) => total + surfel.observationCount, 0)
@@ -572,7 +779,7 @@ export class CanonicalRealityFusionService {
       name, count, percentageOfPrior: prior > 0 ? count / prior * 100 : 0, spatialCoverageCells: coverage,
       surfaceAreaProxySquareMeters: coverage * CANONICAL_REALITY_CONFIG.cellSizeMeters ** 2,
     })
-    const provisionalCoverage = new Set(surfels.map((surfel) => pointKey(surfel.position))).size
+    const provisionalCoverage = new Set(surfels.filter((surfel) => !surfel.removed).map((surfel) => pointKey(surfel.position))).size
     const promotedCoverage = new Set(retained.map((surfel) => pointKey(surfel.position))).size
     const completenessStages = Object.freeze([
       summarizeStage('retained-measured', inputObservations, inputObservations, retainedCoverage.size),
@@ -580,10 +787,16 @@ export class CanonicalRealityFusionService {
       summarizeStage('provisional-created', provisionalCreated, consolidatedObservations, provisionalCoverage),
       summarizeStage('promoted-canonical', finalSurfels.length, provisionalCreated, promotedCoverage),
     ])
+    const finalPackingCompletedAt = performance.now()
+    const coverageLossRegions = Object.freeze([...regionOutcomes]
+      .map(([regionKey, outcome]) => Object.freeze({ regionKey, ...outcome }))
+      .sort((left, right) => (right.expired + right.capacityRejected) - (left.expired + left.capacityRejected) || left.regionKey.localeCompare(right.regionKey))
+      .slice(0, 24))
     const diagnostics: CanonicalRealityFusionDiagnostics = Object.freeze({
       inputFrames: frames.length, inputObservations, consolidatedObservations, sameFrameConsolidated, matchedExisting,
       provisionalCreated, provisionalPromoted, provisionalExpired, canonicalMerges, falseParallelLayersCollapsed,
-      trueSeparateLayersRetained, outliersRejected, layerCapacityRejected, canonicalSurfels: finalSurfels.length,
+      trueSeparateLayersRetained, outliersRejected, layerCapacityRejected, globalCapacityRejected, localLayerCapacityRejected,
+      weakProvisionalsRecycled, surfaceCoherentPromotions, unresolvedParallelLayers, canonicalSurfels: finalSurfels.length,
       observationsPerCanonicalSurfel: observations / Math.max(1, finalSurfels.length),
       wallThicknessP50Meters: percentile(thickness, .5), wallThicknessP90Meters: percentile(thickness, .9), wallThicknessP95Meters: percentile(thickness, .95),
       workerTimeMs: performance.now() - startedAt,
@@ -607,6 +820,21 @@ export class CanonicalRealityFusionService {
       dominantPlanarThicknessP95Meters: percentile(dominantPlanarThickness, .95),
       dominantPlanarSurfelCount: dominantPlanarThickness.length,
       completenessStages,
+      canonicalCoverageOfConsolidatedPercentage: promotedCoverage / Math.max(1, consolidatedCoverage.size) * 100,
+      promotionAudit: Object.freeze({ standardPromotions, surfaceCoherentPromotions, expiredBelowThreeFrames,
+        expiredShortCaptureSpan, expiredWithoutCanonicalNeighbors, maximumRetainedSequenceSpan,
+        maximumOriginalFrameSpan, maximumViewpointBaselineMeters }),
+      workerStageTimingsMs: Object.freeze({
+        unpackInput: inputReadyAt - startedAt,
+        perFrameConsolidation: consolidationTimeMs,
+        replayMatching: Math.max(0, replayCompletedAt - inputReadyAt - consolidationTimeMs),
+        promotionAndCleaning: promotionCompletedAt - topologyBuiltAt,
+        layerResolution: topologyBuiltAt - promotionStartedAt,
+        parallelCollapse: parallelCompletedAt - parallelStartedAt,
+        finalPacking: finalPackingCompletedAt - finalPackingStartedAt,
+      }),
+      coverageLossRegions,
+      secondLayerClassification: Object.freeze(secondLayerClassification),
     })
     return Object.freeze({ surfels: Object.freeze(finalSurfels), diagnostics, bounds: calculateBounds(finalSurfels), colorStatistics: calculateColorStatistics(finalSurfels) })
   }

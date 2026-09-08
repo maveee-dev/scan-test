@@ -85,6 +85,9 @@ export interface XRSessionCallbacks {
 }
 
 export interface FinishPipelineDiagnostics {
+  readonly clickToProcessingUiFirstPaintMs: number
+  readonly clickToRetainedFinalizationBeginMs: number
+  readonly clickToWorkerMessagePostedMs: number
   readonly stopAndCaptureDrainMs: number
   readonly retainedMeasurementFinalizationMs: number
   readonly canonicalWorkerRoundTripMs: number
@@ -92,6 +95,19 @@ export interface FinishPipelineDiagnostics {
   readonly resultAssemblyMs: number
   readonly xrSessionEndMs: number
   readonly totalFinishMs: number
+  readonly snapshotStageTimingsMs: Readonly<{
+    liveSurface: number
+    spatialScan: number
+    baseReality: number
+    denseReality: number
+    rgbKeyframes: number
+    appearanceKeyframes: number
+    retainedMeasurements: number
+  }>
+}
+
+export interface FinishInvocationTiming {
+  readonly clickToProcessingUiFirstPaintMs: number
 }
 
 export interface XRSessionStartOptions {
@@ -348,7 +364,7 @@ export class XRSessionService {
     }
   }
 
-  public async finish(): Promise<FinalizedScannerCapture> {
+  public async finish(invocationTiming: FinishInvocationTiming = { clickToProcessingUiFirstPaintMs: 0 }): Promise<FinalizedScannerCapture> {
     const finishStartedAt = getPerformanceTimestamp()
     if (this.startPromise) {
       throw new XRSessionError(
@@ -371,6 +387,8 @@ export class XRSessionService {
         'reference-space-failed',
       )
     }
+    const scanStartedAt = this.scanStartedAt
+    const referenceSpaceType = this.referenceSpaceType
 
     this.requestedEndReason = 'finished'
     this.isEnding = true
@@ -383,42 +401,52 @@ export class XRSessionService {
       await this.measurementQueue.flush()
       const stopAndCaptureDrainMs = getPerformanceTimestamp() - drainStartedAt
       const finalizationStartedAt = getPerformanceTimestamp()
+      const clickToRetainedFinalizationBeginMs = invocationTiming.clickToProcessingUiFirstPaintMs + finalizationStartedAt - finishStartedAt
       const finishedAt = Date.now()
-      const fusedSurfaceSurfels = this.persistentLiveSurfaceService.getFinalizationSurfels(
+      const snapshotStageTimingsMs = { liveSurface: 0, spatialScan: 0, baseReality: 0, denseReality: 0,
+        rgbKeyframes: 0, appearanceKeyframes: 0, retainedMeasurements: 0 }
+      const timedSnapshot = <T>(name: keyof typeof snapshotStageTimingsMs, producer: () => T): T => {
+        const stageStartedAt = getPerformanceTimestamp()
+        const value = producer()
+        snapshotStageTimingsMs[name] += getPerformanceTimestamp() - stageStartedAt
+        return value
+      }
+      const fusedSurfaceSurfels = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getFinalizationSurfels(
         this.spatialCoverageService,
-      )
-      const realityGeometrySurfels = this.persistentLiveSurfaceService.getRealityFinalizationSurfels()
-      const persistentSurfaceDiagnostics = this.persistentLiveSurfaceService.getDiagnostics()
-      const finalizedScan = this.finalizedSpatialScanService.createSnapshot({
-        startedAtMs: this.scanStartedAt,
+      ))
+      const realityGeometrySurfels = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getRealityFinalizationSurfels())
+      const persistentSurfaceDiagnostics = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getDiagnostics())
+      const finalizedScan = timedSnapshot('spatialScan', () => this.finalizedSpatialScanService.createSnapshot({
+        startedAtMs: scanStartedAt,
         finishedAtMs: finishedAt,
-        referenceSpaceType: this.referenceSpaceType,
+        referenceSpaceType,
         coverageCells: this.spatialCoverageService.getFinalizationCells(),
         fusedSurfaceSurfels,
-      })
-      const realityReconstruction = this.realitySurfelColorFusionService.createSnapshot(
+      }))
+      const realityReconstruction = timedSnapshot('baseReality', () => this.realitySurfelColorFusionService.createSnapshot(
         finalizedScan.id,
         finalizedScan.referenceSpaceType,
         realityGeometrySurfels,
         this.rawCameraService.isAvailable(),
         persistentSurfaceDiagnostics.surfelCapacity,
         persistentSurfaceDiagnostics.capacityReached,
-      )
-      const rawDenseReality = this.denseRealityReconstructionService.createSnapshot(
+      ))
+      const rawDenseReality = timedSnapshot('denseReality', () => this.denseRealityReconstructionService.createSnapshot(
         finalizedScan.id,
         finalizedScan.referenceSpaceType,
         this.rawCameraService.isAvailable(),
-      )
-      const realityRgbKeyframes = this.realityRgbKeyframeService.createSnapshot(
+      ))
+      const realityRgbKeyframes = timedSnapshot('rgbKeyframes', () => this.realityRgbKeyframeService.createSnapshot(
         finalizedScan.id,
         this.rawCameraService.isAvailable(),
-      )
+      ))
       const depth = this.depthService.getDiagnostics()
       const liveRgb = this.rawCameraService.getDiagnostics(false)
-      const appearanceKeyframes = this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable())
-      const retainedMeasurements = this.retainedMeasurementService.createSnapshot()
+      const appearanceKeyframes = timedSnapshot('appearanceKeyframes', () => this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable()))
+      const retainedMeasurements = timedSnapshot('retainedMeasurements', () => this.retainedMeasurementService.createSnapshot())
       const retainedMeasurementFinalizationMs = getPerformanceTimestamp() - finalizationStartedAt
       const canonicalStartedAt = getPerformanceTimestamp()
+      const clickToWorkerMessagePostedMs = invocationTiming.clickToProcessingUiFirstPaintMs + canonicalStartedAt - finishStartedAt
       const canonicalReality = rawDenseReality && retainedMeasurements.frames.length > 0
         ? await reconstructCanonicalReality(retainedMeasurements, (stage) => this.callbacks?.onFinishStage(stage))
         : null
@@ -459,6 +487,9 @@ export class XRSessionService {
       await this.endActiveSession(session)
       const xrSessionEndMs = getPerformanceTimestamp() - endStartedAt
       const finishPipelineDiagnostics: FinishPipelineDiagnostics = Object.freeze({
+        clickToProcessingUiFirstPaintMs: invocationTiming.clickToProcessingUiFirstPaintMs,
+        clickToRetainedFinalizationBeginMs,
+        clickToWorkerMessagePostedMs,
         stopAndCaptureDrainMs,
         retainedMeasurementFinalizationMs,
         canonicalWorkerRoundTripMs,
@@ -466,6 +497,7 @@ export class XRSessionService {
         resultAssemblyMs,
         xrSessionEndMs,
         totalFinishMs: getPerformanceTimestamp() - finishStartedAt,
+        snapshotStageTimingsMs: Object.freeze(snapshotStageTimingsMs),
       })
       const denseRealityReconstruction = denseRealityBase
         ? Object.freeze({ ...denseRealityBase, finishPipelineDiagnostics })

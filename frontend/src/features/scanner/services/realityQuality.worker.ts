@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import { filterRealityConfidence, type RealityConfidenceFilterResult } from './realityConfidenceFiltering'
 import { refineRealityDisplay, type RealityDisplayRefinement } from './realityDisplayRefinement'
-import { createRealitySurfaceRenderResources, packRealitySurface } from './realitySurfaceRenderingService'
+import { appendRealityTextureBatches, createRealitySurfaceRenderResources, packRealitySurface } from './realitySurfaceRenderingService'
 import type { FinalizedDenseRealityReconstruction, FinalizedRealitySurfel } from '../types'
 import { PROVISIONAL_EXPIRY_REASON } from './canonicalRealityFusionService'
 
@@ -38,6 +38,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       [PROVISIONAL_EXPIRY_REASON.isolatedOrNoisy]: { r: .55, g: .55, b: .6 },
       [PROVISIONAL_EXPIRY_REASON.capacityOrLayerPolicy]: { r: 1, g: .95, b: .12 },
       [PROVISIONAL_EXPIRY_REASON.other]: { r: .95, g: .95, b: .95 },
+      [PROVISIONAL_EXPIRY_REASON.successfulPromotion]: { r: .18, g: 1, b: .38 },
     }
     // These are packed positions from actual measurements/hypotheses only. The
     // renderer never creates a point for omitted map entries.
@@ -64,7 +65,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       : mode === 'base-color' ? refined.geometry
       : mode === 'geometry' ? refined.geometry
       : mode === 'canonical-triangulated' || mode === 'triangulated' ? refined.geometry
-      : mode === 'color' || mode === 'high-res' ? refined.appearance : refined.combined
+      : mode === 'color' || mode === 'high-res' || mode === 'textured' ? refined.appearance : refined.combined
     const diagnostic = ['raw-accepted', 'raw-measured', 'live', 'fused-raw', 'canonical', 'confidence', 'provisional-expiry', 'layers', 'discontinuities', 'new', 'views', 'reveal', 'trajectory'].includes(mode)
     const latest = canonical.reduce((time, s) => Math.max(time, s.firstObservedAt ?? 0), 0)
     const earliest = canonical.reduce((time, s) => Math.min(time, s.firstObservedAt ?? 0), latest)
@@ -72,7 +73,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
     const stageDisplay = mode === 'live' || mode === 'fused-raw' ? live.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : s.stabilityClass === 'low' ? { r: 1, g: .65, b: .08 } : { r: 1, g: .15, b: .08 } }))
       : mode === 'canonical' ? canonical.map((s) => ({ ...s, colorRgb: { r: .15, g: .75, b: 1 } }))
       : mode === 'confidence' ? filtered.surfels.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : { r: .15, g: .55, b: 1 } }))
-      : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'hybrid' || mode === 'base-color' || mode === 'color' || mode === 'high-res' || mode === 'final'
+      : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'hybrid' || mode === 'base-color' || mode === 'color' || mode === 'high-res' || mode === 'textured' || mode === 'final'
         ? surfels.map((s) => ({ ...s, colorRgb: s.colorRgb ?? { r: .34, g: .39, b: .43 } })) : surfels
     const display = mode === 'provisional-expiry' ? expirySurfels : diagnostic && !['raw-accepted','raw-measured','live','fused-raw','canonical','confidence'].includes(mode) ? canonical.map((s, index) => {
       let color = { r: .15, g: .2, b: .25 }
@@ -86,8 +87,12 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
     const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
     const renderMode = pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
     const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
+    if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, refined.textureBindings, raw.appearanceKeyframes?.keyframes ?? [])
     const prepared = packRealitySurface(resources)
-    const transfers = [...new Set(prepared.geometries.flatMap((g) => g.attributes.map((a) => a.array.buffer as ArrayBuffer)))]
+    const transfers = [...new Set([
+      ...prepared.geometries.flatMap((g) => g.attributes.map((a) => a.array.buffer as ArrayBuffer)),
+      ...(prepared.textureBatches ?? []).map((batch) => batch.rgb.buffer as ArrayBuffer),
+    ])]
     self.postMessage({ id, prepared, stats: refined.stats, filterStats: filtered.stats }, { transfer: transfers })
     resources.geometries.forEach((g) => g.dispose())
     resources.materials.forEach((m) => m.dispose())

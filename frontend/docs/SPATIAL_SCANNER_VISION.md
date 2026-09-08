@@ -1,12 +1,12 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1.3**. Live scanning uses a
+Current implementation: **Scanner Build M8.7.1.4**. Live scanning uses a
 bounded lightweight map while production Reality is rebuilt after Finish from
 coverage-aware retained accepted measurements. Canonical lifecycle, measured
 hybrid display, real-RGB fallback and Finish progress are now separately
 observable. M8.6.7.2 customization remains frozen pending physical
 reconstruction validation; see the M8.7/M8.7.1 sections below and the
-[M8.7.1.3 implementation report](M8_7_1_3_IMPLEMENTATION_REPORT.md).
+[M8.7.1.4 implementation report](M8_7_1_4_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2658,3 +2658,38 @@ wall/curtain/painting/shelf/ceiling scene. Continue to repeatability only after
 that first result has no giant hole where measured canonical samples exist,
 recognizable base color with zero high-resolution keyframes, responsive Finish
 stages, coherent ceiling and preserved protrusions/recesses.
+
+### M8.7.1.4 — Canonical Coverage Recovery, Photographic Appearance & Finish Performance
+
+The first M8.7.1.3 POCO result restored recognizable color and canonical
+reinforcement, but its final spatial coverage was only 11.77% of consolidated
+measured cells. The main failure was a lifecycle reservoir: one-frame
+provisionals occupied the fixed 60,000 slots until replay ended and blocked later
+measurements. Global and local capacity are now separate, stale one-frame slots
+can be deterministically reused, and canonical evidence is never recycled.
+
+Standard three-frame promotion remains. A measured two-frame cell can also
+promote only beside three established, coplanar canonical neighbors with strict
+normal and residual agreement. This recovers measured coherent wall footprint;
+it does not create points, bridge gaps or fill unobserved areas. Coverage loss is
+reported by region and the bounded outcomes map shows promotions beside each
+failure class.
+
+Parallel layers now require topology/coherent extent in addition to views.
+Diagnostics separate protrusions, occluders, recess sides/backs, genuine second
+walls, uncertainty and false duplicates. Thickness remains measured and is not
+improved by forced flattening.
+
+Photographic appearance uses bounded per-keyframe texture batches on existing
+safe triangles. All three vertices must share one visibility- and
+depth-consistency-approved real camera keyframe. Mixed ownership, occlusion edges
+and unsupported triangles fall back to registered vertex RGB; splats always keep
+their measured RGB. Eight 640-long-edge frames remain the chosen memory/capture
+point, and no generated or synthesized texture exists.
+
+Finish now crosses a browser paint and task boundary before finalization. It
+shows “Building your 3D room…” with real stages and records first-paint,
+finalization and worker-post latency. Retention coverage snapshots are linear,
+canonical buckets use numeric maps, and worker/snapshot stage timings expose the
+remaining device bottleneck. Build limits remain 2.5 cm, 40 × 90, 60,000 and 96
+frames. M7 and customization remain frozen pending one M8.7.1.4 POCO scan.

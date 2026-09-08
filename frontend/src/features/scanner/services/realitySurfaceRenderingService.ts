@@ -5,6 +5,8 @@ import type {
   FinalizedRealitySurfel,
   RealityColorStatistics,
   RealityRgbColor,
+  RealityRgbKeyframe,
+  RealityTextureBinding,
 } from '../types'
 import type { RealityDesignCompositeMode, RealityDesignCompositorStats, RealityPaintablePatchMask } from './realityDesignCompositingService'
 import type { RealityWallTriangleAssociation } from './realityWallTriangleAssociationService'
@@ -828,7 +830,10 @@ function getGeometryMemoryBytes(geometry: THREE.BufferGeometry): number {
 /** Transfer only prepared numeric geometry, never XR resources or camera frames. */
 export interface PreparedRealitySurface {
   geometries: { attributes: { name: string; array: Float32Array; itemSize: number }[] }[]
-  layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles'; opacity: number }[]
+  layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles' | 'textured'; opacity: number; textureBatch?: number }[]
+  /** Bounded real-camera RGB tiles. Each textured triangle belongs to exactly one tile. */
+  textureBatches?: { keyframeId: number; width: number; height: number; rgb: Uint8Array }[]
+  textureStats?: { textureBatchCount: number; texturedTriangleCount: number; fallbackTriangleCount: number; rgbBytes: number }
   stats: RealitySurfaceRenderStats
   triangleTopology?: RealityTriangleTopology
   designTriangleAssociation?: RealityWallTriangleAssociation
@@ -856,10 +861,13 @@ export function packRealitySurface(resources: RealitySurfaceRenderResources): Pr
     const kind = object instanceof THREE.Points ? 'points'
       : material instanceof THREE.ShaderMaterial ? (material.uniforms.uCorePass.value ? 'core' : 'feather')
         : 'triangles'
-    layers.push({ geometry: resources.geometries.indexOf(object.geometry), kind,
-      opacity: material instanceof THREE.ShaderMaterial ? material.uniforms.uOpacity.value : material.opacity })
+    const textureBatch = object.userData.textureBatch as number | undefined
+    layers.push({ geometry: resources.geometries.indexOf(object.geometry), kind: textureBatch === undefined ? kind : 'textured',
+      opacity: material instanceof THREE.ShaderMaterial ? material.uniforms.uOpacity.value : material.opacity, textureBatch })
   }
-  return { geometries, layers, stats: resources.stats, triangleTopology: resources.triangleTopology ?? undefined }
+  const textureBatches = resources.group.userData.textureBatches as PreparedRealitySurface['textureBatches'] | undefined
+  const textureStats = resources.group.userData.textureStats as PreparedRealitySurface['textureStats'] | undefined
+  return { geometries, layers, stats: resources.stats, triangleTopology: resources.triangleTopology ?? undefined, textureBatches, textureStats }
 }
 
 export function restoreRealitySurface(prepared: PreparedRealitySurface): RealitySurfaceRenderResources {
@@ -870,7 +878,13 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
   })
   const group = new THREE.Group(), materials: THREE.Material[] = []
   for (const layer of prepared.layers) {
-    const material = layer.kind === 'points' ? createPointMaterial()
+    const batch = layer.textureBatch === undefined ? undefined : prepared.textureBatches?.[layer.textureBatch]
+    const material = layer.kind === 'textured' && batch ? (() => {
+      const texture = new THREE.DataTexture(batch.rgb, batch.width, batch.height, THREE.RGBFormat, THREE.UnsignedByteType)
+      texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; texture.wrapS = THREE.ClampToEdgeWrapping; texture.wrapT = THREE.ClampToEdgeWrapping
+      texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter; texture.generateMipmaps = false; texture.needsUpdate = true
+      return new THREE.MeshBasicMaterial({ map: texture, color: 0xffffff, depthTest: true, depthWrite: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+    })() : layer.kind === 'points' ? createPointMaterial()
       : layer.kind === 'triangles' ? createSurfaceMaterial()
         : createSplatMaterial(layer.opacity, layer.kind === 'core')
     materials.push(material)
@@ -880,6 +894,57 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
   }
   return { group, geometries, materials, stats: prepared.stats,
     triangleTopology: prepared.triangleTopology ?? null, triangleGeometry: null }
+}
+
+/**
+ * Adds only existing, depth-visible triangles whose three measured vertices chose
+ * the same camera keyframe. All other geometry remains the base-RGB render.
+ */
+export function appendRealityTextureBatches(
+  resources: RealitySurfaceRenderResources,
+  surfels: readonly FinalizedRealitySurfel[],
+  bindings: readonly (RealityTextureBinding | null)[],
+  keyframes: readonly RealityRgbKeyframe[],
+): void {
+  if (!resources.triangleTopology || !resources.triangleGeometry || bindings.length !== surfels.length) return
+  const surfelById = new Map(surfels.map((surfel, index) => [surfel.id, { surfel, binding: bindings[index] }]))
+  const frameById = new Map(keyframes.map((frame) => [frame.id, frame]))
+  const buckets = new Map<number, { positions: number[]; uvs: number[] }>()
+  const ids = resources.triangleTopology.vertexSurfelIds
+  for (let offset = 0; offset + 2 < ids.length; offset += 3) {
+    const vertices = [surfelById.get(ids[offset]), surfelById.get(ids[offset + 1]), surfelById.get(ids[offset + 2])]
+    const first = vertices[0]?.binding
+    if (!first || !vertices.every((vertex) => vertex?.binding?.keyframeId === first.keyframeId) || !frameById.has(first.keyframeId)) continue
+    const bucket = buckets.get(first.keyframeId) ?? { positions: [], uvs: [] }
+    for (const vertex of vertices) {
+      const point = vertex!.surfel.position, uv = vertex!.binding!
+      bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, 1 - uv.v)
+    }
+    buckets.set(first.keyframeId, bucket)
+  }
+  if (!buckets.size) return
+  const mutable = resources as unknown as { group: THREE.Group; geometries: THREE.BufferGeometry[]; materials: THREE.Material[] }
+  const textureBatches: NonNullable<PreparedRealitySurface['textureBatches']> = []
+  let texturedTriangleCount = 0
+  for (const [keyframeId, bucket] of [...buckets].sort(([a], [b]) => a - b)) {
+    const frame = frameById.get(keyframeId)!
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bucket.positions), 3))
+    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(bucket.uvs), 2))
+    const textureBatch = textureBatches.length
+    texturedTriangleCount += bucket.positions.length / 9
+    textureBatches.push({ keyframeId, width: frame.width, height: frame.height, rgb: frame.rgb.slice() })
+    const material = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: true, depthWrite: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+    const mesh = new THREE.Mesh(geometry, material); mesh.userData.textureBatch = textureBatch
+    mutable.group.add(mesh); mutable.geometries.push(geometry); mutable.materials.push(material)
+  }
+  mutable.group.userData.textureBatches = textureBatches
+  mutable.group.userData.textureStats = {
+    textureBatchCount: textureBatches.length,
+    texturedTriangleCount,
+    fallbackTriangleCount: Math.max(0, resources.stats.renderedTriangleCount - texturedTriangleCount),
+    rgbBytes: textureBatches.reduce((total, batch) => total + batch.rgb.byteLength, 0),
+  }
 }
 
 /** Builds post-scan Reality geometry once; it never changes the measured data. */

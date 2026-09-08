@@ -444,6 +444,7 @@ function ScannerDomOverlay({
           </div>
         </div>}
 
+        {isFinishing ? <p role="status">Building your 3D room… {finishStageLabel}</p> : null}
         <div className="xr-scanner-hud-actions">
           <button
             type="button"
@@ -1625,6 +1626,7 @@ function ScannerDomOverlay({
           </div>
         </div>
 
+        {isFinishing ? <p role="status">Building your 3D room… {finishStageLabel}</p> : null}
         <div className="xr-scanner-debug-footer">
           <button
             type="button"

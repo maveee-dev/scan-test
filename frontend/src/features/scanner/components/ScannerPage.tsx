@@ -167,7 +167,7 @@ function ScannerPage({
   const statusDescription = isStarting
     ? 'Requesting camera and spatial tracking access.'
     : isFinishing
-      ? `${finishStageLabel} Your measured room data is being processed off the live XR path.`
+      ? `Building your 3D room… ${finishStageLabel} Your measured room data is being processed off the live XR path.`
       : isCancelling
         ? 'Discarding the active scan and ending XR.'
       : isActive
