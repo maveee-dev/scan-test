@@ -143,7 +143,7 @@ export class RealityRgbKeyframeService {
       if (newNovelty <= redundancy || validDepthCount / 3600 < .4) return this.result('duplicate-view-skipped')
     }
     const started = now()
-    const copy = rawCamera.copyKeyframe(frame, view, timestamp, this.appearance ? 640 : 320)
+    const copy = rawCamera.copyKeyframe(frame, view, timestamp, this.appearance ? 960 : 320)
     if (!copy) return this.result(this.cameraAvailable(rawCamera) ? 'other' : 'camera-unavailable')
     const qualityScore = Math.min(1, validDepthCount / 3600) * 0.55 + Math.min(1, translation / 0.45) * 0.25 + Math.min(1, rotation / 35) * 0.20
     const keyframe: RealityRgbKeyframe = {

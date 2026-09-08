@@ -1,12 +1,12 @@
 # Spatial Scanner Vision
 
-Current implementation: **Scanner Build M8.7.1.5**. Live scanning uses a
+Current implementation: **Scanner Build M8.7.1.6**. Live scanning uses a
 bounded lightweight map while production Reality is rebuilt after Finish from
 coverage-aware retained accepted measurements. Canonical lifecycle, measured
 hybrid display, real-RGB fallback and Finish progress are now separately
 observable. M8.6.7.2 customization remains frozen pending physical
 reconstruction validation; see the M8.7/M8.7.1 sections below and the
-[M8.7.1.5 implementation report](M8_7_1_5_IMPLEMENTATION_REPORT.md).
+[M8.7.1.6 implementation report](M8_7_1_6_IMPLEMENTATION_REPORT.md).
 
 ## Product vision
 
@@ -2724,3 +2724,31 @@ An exact bucket-pruning experiment was removed because it slowed the cold
 synthetic worker. Live capture configuration remains unchanged, second-layer
 policy is not globally tightened without spatial physical evidence, and M7 and
 customization remain frozen pending one M8.7.1.5 POCO scan.
+
+### M8.7.1.6 — Measured-Cell Raster Continuity, Full Safe Views & Live Finish Feedback
+
+The M8.7.1.5 POCO scan confirmed that retaining every measured underlay fixed
+the old triangle-participant suppression defect, but it exposed a second
+display issue. The circular fragment cutoff inside each adaptive quad could not
+cover the corners of an ideal 25 mm measured grid. Final display now uses a
+feathered rounded-square measured-cell mask within exactly the same quad. It
+does not enlarge the measured extent, add vertices, or bridge a missing cell.
+
+The common-view texture change also worked—physical textured triangles rose
+from 5,408 to 8,860—but safe views ranked fourth through eighth were still
+discarded per vertex. Final texture ownership now considers every safe
+candidate from the already-bounded eight-frame set. Appearance-only copies use
+a 960-pixel long edge with a 432 × 960 pixel cap, while live/base RGB and the
+pressure, motion, novelty, visibility, depth, incidence, edge, and conflict
+gates remain unchanged. Diagnostics expose common-view rank, no-common counts,
+projected texel density, incidence, distance, and 0.5 m regional coverage.
+
+Finish now presents a full-screen animated immersive busy state throughout the
+real reconstruction stages. No fake percentage is shown. Canonical matching
+uses a separate exact-envelope grid: the unchanged 46 mm tangent and 22 mm
+plane gates are searched with 27 adjacent buckets instead of 125 fine-grid
+buckets. The original 25 mm grid still owns coherence and layer capacity.
+
+Live capture settings, canonical lifecycle rules, triangulation, second-layer
+policy, M7, and customization are unchanged. Physical coverage, sharpness, and
+mobile Finish-time improvement remain unclaimed until one M8.7.1.6 POCO scan.

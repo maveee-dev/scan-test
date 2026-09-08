@@ -18,6 +18,9 @@ const MAX_COPY_DIMENSION = 160
 const MAX_COPY_PIXELS = 160 * 90
 const KEYFRAME_MAX_COPY_DIMENSION = 320
 const KEYFRAME_MAX_COPY_PIXELS = 320 * 180
+// Eight 432x960 RGB portrait appearance frames use about 9.49 MiB, excluding
+// the tiny pose matrices.  This is intentionally separate from live RGB-D.
+const APPEARANCE_KEYFRAME_MAX_COPY_PIXELS = 432 * 960
 const READBACK_SAMPLE_CAPACITY = 32
 
 const FULLSCREEN_TRIANGLE = new Float32Array([
@@ -195,7 +198,7 @@ function getOrientationIndex(orientation: RawCameraOrientation): number {
   }
 }
 
-function getFullFrameCopyDimensions(sourceWidth: number, sourceHeight: number, maximumDimension = MAX_COPY_DIMENSION, maximumPixels = MAX_COPY_PIXELS): [number, number] {
+export function getFullFrameCopyDimensions(sourceWidth: number, sourceHeight: number, maximumDimension = MAX_COPY_DIMENSION, maximumPixels = MAX_COPY_PIXELS): [number, number] {
   const sourcePixelCount = sourceWidth * sourceHeight
   const sourceMaxDimension = Math.max(sourceWidth, sourceHeight)
   const scale = Math.min(
@@ -600,8 +603,9 @@ export class XRRawCameraService {
     try {
       cameraTexture = this.binding.getCameraImage(camera)
       if (!cameraTexture) return null
-      const boundedEdge = Math.min(640, Math.max(KEYFRAME_MAX_COPY_DIMENSION, longEdge))
-      const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, boundedEdge, KEYFRAME_MAX_COPY_PIXELS * (boundedEdge / KEYFRAME_MAX_COPY_DIMENSION) ** 2)
+      const boundedEdge = Math.min(960, Math.max(KEYFRAME_MAX_COPY_DIMENSION, longEdge))
+      const pixelBudget = boundedEdge > KEYFRAME_MAX_COPY_DIMENSION ? APPEARANCE_KEYFRAME_MAX_COPY_PIXELS : KEYFRAME_MAX_COPY_PIXELS
+      const [width, height] = getFullFrameCopyDimensions(camera.width, camera.height, boundedEdge, pixelBudget)
       const allocationStartedAt = getTimestamp()
       this.ensureKeyframeResources(width, height)
       const allocationMs = Math.max(0, getTimestamp() - allocationStartedAt)

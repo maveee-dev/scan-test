@@ -872,6 +872,12 @@ export interface RealityTextureBinding {
   readonly v: number
   /** Visibility/incidence/quality score used only to rank bounded real views. */
   readonly score: number
+  /** Cosine of the measured view incidence after visibility gating. */
+  readonly incidence: number
+  /** Actual camera-to-surfel distance for the selected source view. */
+  readonly distanceMeters: number
+  /** Projected source image density at this measured surfel. */
+  readonly projectedTexelsPerMeter: number
 }
 
 export interface RealityRgbKeyframeDiagnostics {

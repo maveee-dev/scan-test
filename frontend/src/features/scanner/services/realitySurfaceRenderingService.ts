@@ -33,6 +33,8 @@ export interface RealitySurfaceRenderStats {
   readonly uncoloredFallbackSplatCount: number
   readonly splatsSuppressedByTriangles: number
   readonly visualRadiusScale: number
+  /** The fragment footprint used by measured underlay splats. */
+  readonly visualFootprintKernel: 'measured-cell-rounded-square'
   readonly renderPreparationMs: number
   readonly neighborIndexBuildMs: number
   readonly neighborAnalysisMs: number
@@ -98,10 +100,16 @@ const LARGE_GAP_LIMIT_METERS = 0.16
 const POSITION_EPSILON = 1e-6
 const WORLD_UP = new THREE.Vector3(0, 1, 0)
 const WORLD_RIGHT = new THREE.Vector3(1, 0, 0)
-const SPLAT_CORE_RADIUS = 0.82
-const SPLAT_FEATHER_START = 0.76
-const SPLAT_FEATHER_END = 0.99
-const SPLAT_ALPHA_THRESHOLD = 0.18
+// The adaptive quad already encodes the measured-cell extent.  A circular
+// discard in that quad cuts away regular 2.5cm cell corners, leaving an
+// interstitial checkerboard despite every cell being represented.  This
+// bounded rounded-square norm preserves measured cell-corner overlap without
+// enlarging the quad.
+const SPLAT_CORNER_ROUNDING = 0.10
+const SPLAT_CORE_RADIUS = 0.90
+const SPLAT_FEATHER_START = SPLAT_CORE_RADIUS
+const SPLAT_FEATHER_END = 1 + SPLAT_CORNER_ROUNDING
+const SPLAT_ALPHA_THRESHOLD = 0.01
 const MAX_ADAPTIVE_EXPANSION_SCALE = 1.3
 const SPLAT_OVERLAP_MARGIN = 1.04
 
@@ -126,7 +134,8 @@ varying vec3 vColor;
 varying vec2 vSplatLocal;
 
 void main() {
-  float distanceFromCenter = length(vSplatLocal);
+  vec2 absLocal = abs(vSplatLocal);
+  float distanceFromCenter = max(absLocal.x, absLocal.y) + min(absLocal.x, absLocal.y) * ${SPLAT_CORNER_ROUNDING.toFixed(3)};
   if (uCorePass > 0.5) {
     if (distanceFromCenter > ${SPLAT_CORE_RADIUS.toFixed(3)}) {
       discard;
@@ -154,6 +163,16 @@ const SPLAT_LOCAL_COORDINATES = [
   [-1, 1],
   [1, 1],
 ] as const
+
+/** Mirrors the fragment shader's bounded measured-cell footprint for regression tests. */
+export function getMeasuredCellFootprintAlpha(localX: number, localY: number): number {
+  const absX = Math.abs(localX), absY = Math.abs(localY)
+  const distanceFromCenter = Math.max(absX, absY) + Math.min(absX, absY) * SPLAT_CORNER_ROUNDING
+  if (distanceFromCenter <= SPLAT_CORE_RADIUS) return 1
+  const t = clamp((distanceFromCenter - SPLAT_FEATHER_START) / (SPLAT_FEATHER_END - SPLAT_FEATHER_START), 0, 1)
+  const alpha = 1 - t * t * (3 - 2 * t)
+  return alpha < SPLAT_ALPHA_THRESHOLD ? 0 : alpha
+}
 
 interface NeighborCandidate {
   readonly index: number
@@ -836,7 +855,7 @@ export interface PreparedRealitySurface {
   layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles' | 'textured'; opacity: number; textureBatch?: number }[]
   /** Bounded real-camera RGB tiles. Each textured triangle belongs to exactly one tile. */
   textureBatches?: { keyframeId: number; width: number; height: number; rgb: Uint8Array }[]
-  textureStats?: { textureBatchCount: number; texturedTriangleCount: number; fallbackTriangleCount: number; rgbBytes: number }
+  textureStats?: { textureBatchCount: number; texturedTriangleCount: number; fallbackTriangleCount: number; rgbBytes: number; commonPrimaryTriangleCount: number; commonSecondTriangleCount: number; commonThirdTriangleCount: number; commonLaterTriangleCount: number; noCommonViewTriangleCount: number; texelsPerMeter: { p50: number | null; p90: number | null; mean: number | null }; incidence: { p50: number | null; p90: number | null; mean: number | null }; distanceMeters: { p50: number | null; p90: number | null; mean: number | null }; spatialRegionCoverage: readonly { region: string; texturedTriangles: number; totalTriangles: number; percentage: number }[] }
   stats: RealitySurfaceRenderStats
   triangleTopology?: RealityTriangleTopology
   designTriangleAssociation?: RealityWallTriangleAssociation
@@ -916,26 +935,48 @@ export function appendRealityTextureBatches(
   }))
   const frameById = new Map(keyframes.map((frame) => [frame.id, frame]))
   const buckets = new Map<number, { positions: number[]; uvs: number[] }>()
+  const texelDensities: number[] = [], incidences: number[] = [], distances: number[] = []
+  const regions = new Map<string, { textured: number; total: number }>()
+  let commonPrimaryTriangleCount = 0, commonSecondTriangleCount = 0, commonThirdTriangleCount = 0, commonLaterTriangleCount = 0, noCommonViewTriangleCount = 0
+  const summarize = (values: number[]): { p50: number | null; p90: number | null; mean: number | null } => ({
+    p50: calculatePercentile(values, .5), p90: calculatePercentile(values, .9),
+    mean: values.length ? values.reduce((total, value) => total + value, 0) / values.length : null,
+  })
   const ids = resources.triangleTopology.vertexSurfelIds
   for (let offset = 0; offset + 2 < ids.length; offset += 3) {
     const vertices = [surfelById.get(ids[offset]), surfelById.get(ids[offset + 1]), surfelById.get(ids[offset + 2])]
     if (!vertices.every(Boolean)) continue
+    const center = vertices.reduce((sum, vertex) => ({ x: sum.x + vertex!.surfel.position.x / 3, y: sum.y + vertex!.surfel.position.y / 3, z: sum.z + vertex!.surfel.position.z / 3 }), { x: 0, y: 0, z: 0 })
+    const region = `${Math.floor(center.x / .5)}:${Math.floor(center.y / .5)}:${Math.floor(center.z / .5)}`
+    const regionCoverage = regions.get(region) ?? { textured: 0, total: 0 }
+    regionCoverage.total += 1
+    regions.set(region, regionCoverage)
     const common = vertices[0]!.bindings.map((binding) => binding.keyframeId).filter((keyframeId) =>
       frameById.has(keyframeId) && vertices.every((vertex) => vertex!.bindings.some((binding) => binding.keyframeId === keyframeId)),
     )
-    if (!common.length) continue
+    if (!common.length) { noCommonViewTriangleCount += 1; continue }
     const keyframeId = common.sort((left, right) => {
       const score = (id: number) => vertices.reduce((sum, vertex) => sum + (vertex!.bindings.find((binding) => binding.keyframeId === id)?.score ?? 0), 0)
       return score(right) - score(left) || left - right
     })[0]
     const bucket = buckets.get(keyframeId) ?? { positions: [], uvs: [] }
+    let selectedRank = 0
     for (const vertex of vertices) {
       const point = vertex!.surfel.position, uv = vertex!.bindings.find((binding) => binding.keyframeId === keyframeId)!
+      const rank = vertex!.bindings.findIndex((binding) => binding.keyframeId === keyframeId)
+      selectedRank = Math.max(selectedRank, rank)
+      if (Number.isFinite(uv.projectedTexelsPerMeter)) texelDensities.push(uv.projectedTexelsPerMeter)
+      if (Number.isFinite(uv.incidence)) incidences.push(uv.incidence)
+      if (Number.isFinite(uv.distanceMeters)) distances.push(uv.distanceMeters)
       bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, 1 - uv.v)
     }
+    if (selectedRank === 0) commonPrimaryTriangleCount += 1
+    else if (selectedRank === 1) commonSecondTriangleCount += 1
+    else if (selectedRank === 2) commonThirdTriangleCount += 1
+    else commonLaterTriangleCount += 1
+    regionCoverage.textured += 1
     buckets.set(keyframeId, bucket)
   }
-  if (!buckets.size) return
   const mutable = resources as unknown as { group: THREE.Group; geometries: THREE.BufferGeometry[]; materials: THREE.Material[] }
   const textureBatches: NonNullable<PreparedRealitySurface['textureBatches']> = []
   let texturedTriangleCount = 0
@@ -957,6 +998,13 @@ export function appendRealityTextureBatches(
     texturedTriangleCount,
     fallbackTriangleCount: Math.max(0, resources.stats.renderedTriangleCount - texturedTriangleCount),
     rgbBytes: textureBatches.reduce((total, batch) => total + batch.rgb.byteLength, 0),
+    commonPrimaryTriangleCount, commonSecondTriangleCount,
+    commonThirdTriangleCount, commonLaterTriangleCount, noCommonViewTriangleCount,
+    texelsPerMeter: summarize(texelDensities), incidence: summarize(incidences), distanceMeters: summarize(distances),
+    spatialRegionCoverage: [...regions.entries()].map(([region, coverage]) => ({
+      region, texturedTriangles: coverage.textured, totalTriangles: coverage.total,
+      percentage: coverage.total ? coverage.textured / coverage.total * 100 : 0,
+    })).sort((a, b) => b.totalTriangles - a.totalTriangles || a.region.localeCompare(b.region)).slice(0, 24),
   }
 }
 
@@ -1083,6 +1131,7 @@ export function createRealitySurfaceRenderResources(
       uncoloredFallbackSplatCount: 0,
       splatsSuppressedByTriangles,
       visualRadiusScale,
+      visualFootprintKernel: 'measured-cell-rounded-square',
       renderPreparationMs: Math.max(0, getTimestamp() - startedAt),
       neighborIndexBuildMs: neighborIndex.spatialIndexMs,
       neighborAnalysisMs: neighborIndex.neighborAnalysisMs,

@@ -14,7 +14,8 @@ const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG } = await load('
 const { refineRealityDisplay } = await load('realityDisplayRefinement')
 const { InspectionPose, LiveRealityMap, getLiveMapCadenceMs } = await load('liveRealityMap')
 const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
-const { appendRealityTextureBatches, createRealitySurfaceRenderResources, packRealitySurface } = await load('realitySurfaceRenderingService')
+const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMeasuredCellFootprintAlpha, packRealitySurface } = await load('realitySurfaceRenderingService')
+const { getFullFrameCopyDimensions } = await load('xrRawCameraService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
 const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
@@ -173,25 +174,50 @@ test('triangle texture uses a common safe second-choice view when vertex-best vi
   assert.ok((prepared.textureStats?.texturedTriangleCount??0)>0);assert.deepEqual(prepared.textureBatches?.map((batch)=>batch.keyframeId),[2])
   resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })
-test('depth edge or conflicting keyframe ownership cannot form a bleeding texture triangle',()=>{
-  const source=[supported(sample(0,-.01,0,-1)),supported(sample(1,.01,0,-1)),supported(sample(2,0,.02,-1.08))]
+test('triangle texture selects a rank-four common safe view and reports source-view diagnostics',()=>{
+  const source=[supported(sample(0,-.02,0,-1)),supported(sample(1,.02,0,-1)),supported(sample(2,0,.035,-1))]
+  const resources=createRealitySurfaceRenderResources({surfels:source},'dense')
+  const candidateIds=[[1,2,3,8],[4,5,6,8],[7,1,4,8]]
+  const bindings=candidateIds.map((ids)=>ids.map((keyframeId,index)=>({
+    keyframeId,u:.4,v:.4,score:1-index*.1,incidence:.9-index*.1,distanceMeters:1+index*.2,projectedTexelsPerMeter:400-index*100,
+  })))
+  const frames=Array.from({length:8},(_unused,index)=>({...keyframe(),id:index+1}))
+  appendRealityTextureBatches(resources,source,bindings,frames)
+  const stats=packRealitySurface(resources).textureStats
+  assert.ok((stats?.commonLaterTriangleCount??0)>0);assert.equal(stats?.commonPrimaryTriangleCount,0);assert.ok((stats?.texelsPerMeter.mean??0)>0)
+  assert.ok((stats?.spatialRegionCoverage.length??0)>0);assert.ok(stats.spatialRegionCoverage[0].texturedTriangles>0);assert.ok(stats.spatialRegionCoverage[0].percentage>0)
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
+test('measured rounded-square splat kernel covers ideal grid corners without extending the adaptive quad',()=>{
+  const resources=createRealitySurfaceRenderResources({surfels:plane(4)},'dense')
+  const core=resources.materials.find(material=>material.isShaderMaterial&&material.uniforms.uCorePass.value)
+  assert.equal(resources.stats.visualFootprintKernel,'measured-cell-rounded-square');assert.match(core.fragmentShader,/max\(absLocal\.x, absLocal\.y\)/);assert.match(core.fragmentShader,/SPLAT_CORNER_ROUNDING|0\.100/)
+  const radiusU=(.025/(2*.95))*1.04,radiusV=radiusU*.95
+  assert.ok(getMeasuredCellFootprintAlpha(.0125/radiusU,.0125/radiusV)>.1,'an ideal 2.5 cm grid corner must remain visibly represented')
+  assert.equal(getMeasuredCellFootprintAlpha(1,1),0,'the kernel must not invent coverage beyond its measured quad')
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
+test('conflicting keyframe ownership cannot form a bleeding texture triangle',()=>{
+  const source=[supported(sample(0,-.01,0,-1)),supported(sample(1,.01,0,-1)),supported(sample(2,0,.02,-1))]
   const resources=createRealitySurfaceRenderResources({surfels:source},'dense')
   const bindings=[{keyframeId:1,u:.4,v:.4},{keyframeId:1,u:.5,v:.4},{keyframeId:2,u:.45,v:.5}]
   appendRealityTextureBatches(resources,source,bindings,[keyframe(),{...keyframe(),id:2}])
-  assert.equal(packRealitySurface(resources).textureBatches?.length??0,0)
+  const prepared=packRealitySurface(resources)
+  assert.equal(prepared.textureBatches?.length??0,0);assert.ok((prepared.textureStats?.noCommonViewTriangleCount??0)>0)
   resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })
 test('no useful keyframe keeps original color and no fake appearance',()=>{const source=plane(8),r=refineRealityDisplay(source,[]);assert.equal(r.stats.refinedColors,0);assert.deepEqual(r.appearance,source)})
 test('best captured view is selected, not averaged with lower quality views',()=>{const a=keyframe(),b={...keyframe(),id:2,qualityScore:.1,rgb:new Uint8Array(64*64*3).fill(20)};const r=refineRealityDisplay(plane(8),[a,b]);assert.equal(r.appearance[30].colorRgb.r,210/255)})
-test('appearance keeps at most three safe ranked real-keyframe candidates per surfel',()=>{
+test('appearance retains every safe ranked candidate from the bounded keyframe set',()=>{
   const frames=Array.from({length:4},(_unused,index)=>({...keyframe(),id:index+1,qualityScore:1-index*.05}))
-  const r=refineRealityDisplay(plane(8),frames);assert.equal(r.textureBindingCandidates[30].length,3);assert.ok(r.textureBindingCandidates[30].every((binding)=>binding.keyframeId>=1&&binding.keyframeId<=4))
+  const r=refineRealityDisplay(plane(8),frames);assert.equal(r.textureBindingCandidates[30].length,4);assert.ok(r.textureBindingCandidates[30].every((binding)=>binding.keyframeId>=1&&binding.keyframeId<=4))
 })
 test('appearance keyframe cap, long edge, duplicate rejection and session reset',()=>{
   const service=new RealityRgbKeyframeService(true);let sequence=0,longEdge=0;const f=keyframe(8),view={transform:{matrix:identity(),inverse:{matrix:identity()}},projectionMatrix:perspective()}
   const raw={copyKeyframe:(_f,_v,_t,edge)=>{longEdge=edge;return {sequence:++sequence,mapping:f.mapping,pixels:new Uint8Array(8*8*4).fill(128)}}}
   for(let i=0;i<15;i++){view.transform.matrix[12]=i*.3;service.considerCapture({},view,i*2000,{x:i*.3,y:0,z:0},{x:0,y:0,z:-1},3600,raw)}
-  let r=service.createSnapshot('a',true);assert.equal(r.keyframes.length,8);assert.equal(longEdge,640);const before=sequence
+  let r=service.createSnapshot('a',true);assert.equal(r.keyframes.length,8);assert.equal(longEdge,960);assert.ok(r.diagnostics.totalBytes<9.6*1024*1024);const before=sequence
+  assert.deepEqual(getFullFrameCopyDimensions(1080,2400,960,432*960),[432,960])
   service.considerCapture({},view,30001,{x:4.2,y:0,z:0},{x:0,y:0,z:-1},3600,raw);assert.equal(sequence,before);service.reset();assert.equal(service.createSnapshot('b',true).keyframes.length,0)
 })
 test('joystick moves only virtual pose and follow mode cannot be driven',()=>{const physical=pose(2),before=JSON.stringify(physical),v=new InspectionPose();v.updateScanner(physical);v.move(1,1,.05);assert.equal(v.position.x,2);v.follow=false;v.move(1,1,.05);assert.notEqual(v.position.x,2);assert.equal(JSON.stringify(physical),before)})
@@ -236,8 +262,12 @@ test('appearance candidates have mutually attributable bounded scheduling outcom
 test('Finish reports actual worker stages and retains physical-style timing fields',()=>{
   const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
   const worker=readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusion.worker.ts',import.meta.url),'utf8')
+  const overlay=readFileSync(new URL('../src/features/scanner/components/ScannerDomOverlay.tsx',import.meta.url),'utf8')
+  const styles=readFileSync(new URL('../src/App.css',import.meta.url),'utf8')
   assert.match(session,/onFinishStage\('preparing-scan'\)/);assert.match(session,/onFinishStage\('building-final-model'\)/);assert.match(session,/canonicalWorkerRoundTripMs/)
   assert.match(worker,/self\.postMessage\(\{ id: event\.data\.id, stage \}\)/)
+  assert.match(overlay,/className="xr-finish-processing"/);assert.match(overlay,/aria-busy="true"/);assert.match(overlay,/FINISH_STAGE_STEPS\.map/)
+  assert.match(styles,/\.xr-finish-spinner[\s\S]*animation: xr-finish-spin/);assert.match(styles,/\.xr-finish-activity > span[\s\S]*animation: xr-finish-sweep/)
 })
 test('finish click publishes processing state before the paint/task boundary',async()=>{
   const source=readFileSync(new URL('../src/features/scanner/hooks/useScannerSession.ts',import.meta.url),'utf8'),finish=source.slice(source.indexOf('const finishScan'))
@@ -428,6 +458,7 @@ test('canonical flat wall reinforces one surface instead of temporal-phase churn
   frames[0].cameraPosition={x:0,y:0,z:0};frames[1].cameraPosition={x:.2,y:0,z:0};frames[2].cameraPosition={x:.4,y:0,z:0};frames[3].cameraPosition={x:.5,y:0,z:0};frames[4].cameraPosition={x:.55,y:0,z:0}
   const result=canonical(frames)
   assert.ok(result.surfels.length>=80&&result.surfels.length<=130);assert.ok(result.diagnostics.matchedExisting>result.diagnostics.provisionalCreated);assert.ok(result.diagnostics.observationsPerCanonicalSurfel>=3)
+  assert.ok(result.diagnostics.matchingBucketProbes<=result.diagnostics.consolidatedObservations*27);assert.ok(result.diagnostics.matchingCandidateVisits>0)
   assert.ok(result.diagnostics.provisionalPromoted>0);assert.ok(result.diagnostics.canonicalMerges>0);assert.ok(result.diagnostics.transitionExistingCanonical>0)
   const reinforced=result.surfels.find(s=>s.geometryObservationCount>=5);assert.ok(reinforced);assert.ok((reinforced.lastObservedAt??0)>(reinforced.firstObservedAt??0));assert.ok((reinforced.viewObservationCount??0)>=2);assert.ok((reinforced.positionVarianceMetersSquared??0)>0)
 })
@@ -637,6 +668,6 @@ test('M8.7.1.2 bounded live and canonical replay synthetic performance report',(
   feed(light,wall,1,true,{x:0,y:0,z:0},{frameSequence:1,trackingQuality:1,maxInputSamples:900})
   const frames=Array.from({length:18},(_,i)=>retainedFrame(wall.map((s,j)=>sample(j,s.position.x+Math.sin(j+i)*.003,s.position.y,s.position.z+Math.cos(j*2+i)*.003)),i+1,i*.04))
   const result=canonical(frames)
-  console.log('M8.7.1.5 synthetic reconstruction benchmark',JSON.stringify({fullLiveMs:full.getDiagnostics().fusionMs,lightLiveMs:light.getDiagnostics().fusionMs,liveSamples:light.getDiagnostics().activeSampleCount,retainedFrames:frames.length,input:result.diagnostics.inputObservations,consolidated:result.diagnostics.consolidatedObservations,canonical:result.surfels.length,canonicalWorkerMs:result.diagnostics.workerTimeMs,workerStages:result.diagnostics.workerStageTimingsMs,thicknessP95Mm:result.diagnostics.wallThicknessP95Meters*1000}))
+  console.log('M8.7.1.6 synthetic reconstruction benchmark',JSON.stringify({fullLiveMs:full.getDiagnostics().fusionMs,lightLiveMs:light.getDiagnostics().fusionMs,liveSamples:light.getDiagnostics().activeSampleCount,retainedFrames:frames.length,input:result.diagnostics.inputObservations,consolidated:result.diagnostics.consolidatedObservations,canonical:result.surfels.length,canonicalWorkerMs:result.diagnostics.workerTimeMs,workerStages:result.diagnostics.workerStageTimingsMs,thicknessP95Mm:result.diagnostics.wallThicknessP95Meters*1000}))
   assert.ok(light.getDiagnostics().fusionMs<full.getDiagnostics().fusionMs);assert.ok(result.surfels.length>1000);assert.ok(result.diagnostics.wallThicknessP95Meters<.02)
 })

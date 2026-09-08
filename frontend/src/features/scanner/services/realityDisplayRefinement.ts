@@ -13,7 +13,7 @@ export interface RealityDisplayRefinement {
   geometry: FinalizedRealitySurfel[]; appearance: FinalizedRealitySurfel[]; combined: FinalizedRealitySurfel[]
   /** One unambiguous, measured-depth-visible keyframe per surfel, or null. */
   textureBindings: readonly (RealityTextureBinding | null)[]
-  /** At most three safe real-camera candidates, ranked descending per surfel. */
+  /** Every safe candidate from the bounded (maximum eight) real-camera set. */
   textureBindingCandidates: readonly (readonly RealityTextureBinding[])[]
   stats: RealityRefinementStats
 }
@@ -142,13 +142,14 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
       if (bestScore[i] > 0 && prior && Math.min(score, bestScore[i]) >= Math.max(score, bestScore[i]) * .85) {
         if (Math.hypot(prior.r - frame.rgb[k] / 255, prior.g - frame.rgb[k + 1] / 255, prior.b - frame.rgb[k + 2] / 255) > .45) conflict[i] = 1
       } else if (score > bestScore[i] / .85) conflict[i] = 0
-      const binding = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height, score }
+      const projectedTexelsPerMeter = Math.abs(frame.projectionMatrix[5]) * frame.height / (2 * Math.max(.001, d))
+      const binding = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height, score,
+        incidence, distanceMeters: d, projectedTexelsPerMeter }
       const candidates = textureBindingCandidates[i]
       const existing = candidates.findIndex((candidate) => candidate.keyframeId === binding.keyframeId)
       if (existing >= 0) candidates.splice(existing, 1)
       candidates.push(binding)
       candidates.sort((left, right) => right.score - left.score || left.keyframeId - right.keyframeId)
-      candidates.splice(3)
       if (score <= bestScore[i]) return
       bestScore[i] = score
       appearance[i] = { ...s, colorRgb: { r: frame.rgb[k] / 255, g: frame.rgb[k + 1] / 255, b: frame.rgb[k + 2] / 255 } }

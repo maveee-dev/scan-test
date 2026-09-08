@@ -21,6 +21,8 @@ export const CANONICAL_REALITY_CONFIG = Object.freeze({
   falseParallelMinimumMeters: 0.028,
   falseParallelMaximumMeters: 0.105,
 })
+/** Exact Euclidean envelope of the unchanged tangent and plane match gates. */
+const MATCH_BUCKET_WIDTH_METERS = Math.hypot(CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters, CANONICAL_REALITY_CONFIG.matchPlaneResidualMeters)
 
 /**
  * A deliberately small, transfer-safe audit trail for measured hypotheses that
@@ -89,6 +91,9 @@ export interface CanonicalRealityFusionDiagnostics {
   readonly wallThicknessP95Meters: number
   readonly workerTimeMs: number
   readonly numericMemoryBytes: number
+  /** Coarse matching index diagnostics; every observation probes at most 27 buckets. */
+  readonly matchingBucketProbes: number
+  readonly matchingCandidateVisits: number
   readonly transitionExistingCanonical: number
   readonly transitionExistingProvisional: number
   readonly transitionNewCoherent: number
@@ -224,17 +229,7 @@ interface MutableCanonicalSurfel {
   coherentNeighborCount: number
 }
 
-const MATCH_OFFSETS = (() => {
-  const values: Array<readonly [number, number, number]> = []
-  const maximumDistance = Math.hypot(CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters, CANONICAL_REALITY_CONFIG.matchPlaneResidualMeters)
-  for (let x = -2; x <= 2; x += 1) for (let y = -2; y <= 2; y += 1) for (let z = -2; z <= 2; z += 1) {
-    const minimumX = Math.max(0, Math.abs(x) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
-    const minimumY = Math.max(0, Math.abs(y) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
-    const minimumZ = Math.max(0, Math.abs(z) - 1) * CANONICAL_REALITY_CONFIG.cellSizeMeters
-    if (Math.hypot(minimumX, minimumY, minimumZ) <= maximumDistance) values.push([x, y, z])
-  }
-  return values.sort((left, right) => left[0] ** 2 + left[1] ** 2 + left[2] ** 2 - right[0] ** 2 - right[1] ** 2 - right[2] ** 2)
-})()
+const MATCH_OFFSETS: readonly (readonly [number, number, number])[] = [-1, 0, 1].flatMap((x) => [-1, 0, 1].flatMap((y) => [-1, 0, 1].map((z) => [x, y, z] as const)))
 const COHERENCE_OFFSETS = (() => {
   const values: Array<readonly [number, number, number]> = []
   for (let x = -3; x <= 3; x += 1) for (let y = -3; y <= 3; y += 1) for (let z = -3; z <= 3; z += 1) {
@@ -248,6 +243,7 @@ const COHERENCE_OFFSETS = (() => {
 
 const clamp = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value))
 const cell = (value: number): number => Math.floor(value / CANONICAL_REALITY_CONFIG.cellSizeMeters)
+const matchCell = (value: number): number => Math.floor(value / MATCH_BUCKET_WIDTH_METERS)
 const key = (x: number, y: number, z: number): string => `${x}:${y}:${z}`
 const pointKey = (point: SpatialPoint): string => key(cell(point.x), cell(point.y), cell(point.z))
 const length = (point: SpatialPoint): number => Math.hypot(point.x, point.y, point.z)
@@ -379,6 +375,9 @@ export class CanonicalRealityFusionService {
     const inputReadyAt = performance.now()
     const surfels: MutableCanonicalSurfel[] = []
     const buckets: SpatialBucketGrid = new Map()
+    // Fine 2.5cm buckets remain authoritative for layer capacity/coherence.
+    // Matching uses the envelope-sized grid so one query is exactly 3x3x3.
+    const matchingBuckets: SpatialBucketGrid = new Map()
     const recyclableProvisionals: { index: number; createdAtSequence: number }[] = []
     let recyclableCursor = 0
     let consolidationTimeMs = 0
@@ -392,6 +391,7 @@ export class CanonicalRealityFusionService {
     let transitionExistingCanonical = 0, transitionExistingProvisional = 0, transitionNewCoherent = 0
     let transitionPossibleParallelDuplicate = 0, transitionTrueSeparatedLayer = 0, transitionOutlier = 0
     let baseColorInputObservations = 0, baseColorConsolidatedObservations = 0
+    let matchingBucketProbes = 0, matchingCandidateVisits = 0
     const retainedCoverage = new Set<string>(), consolidatedCoverage = new Map<string, SpatialPoint>()
     const createdCoverage = new Set<string>()
     const outlierCoverage = new Set<string>(), capacityRejectedCoverage = new Set<string>()
@@ -436,16 +436,18 @@ export class CanonicalRealityFusionService {
     const addToBucket = (index: number): void => {
       const position = surfels[index].position
       ensureBucket(buckets, cell(position.x), cell(position.y), cell(position.z)).push(index)
+      ensureBucket(matchingBuckets, matchCell(position.x), matchCell(position.y), matchCell(position.z)).push(index)
     }
-    const removeFromBucketCell = (index: number, x: number, y: number, z: number): void => {
-      const entries = getBucket(buckets, x, y, z)
+    const removeFromBucketCell = (grid: SpatialBucketGrid, index: number, x: number, y: number, z: number): void => {
+      const entries = getBucket(grid, x, y, z)
       if (!entries) return
       const at = entries.indexOf(index)
       if (at >= 0) entries.splice(at, 1)
-      if (!entries.length) deleteBucket(buckets, x, y, z)
+      if (!entries.length) deleteBucket(grid, x, y, z)
     }
-    const removeFromBucket = (index: number, oldPosition: SpatialPoint): void => {
-      removeFromBucketCell(index, cell(oldPosition.x), cell(oldPosition.y), cell(oldPosition.z))
+    const removeFromBucket = (index: number, oldX: number, oldY: number, oldZ: number): void => {
+      removeFromBucketCell(buckets, index, cell(oldX), cell(oldY), cell(oldZ))
+      removeFromBucketCell(matchingBuckets, index, matchCell(oldX), matchCell(oldY), matchCell(oldZ))
     }
     const coherentSupport = (index: number): { coherent: number; canonical: number } => {
       const source = surfels[index], cx = cell(source.position.x), cy = cell(source.position.y), cz = cell(source.position.z)
@@ -484,7 +486,7 @@ export class CanonicalRealityFusionService {
 
     const recycleWeakProvisional = (index: number): void => {
       const surfel = surfels[index]
-      removeFromBucket(index, surfel.position)
+      removeFromBucket(index, surfel.position.x, surfel.position.y, surfel.position.z)
       surfel.removed = true
       provisionalExpired += 1
       weakProvisionalsRecycled += 1
@@ -511,11 +513,14 @@ export class CanonicalRealityFusionService {
       sameFrameConsolidated += Math.max(0, frame.denseFrame.validPointCount - observations.length)
       for (const observation of observations) {
         const cellX = cell(observation.position.x), cellY = cell(observation.position.y), cellZ = cell(observation.position.z)
+        const matchX = matchCell(observation.position.x), matchY = matchCell(observation.position.y), matchZ = matchCell(observation.position.z)
         let best = -1, bestScore = Infinity
         for (const [dxCell, dyCell, dzCell] of MATCH_OFFSETS) {
-          const candidates = getBucket(buckets, cellX + dxCell, cellY + dyCell, cellZ + dzCell)
+          matchingBucketProbes += 1
+          const candidates = getBucket(matchingBuckets, matchX + dxCell, matchY + dyCell, matchZ + dzCell)
           if (!candidates) continue
           for (const index of candidates) {
+            matchingCandidateVisits += 1
             const candidate = surfels[index]
             if (candidate.removed || candidate.lastFrameSequence === frame.sequence) continue
             const dx = observation.position.x - candidate.position.x
@@ -529,7 +534,7 @@ export class CanonicalRealityFusionService {
             const tangentDistance = Math.sqrt(Math.max(0, distanceSquared - planeResidual * planeResidual))
             if (tangentDistance > CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters) continue
             const score = planeResidual / CANONICAL_REALITY_CONFIG.matchPlaneResidualMeters * 1.6 + tangentDistance / CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters + (1 - normalDot)
-            if (score < bestScore) { best = index; bestScore = score }
+            if (score < bestScore || (score === bestScore && (best < 0 || index < best))) { best = index; bestScore = score }
           }
         }
 
@@ -548,7 +553,9 @@ export class CanonicalRealityFusionService {
           }
           if (candidate.provisional) transitionExistingProvisional += 1
           else { transitionExistingCanonical += 1; canonicalMerges += 1 }
+          const oldX = candidate.position.x, oldY = candidate.position.y, oldZ = candidate.position.z
           const oldCellX = cell(candidate.position.x), oldCellY = cell(candidate.position.y), oldCellZ = cell(candidate.position.z)
+          const oldMatchX = matchCell(candidate.position.x), oldMatchY = matchCell(candidate.position.y), oldMatchZ = matchCell(candidate.position.z)
           const blend = Math.min(.22, 1 / (candidate.observationCount + 1))
           const proposedX = dx * blend, proposedY = dy * blend, proposedZ = dz * blend
           const proposedLength = Math.hypot(proposedX, proposedY, proposedZ)
@@ -596,8 +603,9 @@ export class CanonicalRealityFusionService {
             }
             candidate.colorCount += 1
           }
-          if (cell(candidate.position.x) !== oldCellX || cell(candidate.position.y) !== oldCellY || cell(candidate.position.z) !== oldCellZ) {
-            removeFromBucketCell(best, oldCellX, oldCellY, oldCellZ); addToBucket(best)
+          if (cell(candidate.position.x) !== oldCellX || cell(candidate.position.y) !== oldCellY || cell(candidate.position.z) !== oldCellZ ||
+            matchCell(candidate.position.x) !== oldMatchX || matchCell(candidate.position.y) !== oldMatchY || matchCell(candidate.position.z) !== oldMatchZ) {
+            removeFromBucket(best, oldX, oldY, oldZ); addToBucket(best)
           }
           matchedExisting += 1
           promoteDuringReplay(best)
@@ -851,6 +859,8 @@ export class CanonicalRealityFusionService {
       wallThicknessP50Meters: percentile(thickness, .5), wallThicknessP90Meters: percentile(thickness, .9), wallThicknessP95Meters: percentile(thickness, .95),
       workerTimeMs: performance.now() - startedAt,
       numericMemoryBytes: snapshot.diagnostics.memoryBytes + surfels.length * 128,
+      matchingBucketProbes,
+      matchingCandidateVisits,
       transitionExistingCanonical, transitionExistingProvisional, transitionNewCoherent,
       transitionPossibleParallelDuplicate, transitionTrueSeparatedLayer, transitionOutlier,
       baseColorInputObservations, baseColorConsolidatedObservations, baseColorCanonicalSurfels,

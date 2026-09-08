@@ -13,9 +13,18 @@ import type {
   SpatialPreviewStatus,
   SpatialBounds,
   RealityCaptureStatus,
+  ScannerFinishStage,
   XRDepthException,
   XRPresentationStatus,
 } from '../types'
+
+const FINISH_STAGE_STEPS: readonly Readonly<{ stage: ScannerFinishStage; label: string }>[] = [
+  { stage: 'preparing-scan', label: 'Preparing measured scan' },
+  { stage: 'reconstructing-geometry', label: 'Reconstructing geometry' },
+  { stage: 'cleaning-surfaces', label: 'Cleaning measured surfaces' },
+  { stage: 'applying-room-appearance', label: 'Applying real room appearance' },
+  { stage: 'building-final-model', label: 'Building final model' },
+]
 
 interface ScannerDomOverlayProps {
   liveMap: import('../services/liveRealityMap').LiveRealityMap
@@ -267,6 +276,7 @@ function ScannerDomOverlay({
       : sessionState.finishStage === 'cleaning-surfaces' ? 'Cleaning surfaces…'
         : sessionState.finishStage === 'applying-room-appearance' ? 'Applying room appearance…'
           : 'Building final model…'
+  const finishStageIndex = Math.max(0, FINISH_STAGE_STEPS.findIndex(({ stage }) => stage === sessionState.finishStage))
   const isCancelling = sessionState.status === 'cancelling'
   const isEnding = isFinishing || isCancelling
   const trackingIsActive = sessionState.debug.trackingStatus === 'active'
@@ -374,6 +384,25 @@ function ScannerDomOverlay({
 
   return (
     <>
+      {isFinishing ? (
+        <section className="xr-finish-processing" role="status" aria-live="polite" aria-busy="true">
+          <div className="xr-finish-processing-card">
+            <span className="xr-finish-spinner" aria-hidden="true" />
+            <span className="xr-finish-eyebrow">Measured reconstruction in progress</span>
+            <h2>Building your 3D room…</h2>
+            <p>{finishStageLabel} The scanner is working and remains responsive.</p>
+            <span className="xr-finish-activity" aria-hidden="true"><span /></span>
+            <ol className="xr-finish-stages">
+              {FINISH_STAGE_STEPS.map((step, index) => (
+                <li key={step.stage} className={index < finishStageIndex ? 'is-complete' : index === finishStageIndex ? 'is-active' : ''}>
+                  <span aria-hidden="true" />{step.label}
+                </li>
+              ))}
+            </ol>
+            <small>No estimated percentage is shown because reconstruction time varies by scan.</small>
+          </div>
+        </section>
+      ) : null}
       <section className="xr-scanner-hud" aria-label="Spatial Scanner controls">
         {!isStarting && !isFinishing && !isCancelling && <LiveRealityMapView bridge={liveMap} />}
         {isDebugOpen && sessionState.debug.quality && <small>XR {sessionState.debug.performance.fps.toFixed(1)} fps · depth/fusion {((measurementQueue?.completedPackets ?? 0)/elapsedSeconds).toFixed(1)} Hz · accepted {((measurement?.accepted ?? 0)/elapsedSeconds).toFixed(1)} Hz · fusion p95 {denseReality.fusionP95Ms?.toFixed(1) ?? '?'} ms · queue {measurementQueue?.queueDepth ?? 0} · latency p95 {measurementQueue?.latencyP95Ms.toFixed(0) ?? '?'} ms · acceptance {measurement?.acceptedPercentage.toFixed(0) ?? 0}% · new/matched {((denseReality.createdSampleCount ?? 0)/elapsedSeconds).toFixed(0)}/{((denseReality.fusedSampleCount ?? 0)/elapsedSeconds).toFixed(0)} s⁻¹ ({denseReality.matchRatioPercentage?.toFixed(0) ?? '?'}%) · stable {(denseReality.stableSampleCount/Math.max(1,denseReality.activeSampleCount)*100).toFixed(0)}% · diverse {((denseReality.viewDiverseSampleCount??0)/Math.max(1,denseReality.activeSampleCount)*100).toFixed(0)}% · capacity {denseReality.capacityUtilizationPercentage.toFixed(0)}% · tier {sessionState.debug.quality.tier}</small>}
