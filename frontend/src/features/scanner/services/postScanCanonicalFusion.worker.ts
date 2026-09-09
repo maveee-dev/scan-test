@@ -44,9 +44,12 @@ self.onmessage = (event: MessageEvent<{ id: number; snapshot: RetainedRealityMea
       result.baseline.diagnostics.provisionalExpiryMap.reasonCodes.buffer,
     ])
   } catch (error) {
+    const workerError = error instanceof Error ? error : null
     self.postMessage({
       id: event.data.id,
-      error: error instanceof Error ? error.message : 'Canonical reconstruction failed.',
+      error: workerError?.message ?? 'Canonical reconstruction failed.',
+      errorName: workerError?.name,
+      errorStack: workerError?.stack,
     })
   }
 }

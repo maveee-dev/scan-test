@@ -790,6 +790,7 @@ export interface DenseRealityFusionDebug {
   readonly matchDepthLayerRejectCount?: number
   readonly matchBucketMissCount?: number
   readonly matchCandidateBudgetRejectCount?: number
+  readonly matchBucketProbeCount?: number
   readonly matchRatioPercentage?: number
   readonly viewBaselineP50Meters?: number
   readonly viewBaselineP90Meters?: number

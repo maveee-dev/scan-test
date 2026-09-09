@@ -220,6 +220,24 @@ const NEIGHBOR_OFFSETS: readonly (readonly [number, number, number])[] = [-1, 0,
   .flatMap((x) => [-1, 0, 1].flatMap((y) => [-1, 0, 1].map((z) => [x, y, z] as const)))
 
 const clamp = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value))
+
+function maximumLayersPerCell(
+  layersByCell: ReadonlyMap<string, readonly LayerAccumulator[]>,
+  promotedOnly = false,
+): number {
+  let maximum = 0
+  for (const layers of layersByCell.values()) {
+    let count = 0
+    if (promotedOnly) {
+      for (const layer of layers) if (layer.promoted) count += 1
+    } else {
+      count = layers.length
+    }
+    maximum = Math.max(maximum, count)
+  }
+  return maximum
+}
+
 const pointKey = (point: SpatialPoint): string => `${Math.floor(point.x / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(point.y / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(point.z / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}`
 const sourceMeasurementKey = (observation: Pick<MeasuredObservation, 'frameSequence' | 'sourceIndex' | 'position'>): string => `${observation.frameSequence}:${observation.sourceIndex}:${observation.position.x}:${observation.position.y}:${observation.position.z}`
 const localKey = (x: number, y: number): string => `${x}:${y}`
@@ -730,8 +748,8 @@ export class LayeredMeasuredSurfaceFieldService {
       position: owner.position,
     })) ? 0 : 1), 0)
     const observedLayerCount = allLayers.length
-    const maximumObservedLayersPerCell = Math.max(0, ...[...layersByCell.values()].map((layers) => layers.length))
-    const maximumCandidateLayersPerCell = Math.max(0, ...[...layersByCell.values()].map((layers) => layers.filter((layer) => layer.promoted).length))
+    const maximumObservedLayersPerCell = maximumLayersPerCell(layersByCell)
+    const maximumCandidateLayersPerCell = maximumLayersPerCell(layersByCell, true)
     const candidateLayerSafetyViolations = [...layersByCell.values()].reduce((count, layers) => count + Math.max(0, layers.filter((layer) => layer.promoted).length - M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell), 0)
 
     const metricsStartedAt = performance.now()

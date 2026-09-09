@@ -10,7 +10,7 @@ function moduleUrl(url) {
 }
 const load = (name) => import(moduleUrl(new URL(`../src/features/scanner/services/${name}.ts`, import.meta.url)))
 const { RealityQualityPolicy, DEPTH_PHASES } = await load('realityQualityPolicy')
-const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG } = await load('denseRealityReconstructionService')
+const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG, DENSE_REALITY_MATCH_BUCKET_OFFSETS, getDenseRealityMatchBucketKey } = await load('denseRealityReconstructionService')
 const { refineRealityDisplay } = await load('realityDisplayRefinement')
 const { InspectionPose, LiveRealityMap, getLiveMapCadenceMs } = await load('liveRealityMap')
 const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
@@ -33,6 +33,19 @@ function feed(service, surfels, sequence, color = true, camera = { x: 0, y: 0, z
   const frame = { validPointCount: surfels.length, valid: new Uint8Array(surfels.length).fill(1), points: new Float32Array(surfels.flatMap((s) => Object.values(s.position))) }
   const registration = color ? { coloredSampleCount: surfels.length, cameraCopySequence: sequence, sourceSampleIndices: new Int32Array(surfels.map((_s, i) => i)), srgbColors: new Uint8Array(surfels.length * 3).fill(128) } : null
   service.process(registration, frame, { copySampleNormal: (i, out) => { Object.assign(out, surfels[i].normal); return true } }, camera, sequence * 500, context)
+}
+function uniqueDenseFrame(count, xOffset = 0, z = -2) {
+  const columns = 500, valid = new Uint8Array(count).fill(1), points = new Float32Array(count * 3)
+  for (let index = 0; index < count; index += 1) {
+    points[index * 3] = xOffset + (index % columns) * .08
+    points[index * 3 + 1] = Math.floor(index / columns) * .08
+    points[index * 3 + 2] = z
+  }
+  return { validPointCount: count, valid, points }
+}
+function feedUniqueDense(service, count, sequence, xOffset = 0, z = -2) {
+  const frame = uniqueDenseFrame(count, xOffset, z)
+  service.process(null, frame, { copySampleNormal: (_index, out) => { out.x = 0; out.y = 0; out.z = 1; return true } }, null, sequence * 500, { frameSequence: sequence, trackingQuality: 1, maxInputSamples: count })
 }
 function measurementInput(sequence, x=0, timestamp=sequence*100, validCount=400) {
   const columns=20,rows=20,total=columns*rows,valid=new Uint8Array(total),distancesMeters=new Float32Array(total).fill(2),points=new Float32Array(total*3),nx=new Float32Array(total),ny=new Float32Array(total)
@@ -84,10 +97,39 @@ test('stationary sampling throttles but physical translation resumes immediately
   const p = new RealityQualityPolicy(); for(let i=0;i<8;i++) { p.shouldProcess(pose(0,i*200)); p.recordTick(18,3600,3600) }
   assert.equal(p.shouldProcess(pose(0,1500)),false); assert.equal(p.shouldProcess(pose(.2,1550)),true)
 })
-test('2.5cm/60k decision and numeric storage remain bounded', () => { assert.equal(DENSE_REALITY_CONFIG.cellSizeMeters,.025); assert.equal(DENSE_REALITY_CONFIG.maxSamples,60000); const s = new DenseRealityReconstructionService(); feed(s,plane(3),1); assert.ok(s.getDiagnostics().numericMemoryBytes<6*1048576) })
+test('2.5cm/180k live guardrail and numeric storage remain bounded', () => { assert.equal(DENSE_REALITY_CONFIG.cellSizeMeters,.025); assert.equal(DENSE_REALITY_CONFIG.maxSamples,180000); assert.equal(DENSE_REALITY_CONFIG.matchBucketSizeMeters,DENSE_REALITY_CONFIG.maxMergeDistanceMeters); const s = new DenseRealityReconstructionService(); feed(s,plane(3),1); assert.ok(s.getDiagnostics().numericMemoryBytes<19*1048576) })
 test('world-space fusion preserves two depth layers and repeated observations', () => {
   const s = new DenseRealityReconstructionService(), a=plane(8,-2), b=plane(8,-2.2); feed(s,a,1); feed(s,b,2); feed(s,a,3); feed(s,b,4)
   const result=s.createSnapshot('layers','local-floor',true); assert.equal(result.surfels.length,128); assert.equal(result.surfels.filter((v)=>v.position.z < -2.1).length,64)
+})
+test('live map accepts a unique 130k measured-surfel room envelope with bounded occupancy', () => {
+  const count = 130000, service = new DenseRealityReconstructionService()
+  feedUniqueDense(service, count, 1)
+  const diagnostics = service.getDiagnostics()
+  assert.equal(diagnostics.activeSampleCount, count)
+  assert.equal(diagnostics.rejectedSampleCount, 0)
+  assert.equal(diagnostics.capacityRejectedSampleCount, 0)
+  assert.equal(diagnostics.capacity, 180000)
+  assert.ok(diagnostics.activeSampleCount <= diagnostics.capacity)
+  assert.ok((diagnostics.numericMemoryBytes ?? 0) >= 180000 * 104)
+  assert.equal(DENSE_REALITY_MATCH_BUCKET_OFFSETS.length, 27)
+  assert.equal((diagnostics.matchBucketProbeCount ?? 0) / count, 27)
+})
+test('27-bucket matching crosses negative boundaries while retaining depth layers', () => {
+  assert.notEqual(getDenseRealityMatchBucketKey({ x: -.0005, y: 0, z: -2 }), getDenseRealityMatchBucketKey({ x: .0325, y: 0, z: -2 }))
+  const matching = new DenseRealityReconstructionService()
+  feed(matching, [sample(1, -.0005, 0, -2)], 1)
+  feed(matching, [sample(2, .0325, 0, -2)], 2)
+  assert.equal(matching.getDiagnostics().activeSampleCount, 1)
+  assert.equal(matching.getDiagnostics().fusedSampleCount, 1)
+  assert.ok((matching.getDiagnostics().matchBucketProbeCount ?? 0) <= 2 * DENSE_REALITY_MATCH_BUCKET_OFFSETS.length)
+  const layered = new DenseRealityReconstructionService()
+  feed(layered, [sample(3, 0, 0, -2)], 1)
+  feed(layered, [sample(4, 0, 0, -1.97)], 2)
+  assert.equal(layered.getDiagnostics().activeSampleCount, 2)
+  assert.equal(layered.getDiagnostics().fusedSampleCount, 0)
+  assert.equal(layered.getDiagnostics().matchDepthLayerRejectCount, 1)
+  assert.ok((layered.getDiagnostics().matchBucketProbeCount ?? 0) <= 2 * DENSE_REALITY_MATCH_BUCKET_OFFSETS.length)
 })
 test('incompatible surfaces in same hash cell remain separate', () => {
   const s = new DenseRealityReconstructionService(), layers=[sample(0,.001,.001,-2.001),sample(1,.001,.001,-2.02)]; feed(s,layers,1);feed(s,layers,2);assert.equal(s.createSnapshot('layers','local',true).surfels.length,2)
@@ -107,9 +149,9 @@ test('flipped compatible normals do not average to zero and moved cells remain d
   const result=s.createSnapshot('n','local',true);assert.equal(result.surfels.length,1);assert.ok(Math.abs(result.surfels[0].normal.z)>.99)
 })
 test('capacity reclaims stale unconfirmed samples, never stable geometry', () => {
-  const s=new DenseRealityReconstructionService(); const points=Array.from({length:60000},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2));feed(s,points,1)
-  feed(s,[sample(60001,20,0,-2)],30);assert.equal(s.getDiagnostics().activeSampleCount,60000);assert.equal(s.getDiagnostics().reclaimedSampleCount,1)
-  feed(s,[sample(60001,20,0,-2)],31);feed(s,[sample(60001,20,0,-2)],32);assert.equal(s.getDiagnostics().stableSampleCount,1)
+  const s=new DenseRealityReconstructionService(), capacity=DENSE_REALITY_CONFIG.maxSamples; const points=Array.from({length:capacity},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2));feed(s,points,1)
+  feed(s,[sample(capacity+1,20,0,-2)],30);assert.equal(s.getDiagnostics().activeSampleCount,capacity);assert.equal(s.getDiagnostics().reclaimedSampleCount,1)
+  feed(s,[sample(capacity+1,20,0,-2)],31);feed(s,[sample(capacity+1,20,0,-2)],32);assert.equal(s.getDiagnostics().stableSampleCount,1)
 })
 test('display smoothing reduces noise without mutating source', () => {
   const wall=plane(30,-2,true), before=JSON.stringify(wall), result=refineRealityDisplay(wall,[])
@@ -337,9 +379,9 @@ test('safe mesh reports rejection classes and accepted edge bounds',()=>{
   assert.ok(resources.stats.largestAcceptedTriangleEdgeMeters<=.1);assert.ok(resources.stats.trianglesRejectedByUnsupportedNeighborhood>=0);assert.ok(resources.stats.trianglesRejectedByDepthLayer>=0);resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })
 test('confirmed full-capacity map never evicts stable surfaces to hide pressure',()=>{
-  const service=new DenseRealityReconstructionService(),points=Array.from({length:60000},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2))
-  feed(service,points,1);feed(service,points,2);feed(service,points,3);feed(service,[sample(60001,20,0,-2)],40)
-  assert.equal(service.getDiagnostics().stableSampleCount,60000);assert.equal(service.getDiagnostics().reclaimedSampleCount,0);assert.equal(service.getDiagnostics().capacityRejectedSampleCount,1)
+  const service=new DenseRealityReconstructionService(),capacity=DENSE_REALITY_CONFIG.maxSamples,points=Array.from({length:capacity},(_,i)=>sample(i,(i%300)*.03,Math.floor(i/300)*.03,-2))
+  feed(service,points,1);feed(service,points,2);feed(service,points,3);feed(service,[sample(capacity+1,20,0,-2)],40)
+  assert.equal(service.getDiagnostics().stableSampleCount,capacity);assert.equal(service.getDiagnostics().reclaimedSampleCount,0);assert.equal(service.getDiagnostics().capacityRejectedSampleCount,1)
 })
 test('view diversity counts directions rather than identical camera ticks',()=>{
   const service=new DenseRealityReconstructionService(),points=plane(4)
@@ -647,7 +689,7 @@ test('final reconstruction is dispatched to a dedicated worker and XR never runs
   const coordinator=readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusionService.ts',import.meta.url),'utf8')
   const worker=readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusion.worker.ts',import.meta.url),'utf8')
   const xr=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
-  assert.match(coordinator,/new Worker/);assert.match(worker,/CanonicalRealityFusionService/);assert.match(xr,/await reconstructCanonicalReality/);assert.doesNotMatch(xr,/new CanonicalRealityFusionService/)
+  assert.match(coordinator,/new Worker/);assert.match(worker,/CanonicalRealityFusionService/);assert.match(coordinator,/errorName\?: string/);assert.match(coordinator,/errorStack\?: string/);assert.match(worker,/errorName: workerError\?\.name/);assert.match(worker,/errorStack: workerError\?\.stack/);assert.match(xr,/await reconstructCanonicalReality/);assert.doesNotMatch(xr,/new CanonicalRealityFusionService/)
 })
 
 test('appearance remains pressure-gated but can resume when XR and queue are healthy',()=>{

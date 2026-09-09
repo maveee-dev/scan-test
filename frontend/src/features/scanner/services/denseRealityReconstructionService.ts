@@ -22,20 +22,28 @@ export interface DenseRealityMeasurementContext {
   readonly maxInputSamples?: number
 }
 
+const DENSE_REALITY_MERGE_DISTANCE_METERS = 0.034
+
 export const DENSE_REALITY_CONFIG = Object.freeze({
   cellSizeMeters: 0.025,
-  maxSamples: 60000,
+  maxSamples: 180000,
   // The physical M8.7.1 median spacing was 2.2 cm. A 2.1 cm merge radius
   // therefore forced repeat phase samples to become new surfels. Tangential
   // matching may span a little more than one cell, while the tighter
   // point-to-plane limit continues to preserve separate depth layers.
-  maxMergeDistanceMeters: 0.034,
+  maxMergeDistanceMeters: DENSE_REALITY_MERGE_DISTANCE_METERS,
+  // Matching uses a separate bucket grid. Its width equals the complete
+  // merge radius, so a floor-based lookup needs only the surrounding 27
+  // buckets while measured surfels remain represented at 2.5 cm.
+  matchBucketSizeMeters: DENSE_REALITY_MERGE_DISTANCE_METERS,
   maxPointToPlaneResidualMeters: 0.014,
   minNormalDot: Math.cos(40 * Math.PI / 180),
   maxCandidatesPerSample: 96,
   minimumStableObservations: 2,
   sampleRadiusMeters: 0.0125,
 })
+
+export const DENSE_REALITY_MATCH_BUCKET_SIZE_METERS = DENSE_REALITY_CONFIG.matchBucketSizeMeters
 
 const MAX_COLOR_WEIGHT = 16
 const MIN_COLOR_OUTLIER_OBSERVATIONS = 3
@@ -50,9 +58,9 @@ const VIEW_DIVERSITY_ANGLE_RADIANS = 2.5 * Math.PI / 180
 const STRONG_VIEW_BASELINE_METERS = 0.15
 const STABLE_BUCKET_SIZE_METERS = 0.10
 
-const MATCH_CELL_OFFSETS = (() => {
+export const DENSE_REALITY_MATCH_BUCKET_OFFSETS = (() => {
   const offsets: Array<readonly [number, number, number]> = []
-  for (let x = -2; x <= 2; x++) for (let y = -2; y <= 2; y++) for (let z = -2; z <= 2; z++) {
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
     offsets.push([x, y, z])
   }
   return offsets.sort((a, b) => a[0] ** 2 + a[1] ** 2 + a[2] ** 2 - b[0] ** 2 - b[1] ** 2 - b[2] ** 2)
@@ -100,6 +108,10 @@ function getCellCoordinate(value: number): number {
   return Math.floor(value / DENSE_REALITY_CONFIG.cellSizeMeters)
 }
 
+function getMatchCellCoordinate(value: number): number {
+  return Math.floor(value / DENSE_REALITY_MATCH_BUCKET_SIZE_METERS)
+}
+
 function getCellKey(x: number, y: number, z: number): string {
   return `${x}:${y}:${z}`
 }
@@ -109,6 +121,14 @@ function getPointCellKey(point: SpatialPoint): string {
     getCellCoordinate(point.x),
     getCellCoordinate(point.y),
     getCellCoordinate(point.z),
+  )
+}
+
+export function getDenseRealityMatchBucketKey(point: SpatialPoint): string {
+  return getCellKey(
+    getMatchCellCoordinate(point.x),
+    getMatchCellCoordinate(point.y),
+    getMatchCellCoordinate(point.z),
   )
 }
 
@@ -391,8 +411,10 @@ export class DenseRealityReconstructionService {
 
   private readonly active = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
 
+  /** Linked lists are indexed by the separate max-merge match buckets. */
   private readonly nextInCell = new Int32Array(DENSE_REALITY_CONFIG.maxSamples)
 
+  /** Match-bucket heads; 2.5 cm measured-cell occupancy is computed at snapshot time. */
   private readonly cellHeads = new Map<string, number>()
   private readonly stableBuckets = new Map<string, number[]>()
   private readonly stableBucketIndexed = new Uint8Array(DENSE_REALITY_CONFIG.maxSamples)
@@ -427,6 +449,7 @@ export class DenseRealityReconstructionService {
   private matchDepthLayerRejectCount = 0
   private matchBucketMissCount = 0
   private matchCandidateBudgetRejectCount = 0
+  private matchBucketProbeCount = 0
   private readonly fusionDurations: number[] = []
   private liveProcessedFrameCount = 0
   private liveInputDecimatedSampleCount = 0
@@ -603,6 +626,7 @@ export class DenseRealityReconstructionService {
       matchDepthLayerRejectCount: this.matchDepthLayerRejectCount,
       matchBucketMissCount: this.matchBucketMissCount,
       matchCandidateBudgetRejectCount: this.matchCandidateBudgetRejectCount,
+      matchBucketProbeCount: this.matchBucketProbeCount,
       matchRatioPercentage: fusedCount / Math.max(1, createdCount + fusedCount) * 100,
       viewBaselineP50Meters: p(baselines, .5),
       viewBaselineP90Meters: p(baselines, .9),
@@ -670,10 +694,17 @@ export class DenseRealityReconstructionService {
     }[]
     let colorObservationTotal = 0
     let colorConfidenceTotal = 0
+    const measuredCellOccupancies = new Map<string, number>()
     for (let index = 0; index < this.activeSampleCount; index += 1) {
       if (this.active[index] !== 1) continue
 
       const positionOffset = index * 3
+      const measuredCellKey = getPointCellKey({
+        x: this.positions[positionOffset],
+        y: this.positions[positionOffset + 1],
+        z: this.positions[positionOffset + 2],
+      })
+      measuredCellOccupancies.set(measuredCellKey, (measuredCellOccupancies.get(measuredCellKey) ?? 0) + 1)
       const colorOffset = index * 3
       const hasColor = this.colorWeights[index] > 0
       const colorRgb: RealityRgbColor | null = hasColor
@@ -761,7 +792,7 @@ export class DenseRealityReconstructionService {
       fusedRawSurfels:Object.freeze(fusedRawSurfels),
       bounds: calculateBounds(frozenSurfels),
       captureSummary,
-      fusionDiagnostics: Object.freeze({ ...this.diagnostics, multiLayerBucketCount: [...this.cellHeads.values()].filter((index) => this.nextInCell[index] >= 0).length }),
+      fusionDiagnostics: Object.freeze({ ...this.diagnostics, multiLayerBucketCount: [...measuredCellOccupancies.values()].filter((count) => count > 1).length }),
       colorStatistics: calculateColorStatistics(frozenSurfels),
       colorSamples: Object.freeze(colorSamples),
     })
@@ -799,7 +830,7 @@ export class DenseRealityReconstructionService {
     this.reclaimCursor = 0; this.reclaimedSamples = 0; this.capacityRejected = 0
     this.sameFrameDuplicateCount = 0
     this.duplicateSurfaceCandidateCount = 0;this.viewDiverseSampleCount=0;this.singleViewSampleCount=0
-    this.matchDistanceRejectCount=0;this.matchNormalRejectCount=0;this.matchDepthLayerRejectCount=0;this.matchBucketMissCount=0;this.matchCandidateBudgetRejectCount=0
+    this.matchDistanceRejectCount=0;this.matchNormalRejectCount=0;this.matchDepthLayerRejectCount=0;this.matchBucketMissCount=0;this.matchCandidateBudgetRejectCount=0;this.matchBucketProbeCount=0
     this.fusionDurations.length=0
     this.liveProcessedFrameCount=0;this.liveInputDecimatedSampleCount=0;this.liveMaximumSamplesPerFrame=0
     this.totalCreatedSampleCount = 0
@@ -819,14 +850,15 @@ export class DenseRealityReconstructionService {
   }
 
   private findCompatibleSample(point: SpatialPoint, normal: SpatialPoint, frameSequence: number): number {
-    const cellX = getCellCoordinate(point.x)
-    const cellY = getCellCoordinate(point.y)
-    const cellZ = getCellCoordinate(point.z)
+    const cellX = getMatchCellCoordinate(point.x)
+    const cellY = getMatchCellCoordinate(point.y)
+    const cellZ = getMatchCellCoordinate(point.z)
     let candidateCount = 0
     let bestIndex = -1
     let bestDistance = Infinity
     let sawCandidate = false, sawDistance = false, sawNormal = false, exhausted = false
-    for (const [offsetX, offsetY, offsetZ] of MATCH_CELL_OFFSETS) {
+    for (const [offsetX, offsetY, offsetZ] of DENSE_REALITY_MATCH_BUCKET_OFFSETS) {
+          this.matchBucketProbeCount += 1
           const head = this.cellHeads.get(getCellKey(cellX + offsetX, cellY + offsetY, cellZ + offsetZ))
           let index = head ?? -1
           while (index >= 0) {
@@ -925,21 +957,26 @@ export class DenseRealityReconstructionService {
     this.lastObservedAt[index] = timestamp
     this.createdAt[index] = timestamp
     this.active[index] = 1
-    const key = getPointCellKey(point)
-    this.nextInCell[index] = this.cellHeads.get(key) ?? -1
-    this.cellHeads.set(key, index)
+    const matchKey = getDenseRealityMatchBucketKey(point)
+    this.nextInCell[index] = this.cellHeads.get(matchKey) ?? -1
+    this.cellHeads.set(matchKey, index)
     if (reusedIndex === undefined) this.activeSampleCount += 1
   }
 
   private unlinkCell(index: number): void {
     const offset = index * 3
-    const key = getCellKey(getCellCoordinate(this.positions[offset]), getCellCoordinate(this.positions[offset + 1]), getCellCoordinate(this.positions[offset + 2]))
+    const key = getDenseRealityMatchBucketKey({
+      x: this.positions[offset],
+      y: this.positions[offset + 1],
+      z: this.positions[offset + 2],
+    })
     let current = this.cellHeads.get(key) ?? -1, previous = -1
     while (current >= 0) {
       if (current === index) {
         if (previous < 0) { if (this.nextInCell[current] < 0) this.cellHeads.delete(key); else this.cellHeads.set(key, this.nextInCell[current]) }
         else this.nextInCell[previous] = this.nextInCell[current]
-        this.nextInCell[index] = -1; return
+        this.nextInCell[index] = -1
+        return
       }
       previous = current; current = this.nextInCell[current]
     }
@@ -1071,10 +1108,14 @@ export class DenseRealityReconstructionService {
       this.normals[offset + 1] = this.sampleNormal.y
       this.normals[offset + 2] = this.sampleNormal.z
     }
-    const newCell = getCellKey(getCellCoordinate(this.positions[offset]), getCellCoordinate(this.positions[offset + 1]), getCellCoordinate(this.positions[offset + 2]))
     // Even within the same bucket relink explicitly after unlinking.
-    this.nextInCell[index] = this.cellHeads.get(newCell) ?? -1
-    this.cellHeads.set(newCell, index)
+    const newMatchCell = getDenseRealityMatchBucketKey({
+      x: this.positions[offset],
+      y: this.positions[offset + 1],
+      z: this.positions[offset + 2],
+    })
+    this.nextInCell[index] = this.cellHeads.get(newMatchCell) ?? -1
+    this.cellHeads.set(newMatchCell, index)
     if (observationWeight > 0) {
       this.linearColors[offset] += (red - this.linearColors[offset]) * blend
       this.linearColors[offset + 1] += (green - this.linearColors[offset + 1]) * blend

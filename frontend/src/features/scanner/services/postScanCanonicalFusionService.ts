@@ -103,6 +103,8 @@ export function reconstructCanonicalReality(
       result?: PostScanCanonicalFusionResult
       transport?: Omit<PostScanCanonicalFusionTransportDiagnostics, 'mainPostMessageBeginEpochMs' | 'mainPostMessageEndEpochMs' | 'mainPostMessageEpochMs' | 'mainResultReceiveEpochMs'>
       error?: string
+      errorName?: string
+      errorStack?: string
     }>) => {
       if (event.data.id !== id) return
       if (event.data.stage) {
@@ -112,7 +114,12 @@ export function reconstructCanonicalReality(
       }
       const mainResultReceiveEpochMs = localEpochMs()
       worker.terminate()
-      if (event.data.error || !event.data.result) reject(new Error(event.data.error ?? 'Canonical reconstruction returned no result.'))
+      if (event.data.error || !event.data.result) {
+        const workerError = new Error(event.data.error ?? 'Canonical reconstruction returned no result.')
+        if (event.data.errorName) workerError.name = event.data.errorName
+        if (event.data.errorStack) workerError.stack = event.data.errorStack
+        reject(workerError)
+      }
       else {
         const workerTransport = event.data.transport ?? event.data.result.transportDiagnostics
         const transport = Object.freeze({

@@ -1,8 +1,16 @@
 # M8.8 — Layered Measured Surface Field Feasibility
 
-Status: architecture feasibility decision after the M8.7.1.6 POCO F5 review.
-This document does not advance the scanner build marker, change production
-code, or unfreeze M7/customization. M8.7.1.6 remains the production baseline.
+Status: BLOCKED pending a physical large-scan validation on the POCO F5.
+The bounded software regression now completes the representative synthetic
+room envelope, but this does not advance the scanner build marker, unfreeze
+M7/customization, or replace the M8.7.1.6 production baseline.
+
+The previously observed synthetic Finish stack-overflow blocker is documented
+in `docs/M8_8_SCALABILITY_BLOCKER_REPORT.md`. The current branch removes the
+unbounded diagnostic spread, separates the live match grid from the 2.5 cm
+measured grid, and raises only the live typed-array guardrail to 180,000. A
+physical large scan is still required to validate XR cadence, memory pressure,
+surface-layer quality and end-to-end Finish on target hardware.
 
 The question is whether a bounded measured-surface field can recover coherent
 room coverage while preserving real depth layers, without inventing geometry
