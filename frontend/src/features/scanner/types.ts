@@ -822,6 +822,10 @@ export interface FinalizedDenseRealityReconstruction {
   readonly canonicalSurfels?: readonly FinalizedRealitySurfel[]
   readonly retainedMeasurementDiagnostics?: import('./services/retainedRealityMeasurementService').RetainedRealityMeasurementDiagnostics
   readonly canonicalFusionDiagnostics?: import('./services/canonicalRealityFusionService').CanonicalRealityFusionDiagnostics
+  /** Isolated M8.8 worker result; baseline `surfels` remains authoritative. */
+  readonly experimentalRealityReconstruction?: import('./services/layeredMeasuredSurfaceFieldService').LayeredMeasuredSurfaceFieldResult
+  readonly experimentalRealitySurfels?: readonly FinalizedRealitySurfel[]
+  readonly experimentalRealityDiagnostics?: import('./services/layeredMeasuredSurfaceFieldService').LayeredMeasuredSurfaceFieldDiagnostics
   /** Bounded measured-only audit points excluded during canonical hypothesis resolution. */
   readonly provisionalExpiryMap?: import('./services/canonicalRealityFusionService').ProvisionalExpiryMap
   /** Bounded one-per-cell samples from the actual per-frame-consolidated replay input. */

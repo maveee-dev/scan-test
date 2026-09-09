@@ -41,7 +41,7 @@ import { DenseRealityReconstructionService } from './denseRealityReconstructionS
 import { RealityRgbKeyframeService } from './realityRgbKeyframeService'
 import { RealityMeasurementQueueService } from './realityMeasurementQueueService'
 import { RetainedRealityMeasurementService } from './retainedRealityMeasurementService'
-import { reconstructCanonicalReality } from './postScanCanonicalFusionService'
+import { reconstructCanonicalReality, type PostScanCanonicalFusionTransportDiagnostics } from './postScanCanonicalFusionService'
 import type { RealityFrameAcceptance, RealityMeasurementPacket } from './realityMeasurementStabilityService'
 import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
 
@@ -52,6 +52,79 @@ const DENSE_MASK_UPDATE_INTERVAL_MS = 180
 
 function getPerformanceTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now()
+}
+
+function getEpochTimestamp(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.timeOrigin + performance.now()
+}
+
+interface FinishHeartbeatDiagnostics {
+  readonly rafHeartbeatCount: number
+  readonly rafMaxGapMs: number
+  readonly longTaskCount: number
+  readonly longTaskMaxDurationMs: number
+  readonly performanceObserverSupported: boolean
+  readonly startedEpochMs: number
+  readonly completedEpochMs: number
+}
+
+interface FinishHeartbeatMonitor {
+  stop: () => FinishHeartbeatDiagnostics
+}
+
+function startFinishHeartbeatMonitor(): FinishHeartbeatMonitor {
+  const startedEpochMs = getEpochTimestamp()
+  let rafHeartbeatCount = 0
+  let rafMaxGapMs = 0
+  let lastRafTimestamp: number | null = null
+  let rafId = 0
+  let longTaskCount = 0
+  let longTaskMaxDurationMs = 0
+  let stopped = false
+  let observer: PerformanceObserver | null = null
+  const startPerformanceMs = getPerformanceTimestamp()
+  const rafTick = (timestamp: number): void => {
+    if (stopped) return
+    rafHeartbeatCount += 1
+    if (lastRafTimestamp !== null) rafMaxGapMs = Math.max(rafMaxGapMs, timestamp - lastRafTimestamp)
+    lastRafTimestamp = timestamp
+    if (typeof window !== 'undefined') rafId = window.requestAnimationFrame(rafTick)
+  }
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') rafId = window.requestAnimationFrame(rafTick)
+  let performanceObserverSupported = false
+  if (typeof PerformanceObserver !== 'undefined') {
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.startTime < startPerformanceMs) continue
+          longTaskCount += 1
+          longTaskMaxDurationMs = Math.max(longTaskMaxDurationMs, entry.duration)
+        }
+      })
+      observer.observe({ type: 'longtask', buffered: true })
+      performanceObserverSupported = true
+    } catch {
+      observer = null
+    }
+  }
+  return {
+    stop: (): FinishHeartbeatDiagnostics => {
+      if (!stopped) {
+        stopped = true
+        if (typeof window !== 'undefined' && rafId) window.cancelAnimationFrame(rafId)
+        if (observer) {
+          for (const entry of observer.takeRecords()) {
+            if (entry.startTime >= startPerformanceMs) {
+              longTaskCount += 1
+              longTaskMaxDurationMs = Math.max(longTaskMaxDurationMs, entry.duration)
+            }
+          }
+          observer.disconnect()
+        }
+      }
+      return Object.freeze({ rafHeartbeatCount, rafMaxGapMs, longTaskCount, longTaskMaxDurationMs, performanceObserverSupported, startedEpochMs, completedEpochMs: getEpochTimestamp() })
+    },
+  }
 }
 
 export type XRSessionEndReason = 'stopped' | 'finished' | 'external'
@@ -95,6 +168,21 @@ export interface FinishPipelineDiagnostics {
   readonly resultAssemblyMs: number
   readonly xrSessionEndMs: number
   readonly totalFinishMs: number
+  readonly actualMainPostMessageBeginEpochMs: number | null
+  readonly actualMainPostMessageEndEpochMs: number | null
+  readonly actualMainPostMessageEpochMs: number | null
+  readonly mainResultReceiveEpochMs: number | null
+  readonly workerReceiveEpochMs: number | null
+  readonly workerStartEpochMs: number | null
+  readonly workerResultPostEpochMs: number | null
+  readonly workerStageEpochs: readonly import('./postScanCanonicalFusionService').PostScanWorkerStageTiming[]
+  readonly rafHeartbeatCount: number
+  readonly rafMaxGapMs: number
+  readonly longTaskCount: number
+  readonly longTaskMaxDurationMs: number
+  readonly performanceObserverSupported: boolean
+  readonly finishStartedEpochMs: number
+  readonly finishCompletedEpochMs: number
   readonly snapshotStageTimingsMs: Readonly<{
     liveSurface: number
     spatialScan: number
@@ -366,6 +454,8 @@ export class XRSessionService {
 
   public async finish(invocationTiming: FinishInvocationTiming = { clickToProcessingUiFirstPaintMs: 0 }): Promise<FinalizedScannerCapture> {
     const finishStartedAt = getPerformanceTimestamp()
+    const finishStartedEpochMs = getEpochTimestamp()
+    let finishHeartbeat: FinishHeartbeatMonitor | null = null
     if (this.startPromise) {
       throw new XRSessionError(
         'The scan session is still starting and cannot be finalized yet.',
@@ -389,6 +479,7 @@ export class XRSessionService {
     }
     const scanStartedAt = this.scanStartedAt
     const referenceSpaceType = this.referenceSpaceType
+    finishHeartbeat = startFinishHeartbeatMonitor()
 
     this.requestedEndReason = 'finished'
     this.isEnding = true
@@ -446,11 +537,15 @@ export class XRSessionService {
       const retainedMeasurements = timedSnapshot('retainedMeasurements', () => this.retainedMeasurementService.createSnapshot())
       const retainedMeasurementFinalizationMs = getPerformanceTimestamp() - finalizationStartedAt
       const canonicalStartedAt = getPerformanceTimestamp()
-      const clickToWorkerMessagePostedMs = invocationTiming.clickToProcessingUiFirstPaintMs + canonicalStartedAt - finishStartedAt
+      const transportState: { value: PostScanCanonicalFusionTransportDiagnostics | null } = { value: null }
       const canonicalReality = rawDenseReality && retainedMeasurements.frames.length > 0
-        ? await reconstructCanonicalReality(retainedMeasurements, (stage) => this.callbacks?.onFinishStage(stage))
+        ? await reconstructCanonicalReality(retainedMeasurements, (stage) => this.callbacks?.onFinishStage(stage), { onTransport: (transport) => { transportState.value = transport } })
         : null
+      const transportDiagnostics = transportState.value
       const canonicalWorkerRoundTripMs = getPerformanceTimestamp() - canonicalStartedAt
+      const clickToWorkerMessagePostedMs = transportDiagnostics?.mainPostMessageEndEpochMs !== null && transportDiagnostics?.mainPostMessageEndEpochMs !== undefined
+        ? invocationTiming.clickToProcessingUiFirstPaintMs + transportDiagnostics.mainPostMessageEndEpochMs - finishStartedEpochMs
+        : invocationTiming.clickToProcessingUiFirstPaintMs + canonicalStartedAt - finishStartedAt
       this.callbacks?.onFinishStage('building-final-model')
       const assemblyStartedAt = getPerformanceTimestamp()
       const canonicalSurfels = canonicalReality?.surfels ?? rawDenseReality?.surfels ?? []
@@ -481,12 +576,16 @@ export class XRSessionService {
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
         provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
         consolidatedMeasurementMap: canonicalReality?.consolidatedMeasurementMap,
+        experimentalRealityReconstruction: canonicalReality?.experimental,
+        experimentalRealitySurfels: canonicalReality?.experimental?.surfels,
+        experimentalRealityDiagnostics: canonicalReality?.experimental?.diagnostics,
       } : null
       const resultAssemblyMs = getPerformanceTimestamp() - assemblyStartedAt
 
       const endStartedAt = getPerformanceTimestamp()
       await this.endActiveSession(session)
       const xrSessionEndMs = getPerformanceTimestamp() - endStartedAt
+      const finishHeartbeatDiagnostics = finishHeartbeat!.stop()
       const finishPipelineDiagnostics: FinishPipelineDiagnostics = Object.freeze({
         clickToProcessingUiFirstPaintMs: invocationTiming.clickToProcessingUiFirstPaintMs,
         clickToRetainedFinalizationBeginMs,
@@ -498,6 +597,21 @@ export class XRSessionService {
         resultAssemblyMs,
         xrSessionEndMs,
         totalFinishMs: getPerformanceTimestamp() - finishStartedAt,
+        actualMainPostMessageBeginEpochMs: transportDiagnostics?.mainPostMessageBeginEpochMs ?? null,
+        actualMainPostMessageEndEpochMs: transportDiagnostics?.mainPostMessageEndEpochMs ?? null,
+        actualMainPostMessageEpochMs: transportDiagnostics?.mainPostMessageEpochMs ?? null,
+        mainResultReceiveEpochMs: transportDiagnostics?.mainResultReceiveEpochMs ?? null,
+        workerReceiveEpochMs: transportDiagnostics?.workerReceiveEpochMs ?? null,
+        workerStartEpochMs: transportDiagnostics?.workerStartEpochMs ?? null,
+        workerResultPostEpochMs: transportDiagnostics?.workerResultPostEpochMs ?? null,
+        workerStageEpochs: transportDiagnostics?.workerStageEpochs ?? Object.freeze([]),
+        rafHeartbeatCount: finishHeartbeatDiagnostics.rafHeartbeatCount,
+        rafMaxGapMs: finishHeartbeatDiagnostics.rafMaxGapMs,
+        longTaskCount: finishHeartbeatDiagnostics.longTaskCount,
+        longTaskMaxDurationMs: finishHeartbeatDiagnostics.longTaskMaxDurationMs,
+        performanceObserverSupported: finishHeartbeatDiagnostics.performanceObserverSupported,
+        finishStartedEpochMs: finishHeartbeatDiagnostics.startedEpochMs,
+        finishCompletedEpochMs: finishHeartbeatDiagnostics.completedEpochMs,
         snapshotStageTimingsMs: Object.freeze(snapshotStageTimingsMs),
       })
       const denseRealityReconstruction = denseRealityBase
@@ -510,6 +624,7 @@ export class XRSessionService {
         realityRgbKeyframes,
       }
     } catch (error) {
+      finishHeartbeat?.stop()
       if (this.isActiveSession(session)) {
         await this.endActiveSession(session).catch(() => undefined)
       }

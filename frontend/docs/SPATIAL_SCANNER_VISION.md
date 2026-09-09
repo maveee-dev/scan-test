@@ -2752,3 +2752,27 @@ buckets. The original 25 mm grid still owns coherence and layer capacity.
 Live capture settings, canonical lifecycle rules, triangulation, second-layer
 policy, M7, and customization are unchanged. Physical coverage, sharpness, and
 mobile Finish-time improvement remain unclaimed until one M8.7.1.6 POCO scan.
+
+### M8.8 — Layered Measured Surface Field Feasibility (decision)
+
+The M8.7.1.6 POCO review establishes a practical quality ceiling for the
+current exact/repeated-surface surfel path under the measured depth spread.
+M8.8 is therefore a bounded offline worker-only feasibility milestone, not a
+production rewrite or a new scanner build. It will compare the current surfel
+baseline with single-field, layered/discontinuity-aware measured-field and
+image-backed controls using the identical retained physical capture, exact
+per-surface projected coverage, real-depth ownership, layer preservation and
+Finish/resource instrumentation. See
+[M8.8 layered measured surface field feasibility](M8_8_LAYERED_MEASURED_SURFACE_FIELD_FEASIBILITY.md).
+
+No production rewrite proceeds until the M8.8 stop/go criteria pass. M7,
+customization and the M8.7.1.6 build marker remain frozen during this
+feasibility milestone.
+
+The implemented preview keeps the baseline authoritative and stores the
+measured-only M8.8 candidate separately for same-capture comparison. The
+preview exposes clearly labeled baseline and experimental modes on one
+renderer/camera/OrbitControls instance, lazily transfers the experimental
+surfel graph only when selected, and records local mount/first-restored-surface
+paint timing without mutating the frozen scan result; physical POCO validation
+and the GO/STOP decision remain pending.

@@ -169,6 +169,8 @@ export interface CanonicalRealityFusionDiagnostics {
     uncertainParallelLayer: number
     falseDuplicate: number
   }>
+  /** Added only by the M8.8 A/B envelope; production replay remains unchanged. */
+  readonly inputSnapshotSignature?: string
 }
 
 export interface CanonicalCompletenessStage {
