@@ -29,6 +29,7 @@ interface ScannerPageProps {
   onFinishScan: () => void
   onStartNewScan: () => void
   onDiscardScan: () => void
+  onExit: () => void
 }
 
 interface CapabilityRowProps {
@@ -127,6 +128,7 @@ function ScannerPage({
   onFinishScan,
   onStartScan,
   onStartNewScan,
+  onExit,
   overlayRootRef,
   pointPreviewCanvasRef,
   sessionState,
@@ -214,7 +216,15 @@ function ScannerPage({
             <span className="brand-mark" aria-hidden="true" />
             Spatial Scanner
           </span>
-          <span className="header-status">System online</span>
+          <div className="scanner-header-actions">
+            <span className="header-status">System online</span>
+            {!isActive ? (
+              <button type="button" className="scanner-exit-button" onClick={onExit}>
+                <span aria-hidden="true">←</span>
+                Back to site
+              </button>
+            ) : null}
+          </div>
         </header>
 
         <main

@@ -3,7 +3,11 @@ import ScannerPage from '../components/ScannerPage'
 import { useScannerSession } from '../hooks/useScannerSession'
 import { useWebXRSupport } from '../hooks/useWebXRSupport'
 
-function ScannerPageContainer() {
+interface ScannerPageContainerProps {
+  onExit: () => void
+}
+
+function ScannerPageContainer({ onExit }: ScannerPageContainerProps) {
   const overlayRootRef = useRef<HTMLDivElement>(null)
   const pointPreviewCanvasRef = useRef<HTMLCanvasElement>(null)
   const checkState = useWebXRSupport()
@@ -26,6 +30,7 @@ function ScannerPageContainer() {
       onFinishScan={sessionController.finishScan}
       onStartNewScan={sessionController.startNewScan}
       onDiscardScan={sessionController.discardScan}
+      onExit={onExit}
       sessionState={sessionController.sessionState}
       liveMap={sessionController.liveMap}
     />
