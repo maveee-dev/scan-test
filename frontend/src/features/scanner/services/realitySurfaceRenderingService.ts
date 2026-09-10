@@ -61,6 +61,9 @@ export interface RealitySurfaceRenderStats {
   readonly p95AcceptedTriangleEdgeMeters: number
   readonly memoryBytes: number
   readonly renderColorStatistics: RealityColorStatistics
+  /** Optional indexed-atlas estimates; browser upload time is not included. */
+  readonly gpuBytesEstimate?: number
+  readonly drawCalls?: number
 }
 
 export interface RealitySurfaceRenderResources {
@@ -187,6 +190,12 @@ export interface RealityScreenSpaceCoverageDiagnostics {
   readonly holeFraction: number
   readonly rasterTests: number
   readonly overlapTestsPerUsefulPixel: number
+  /** Triangle-buffer audit fields; absent for the legacy surfel audit. */
+  readonly overdrawTestsPerUsefulPixel?: number
+  readonly depthCompetitionOver22mm?: number
+  readonly depthCompetitionOver50mm?: number
+  readonly boundaryPixelCount?: number
+  readonly boundaryPixelFraction?: number
 }
 
 /**
@@ -273,6 +282,126 @@ export function auditRealitySurfaceScreenSpace(
     holeFraction: 1 - usefulPixelCount / Math.max(1, rasterWidth * rasterHeight),
     rasterTests,
     overlapTestsPerUsefulPixel: rasterTests / Math.max(1, usefulPixelCount),
+  })
+}
+
+/**
+ * Deterministic screen-space audit for indexed or unindexed triangle buffers.
+ * This is a camera/raster diagnostic only: it cannot identify physical walls,
+ * semantic surfaces, or whether a hidden triangle is a true occlusion.
+ */
+export function auditRealityTriangleScreenSpace(
+  geometry: THREE.BufferGeometry,
+  camera: THREE.Camera,
+  viewportWidth: number,
+  viewportHeight: number,
+): RealityScreenSpaceCoverageDiagnostics {
+  const width = Math.max(1, Math.floor(viewportWidth))
+  const height = Math.max(1, Math.floor(viewportHeight))
+  const rasterScale = Math.min(1, 256 / width, 256 / height)
+  const rasterWidth = Math.max(1, Math.round(width * rasterScale))
+  const rasterHeight = Math.max(1, Math.round(height * rasterScale))
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()
+  const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3)
+  const depthBuffer = new Float32Array(rasterWidth * rasterHeight)
+  depthBuffer.fill(Infinity)
+  const ownerBuffer = new Int32Array(rasterWidth * rasterHeight)
+  ownerBuffer.fill(-1)
+  const projectScratch = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()]
+  const viewScratch = new THREE.Vector3()
+  const viewDepthScratch = [0, 0, 0]
+  let frustumRejectedPrimitiveCount = 0
+  let inFrustumPrimitiveCount = 0
+  let rasterTests = 0
+  let depthCompetitionOver22mm = 0
+  let depthCompetitionOver50mm = 0
+  let overdrawTests = 0
+  camera.updateMatrixWorld()
+  const readIndex = (corner: number, triangle: number): number => index
+    ? index.getX(triangle * 3 + corner)
+    : triangle * 3 + corner
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    let invalid = false
+    let allLeft = true, allRight = true, allBelow = true, allAbove = true, allNear = true, allFar = true
+    for (let corner = 0; corner < 3; corner += 1) {
+      const source = readIndex(corner, triangle)
+      projectScratch[corner].set(position.getX(source), position.getY(source), position.getZ(source)).project(camera)
+      const projected = projectScratch[corner]
+      viewScratch.set(position.getX(source), position.getY(source), position.getZ(source)).applyMatrix4(camera.matrixWorldInverse)
+      viewDepthScratch[corner] = -viewScratch.z
+      if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || !Number.isFinite(projected.z) || !Number.isFinite(viewScratch.z) || -viewScratch.z <= 0) invalid = true
+      allLeft &&= projected.x < -1
+      allRight &&= projected.x > 1
+      allBelow &&= projected.y < -1
+      allAbove &&= projected.y > 1
+      allNear &&= projected.z < -1
+      allFar &&= projected.z > 1
+    }
+    if (invalid || allLeft || allRight || allBelow || allAbove || allNear || allFar) {
+      frustumRejectedPrimitiveCount += 1
+      continue
+    }
+    inFrustumPrimitiveCount += 1
+    const a = projectScratch[0], b = projectScratch[1], c = projectScratch[2]
+    const ax = (a.x * .5 + .5) * rasterWidth, ay = (1 - (a.y * .5 + .5)) * rasterHeight
+    const bx = (b.x * .5 + .5) * rasterWidth, by = (1 - (b.y * .5 + .5)) * rasterHeight
+    const cx = (c.x * .5 + .5) * rasterWidth, cy = (1 - (c.y * .5 + .5)) * rasterHeight
+    const denominator = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    if (Math.abs(denominator) <= 1e-9) continue
+    const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx))), x1 = Math.min(rasterWidth - 1, Math.ceil(Math.max(ax, bx, cx)))
+    const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy))), y1 = Math.min(rasterHeight - 1, Math.ceil(Math.max(ay, by, cy)))
+    for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
+      const px = x + .5, py = y + .5
+      const wa = ((by - cy) * (px - cx) + (cx - bx) * (py - cy)) / denominator
+      const wb = ((cy - ay) * (px - cx) + (ax - cx) * (py - cy)) / denominator
+      const wc = 1 - wa - wb
+      if (wa < 0 || wb < 0 || wc < 0) continue
+      rasterTests += 1
+      const pixel = y * rasterWidth + x
+      // Use camera-space metres for visibility and the 22/50 mm competition
+      // counters; NDC z is non-linear and cannot be interpreted as metres.
+      const depth = wa * viewDepthScratch[0] + wb * viewDepthScratch[1] + wc * viewDepthScratch[2]
+      if (ownerBuffer[pixel] >= 0) {
+        overdrawTests += 1
+        const separation = Math.abs(depth - depthBuffer[pixel])
+        if (separation > .022) depthCompetitionOver22mm += 1
+        if (separation > .05) depthCompetitionOver50mm += 1
+      }
+      if (depth < depthBuffer[pixel]) {
+        depthBuffer[pixel] = depth
+        ownerBuffer[pixel] = triangle
+      }
+    }
+  }
+  let usefulPixelCount = 0, visiblePrimitiveCount = 0, boundaryPixelCount = 0
+  for (let pixel = 0; pixel < depthBuffer.length; pixel += 1) {
+    if (depthBuffer[pixel] === Infinity) continue
+    usefulPixelCount += 1
+    const x = pixel % rasterWidth, y = Math.floor(pixel / rasterWidth)
+    if (x === 0 || y === 0 || x === rasterWidth - 1 || y === rasterHeight - 1
+      || depthBuffer[pixel - 1] === Infinity || depthBuffer[pixel + 1] === Infinity
+      || depthBuffer[pixel - rasterWidth] === Infinity || depthBuffer[pixel + rasterWidth] === Infinity) boundaryPixelCount += 1
+  }
+  const finalWinners = new Uint8Array(triangleCount)
+  for (const owner of ownerBuffer) if (owner >= 0) finalWinners[owner] = 1
+  for (const winner of finalWinners) if (winner) visiblePrimitiveCount += 1
+  return Object.freeze({
+    rasterWidth, rasterHeight, rasterScale,
+    inputPrimitiveCount: triangleCount,
+    frustumRejectedPrimitiveCount,
+    inFrustumPrimitiveCount,
+    visiblePrimitiveCount,
+    depthHiddenPrimitiveCount: inFrustumPrimitiveCount - visiblePrimitiveCount,
+    usefulPixelCount,
+    holeFraction: 1 - usefulPixelCount / Math.max(1, rasterWidth * rasterHeight),
+    rasterTests,
+    overlapTestsPerUsefulPixel: rasterTests / Math.max(1, usefulPixelCount),
+    overdrawTestsPerUsefulPixel: overdrawTests / Math.max(1, usefulPixelCount),
+    depthCompetitionOver22mm,
+    depthCompetitionOver50mm,
+    boundaryPixelCount,
+    boundaryPixelFraction: boundaryPixelCount / Math.max(1, usefulPixelCount),
   })
 }
 
@@ -945,16 +1074,20 @@ function createSurfaceMaterial(opacity = 1): THREE.MeshBasicMaterial {
 }
 
 function getGeometryMemoryBytes(geometry: THREE.BufferGeometry): number {
-  return Object.values(geometry.attributes).reduce(
+  const attributes = Object.values(geometry.attributes).reduce(
     (total, attribute) => total + (attribute.array as ArrayBufferView).byteLength,
     0,
   )
+  return attributes + (geometry.index ? (geometry.index.array as ArrayBufferView).byteLength : 0)
 }
 
 /** Transfer only prepared numeric geometry, never XR resources or camera frames. */
 export interface PreparedRealitySurface {
-  geometries: { attributes: { name: string; array: Float32Array; itemSize: number }[] }[]
-  layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles' | 'textured'; opacity: number; textureBatch?: number }[]
+  geometries: {
+    attributes: { name: string; array: Float32Array | Uint8Array | Uint16Array | Uint32Array; itemSize: number; normalized?: boolean }[]
+    index?: { array: Uint16Array | Uint32Array; itemSize: number }
+  }[]
+  layers: { geometry: number; kind: 'points' | 'core' | 'feather' | 'triangles' | 'm810-triangles' | 'textured'; opacity: number; textureBatch?: number }[]
   /** Bounded real-camera RGB tiles. Each textured triangle belongs to exactly one tile. */
   textureBatches?: { keyframeId: number; width: number; height: number; rgb: Uint8Array }[]
   textureStats?: { textureBatchCount: number; texturedTriangleCount: number; fallbackTriangleCount: number; rgbBytes: number; commonPrimaryTriangleCount: number; commonSecondTriangleCount: number; commonThirdTriangleCount: number; commonLaterTriangleCount: number; noCommonViewTriangleCount: number; texelsPerMeter: { p50: number | null; p90: number | null; mean: number | null }; incidence: { p50: number | null; p90: number | null; mean: number | null }; distanceMeters: { p50: number | null; p90: number | null; mean: number | null }; spatialRegionCoverage: readonly { region: string; texturedTriangles: number; totalTriangles: number; percentage: number }[] }
@@ -974,15 +1107,16 @@ export interface PreparedRealitySurface {
 export function packRealitySurface(resources: RealitySurfaceRenderResources): PreparedRealitySurface {
   const geometries = resources.geometries.map((geometry) => ({
     attributes: Object.entries(geometry.attributes).map(([name, attribute]) => ({
-      name, array: attribute.array as Float32Array, itemSize: attribute.itemSize,
+      name, array: attribute.array as Float32Array | Uint8Array | Uint16Array | Uint32Array, itemSize: attribute.itemSize, normalized: attribute.normalized,
     })),
+    index: geometry.index ? { array: geometry.index.array as Uint16Array | Uint32Array, itemSize: geometry.index.itemSize } : undefined,
   }))
   const layers: PreparedRealitySurface['layers'] = []
   for (const object of resources.group.children) {
     if (!(object instanceof THREE.Mesh) && !(object instanceof THREE.Points)) continue
     const material = object.material
     if (Array.isArray(material)) continue
-    const kind = object instanceof THREE.Points ? 'points'
+    const kind = object.userData.m810PatchAtlas === true ? 'm810-triangles' : object instanceof THREE.Points ? 'points'
       : material instanceof THREE.ShaderMaterial ? (material.uniforms.uCorePass.value ? 'core' : 'feather')
         : 'triangles'
     const textureBatch = object.userData.textureBatch as number | undefined
@@ -997,7 +1131,8 @@ export function packRealitySurface(resources: RealitySurfaceRenderResources): Pr
 export function restoreRealitySurface(prepared: PreparedRealitySurface): RealitySurfaceRenderResources {
   const geometries = prepared.geometries.map((source) => {
     const geometry = new THREE.BufferGeometry()
-    for (const attribute of source.attributes) geometry.setAttribute(attribute.name, new THREE.BufferAttribute(attribute.array, attribute.itemSize))
+    for (const attribute of source.attributes) geometry.setAttribute(attribute.name, new THREE.BufferAttribute(attribute.array, attribute.itemSize, attribute.normalized ?? false))
+    if (source.index) geometry.setIndex(new THREE.BufferAttribute(source.index.array, source.index.itemSize))
     return geometry
   })
   const group = new THREE.Group(), materials: THREE.Material[] = []
@@ -1009,6 +1144,7 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
       texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter; texture.generateMipmaps = false; texture.needsUpdate = true
       return new THREE.MeshBasicMaterial({ map: texture, color: 0xffffff, depthTest: true, depthWrite: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
     })() : layer.kind === 'points' ? createPointMaterial()
+      : layer.kind === 'm810-triangles' ? new THREE.MeshBasicMaterial({ color: 0x26bfff, depthTest: true, depthWrite: true, side: THREE.DoubleSide, toneMapped: false, vertexColors: geometries[layer.geometry].getAttribute('color') !== undefined })
       : layer.kind === 'triangles' ? createSurfaceMaterial()
         : createSplatMaterial(layer.opacity, layer.kind === 'core')
     materials.push(material)
@@ -1016,8 +1152,11 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
       ? new THREE.Points(geometries[layer.geometry], material)
       : new THREE.Mesh(geometries[layer.geometry], material))
   }
+  const triangleGeometry = prepared.layers.find((layer) => layer.kind === 'triangles' || layer.kind === 'm810-triangles')
+    ? geometries[prepared.layers.find((layer) => layer.kind === 'triangles' || layer.kind === 'm810-triangles')!.geometry]
+    : null
   return { group, geometries, materials, stats: prepared.stats,
-    triangleTopology: prepared.triangleTopology ?? null, triangleGeometry: null }
+    triangleTopology: prepared.triangleTopology ?? null, triangleGeometry }
 }
 
 /**

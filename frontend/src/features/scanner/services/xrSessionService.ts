@@ -612,9 +612,10 @@ export class XRSessionService {
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
         provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
         consolidatedMeasurementMap: canonicalReality?.consolidatedMeasurementMap,
-        experimentalRealityReconstruction: canonicalReality?.experimental,
-        experimentalRealitySurfels: canonicalReality?.experimental?.surfels,
-        experimentalRealityDiagnostics: canonicalReality?.experimental?.diagnostics,
+        m810DepthKeyframePatchAtlas: canonicalReality?.m810,
+        m810InputSnapshotSignature: canonicalReality?.inputSnapshotSignature,
+        m810CandidateInputSnapshotSignature: canonicalReality?.candidateInputSnapshotSignature,
+        m810IdenticalInput: canonicalReality?.identicalInput,
       } : null
       const resultAssemblyMs = getPerformanceTimestamp() - assemblyStartedAt
 

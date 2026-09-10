@@ -2811,3 +2811,37 @@ defended layers or enter production. No POCO test is justified until it proves
 materially better useful-pixel coverage, preserved depth semantics, credible
 same-input runtime and bounded measured peak memory. M7 and customization
 remain frozen.
+
+### M8.10 — Depth-Keyframe Patch Atlas (experimental integration)
+
+M8.10 is the bounded worker/preview integration of the M8.9 source-owned
+depth-keyframe patches. It consumes the identical retained snapshot as the
+M8.7.1.6 baseline, adds exact source-grid UV and retained registered-RGB
+bytes, culls only deterministic <=1.5 mm same-facing duplicates, and packs a
+lazy indexed flat `BufferGeometry`. The baseline remains authoritative for
+Final Reality; M8.8 remains closed historical evidence.
+
+The implementation includes a deterministic indexed-triangle camera audit for
+frustum rejects, useful pixels, holes, overdraw, depth competition and
+boundary continuity. These are camera/raster metrics, not physical wall or
+ceiling measurements. A desktop 96×80×45 run produced 667,392 raw and 6,952
+retained triangles in observed isolated runs of 2,024.3–3,495.7 ms; the
+conservative decision reference is 3,495.7 ms (3.50 s), with the earlier run's
+redundancy accounting for about 3.00 s and a typed peak lower-bound estimate of
+69.2 MB. This is not a mobile or
+POCO result. A controlled same-snapshot synthetic fixture improved useful
+pixels 280 → 600 and reduced the raster hole fraction 0.9957 → 0.9908, but
+that proxy does not establish physical quality. The preview now records
+browser-proxy restore/setup, first-render and rolling render-call timings;
+exact GPU upload remains unmeasured.
+
+M8.10 therefore remains **Path C — PATCH ATLAS NOT VIABLE for current
+browser/mobile feasibility; no promotion** with the current verdict
+**PATCH ATLAS NOT VIABLE / PERFORMANCE FAIL / QUALITY BENEFIT UNDER
+INVESTIGATION**. This is not a rejection of all future patch-atlas research;
+new bounded browser/device evidence may revisit it. Flat baseline/candidate
+comparison is available with one persistent camera and depth-tested draw path;
+high-resolution image association and texture rewrite are explicitly outside
+this milestone. M7, customization, live capture, Finish cadence and the
+M8.7.1.6 production build marker remain frozen. See
+[M8.10 Depth-Keyframe Patch Atlas integration feasibility](M8_10_DEPTH_KEYFRAME_PATCH_ATLAS_INTEGRATION_FEASIBILITY.md).

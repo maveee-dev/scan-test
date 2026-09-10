@@ -2,15 +2,17 @@
 import { filterRealityConfidence, type RealityConfidenceFilterResult } from './realityConfidenceFiltering'
 import { refineRealityDisplay, type RealityDisplayRefinement } from './realityDisplayRefinement'
 import { appendRealityTextureBatches, createRealitySurfaceRenderResources, packRealitySurface } from './realitySurfaceRenderingService'
+import { createM810PatchAtlasPreparedSurface } from './m810DepthKeyframePatchRenderingService'
+import type { M810DepthKeyframePatchAtlasResult } from './m810DepthKeyframePatchAtlasService'
 import type { FinalizedDenseRealityReconstruction, FinalizedRealitySurfel } from '../types'
 import { PROVISIONAL_EXPIRY_REASON } from './canonicalRealityFusionService'
 
 let raw: FinalizedDenseRealityReconstruction | null = null
 let filtered: RealityConfidenceFilterResult | null = null
 let refined: RealityDisplayRefinement | null = null
-let experimentalSurfels: readonly FinalizedRealitySurfel[] | null = null
+let m810PatchAtlas: M810DepthKeyframePatchAtlasResult | null = null
 
-self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruction; experimentalSurfels?: readonly FinalizedRealitySurfel[]; mode: string; id: number }>) => {
+self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruction; m810PatchAtlas?: M810DepthKeyframePatchAtlasResult; mode: string; id: number }>) => {
   try {
     const { source, mode, id } = event.data
     if (source) {
@@ -19,15 +21,14 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       filtered = filterRealityConfidence(canonical)
       refined = refineRealityDisplay(filtered.surfels, source.appearanceKeyframes?.keyframes ?? [])
     }
-    if (event.data.experimentalSurfels && raw) {
-      experimentalSurfels = event.data.experimentalSurfels
+    if (event.data.m810PatchAtlas && raw) {
+      m810PatchAtlas = event.data.m810PatchAtlas
     }
     if (!raw || !filtered || !refined) return
     const live = raw.liveLightweightSurfels ?? raw.fusedRawSurfels ?? raw.surfels
     const canonical = raw.canonicalSurfels ?? raw.surfels
-    const useExperimental = mode === 'experimental' || mode === 'm88-experimental'
-    const activeSurfels = useExperimental ? (experimentalSurfels ?? []) : canonical
-    // M8.8 is deliberately a measured-only display mode. Do not eagerly run
+    const useM810 = mode === 'm810-atlas'
+    // M8.10 is deliberately a measured-only display mode. Do not eagerly run
     // the production confidence/refinement pipeline for it on initial mount.
     // If a future candidate-refined mode is added, it can opt into these arms.
     const activeFiltered = filtered
@@ -83,8 +84,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       : mode === 'retained' ? consolidatedMeasured
       : mode === 'raw-measured' ? measured
       : mode === 'live' || mode === 'fused-raw' || mode === 'raw' || mode === 'density' ? live
-      : mode === 'canonical' || mode === 'baseline-canonical' ? canonical
-      : useExperimental ? activeSurfels
+      : mode === 'canonical' || mode === 'baseline-canonical' || mode === 'baseline-flat-triangles' ? canonical
       : mode === 'provisional-expiry' ? expirySurfels
       : mode === 'confidence' ? activeFiltered.surfels
       : mode === 'base-color' ? activeRefined.geometry
@@ -92,13 +92,12 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       : mode === 'canonical-triangulated' || mode === 'triangulated' ? activeRefined.geometry
       : mode === 'color' || mode === 'high-res' || mode === 'textured' ? activeRefined.appearance : activeRefined.combined
     const diagnostic = ['raw-accepted', 'raw-measured', 'live', 'fused-raw', 'canonical', 'confidence', 'provisional-expiry', 'layers', 'discontinuities', 'new', 'views', 'reveal', 'trajectory'].includes(mode)
-    const temporalSurfels = useExperimental ? activeSurfels : canonical
+    const temporalSurfels = canonical
     const latest = temporalSurfels.reduce((time, s) => Math.max(time, s.firstObservedAt ?? 0), 0)
     const earliest = temporalSurfels.reduce((time, s) => Math.min(time, s.firstObservedAt ?? 0), latest)
     const observer = raw.qualityTelemetry?.trajectory[0]?.position ?? { x: 0, y: 0, z: 0 }
     const stageDisplay = mode === 'live' || mode === 'fused-raw' ? live.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : s.stabilityClass === 'low' ? { r: 1, g: .65, b: .08 } : { r: 1, g: .15, b: .08 } }))
-      : mode === 'canonical' || mode === 'baseline-canonical' ? canonical.map((s) => ({ ...s, colorRgb: { r: .15, g: .75, b: 1 } }))
-      : useExperimental ? activeSurfels.map((s) => ({ ...s, colorRgb: { r: .95, g: .55, b: .15 } }))
+      : mode === 'canonical' || mode === 'baseline-canonical' || mode === 'baseline-flat-triangles' ? canonical.map((s) => ({ ...s, colorRgb: { r: .15, g: .75, b: 1 } }))
       : mode === 'confidence' ? activeFiltered.surfels.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : { r: .15, g: .55, b: 1 } }))
       : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'hybrid' || mode === 'base-color' || mode === 'color' || mode === 'high-res' || mode === 'textured' || mode === 'final'
         ? surfels.map((s) => ({ ...s, colorRgb: s.colorRgb ?? { r: .34, g: .39, b: .43 } })) : surfels
@@ -111,12 +110,23 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       if (mode === 'reveal') { const t = ((s.firstObservedAt ?? 0) - earliest) / Math.max(1, latest - earliest); color = { r: t, g: 1 - t, b: .8 } }
       return { ...s, colorRgb: color }
     }) : stageDisplay
-    const comparisonMode = mode === 'baseline-canonical' || mode === 'experimental' || mode === 'm88-experimental'
+    const comparisonMode = mode === 'baseline-canonical' || mode === 'baseline-flat-triangles' || mode === 'm810-atlas'
     const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
-    // Keep the production/final display untouched. The two A/B arms use the
-    // measured normal/radius-aware splat path with a flat diagnostic color so
+    // Keep the production/final display untouched. The baseline control uses
+    // the existing measured path; M8.10 uses its indexed flat atlas so A/B
     // differences are geometry/coverage differences, not appearance choices.
-    const renderMode = comparisonMode ? 'splats' : pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
+    if (useM810 && m810PatchAtlas) {
+      const prepared = createM810PatchAtlasPreparedSurface(m810PatchAtlas)
+      const transfers = [...new Set([
+        ...prepared.geometries.flatMap((g) => [
+          ...g.attributes.map((a) => a.array.buffer as ArrayBuffer),
+          ...(g.index ? [g.index.array.buffer as ArrayBuffer] : []),
+        ]),
+      ])]
+      self.postMessage({ id, prepared, stats: activeRefined.stats, filterStats: activeFiltered.stats }, { transfer: transfers })
+      return
+    }
+    const renderMode = mode === 'baseline-flat-triangles' ? 'triangles' : comparisonMode ? 'splats' : pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
     const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
     if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, activeRefined.textureBindingCandidates, raw.appearanceKeyframes?.keyframes ?? [])
     const prepared = packRealitySurface(resources)

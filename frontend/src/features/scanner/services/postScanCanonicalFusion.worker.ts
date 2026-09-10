@@ -1,11 +1,8 @@
 /// <reference lib="webworker" />
 import { CanonicalRealityFusionService } from './canonicalRealityFusionService'
 import type { RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
-import {
-  buildSnapshotSignaturePair,
-  createRetainedRealityMeasurementSnapshotSignature,
-  LayeredMeasuredSurfaceFieldService,
-} from './layeredMeasuredSurfaceFieldService'
+import { createRetainedRealityMeasurementSnapshotSignature } from './layeredMeasuredSurfaceFieldService'
+import { buildM810DepthKeyframePatchAtlas } from './m810DepthKeyframePatchAtlasService'
 import type { PostScanCanonicalFusionResult, PostScanWorkerStageTiming } from './postScanCanonicalFusionService'
 
 function epochMs(): number { return Date.now() }
@@ -24,25 +21,32 @@ self.onmessage = (event: MessageEvent<{ id: number; snapshot: RetainedRealityMea
       self.postMessage({ id: event.data.id, stage, stageArm: 'baseline', stageEpochMs: epoch })
     })
     const baseline = Object.freeze({ ...baselineReplay, diagnostics: Object.freeze({ ...baselineReplay.diagnostics, inputSnapshotSignature: signature }) })
-    const experimental = new LayeredMeasuredSurfaceFieldService().reconstruct(event.data.snapshot, baseline, signature, (stage) => {
-      const epoch = epochMs()
-      workerStageEpochs.push({ arm: 'experimental', stage, epochMs: epoch })
-      self.postMessage({ id: event.data.id, stage, stageArm: 'experimental', stageEpochMs: epoch })
-    })
-    const signaturePair = buildSnapshotSignaturePair(event.data.snapshot, baseline, experimental, signature)
+    const m810 = buildM810DepthKeyframePatchAtlas(event.data.snapshot, signature)
     const result: PostScanCanonicalFusionResult = Object.freeze({
       ...baseline,
       baseline,
-      experimental,
-      ...signaturePair,
+      m810,
+      inputSnapshotSignature: signature,
+      baselineInputSnapshotSignature: signature,
+      candidateInputSnapshotSignature: m810.diagnostics.inputSnapshotSignature,
+      identicalInput: signature === m810.diagnostics.inputSnapshotSignature,
     })
     const workerResultPostEpochMs = epochMs()
     const transport = Object.freeze({ workerReceiveEpochMs, workerStartEpochMs, workerResultPostEpochMs, workerStageEpochs: Object.freeze(workerStageEpochs) })
-    self.postMessage({ id: event.data.id, result, transport }, [
+    const transferList = [
       result.baseline.consolidatedMeasurementMap.positions.buffer,
       result.baseline.diagnostics.provisionalExpiryMap.positions.buffer,
       result.baseline.diagnostics.provisionalExpiryMap.reasonCodes.buffer,
-    ])
+      result.m810.vertices.positions.buffer,
+      result.m810.vertices.normals.buffer,
+      result.m810.vertices.colors.buffer,
+      result.m810.vertices.colorValid.buffer,
+      result.m810.vertices.sourceGridUvs.buffer,
+      result.m810.vertices.sourceFrameSequences.buffer,
+      result.m810.vertices.sourceSampleIndices.buffer,
+      result.m810.indices.buffer,
+    ]
+    self.postMessage({ id: event.data.id, result, transport }, [...new Set(transferList)])
   } catch (error) {
     const workerError = error instanceof Error ? error : null
     self.postMessage({
