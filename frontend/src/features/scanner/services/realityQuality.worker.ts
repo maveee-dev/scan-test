@@ -98,7 +98,7 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
     const observer = raw.qualityTelemetry?.trajectory[0]?.position ?? { x: 0, y: 0, z: 0 }
     const stageDisplay = mode === 'live' || mode === 'fused-raw' ? live.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : s.stabilityClass === 'low' ? { r: 1, g: .65, b: .08 } : { r: 1, g: .15, b: .08 } }))
       : mode === 'canonical' || mode === 'baseline-canonical' ? canonical.map((s) => ({ ...s, colorRgb: { r: .15, g: .75, b: 1 } }))
-      : useExperimental ? activeSurfels.map((s) => ({ ...s, colorRgb: s.colorRgb ?? { r: .95, g: .55, b: .15 } }))
+      : useExperimental ? activeSurfels.map((s) => ({ ...s, colorRgb: { r: .95, g: .55, b: .15 } }))
       : mode === 'confidence' ? activeFiltered.surfels.map((s) => ({ ...s, colorRgb: s.stabilityClass === 'high' ? { r: .12, g: .85, b: .4 } : { r: .15, g: .55, b: 1 } }))
       : mode === 'geometry' || mode === 'canonical-triangulated' || mode === 'triangulated' || mode === 'hybrid' || mode === 'base-color' || mode === 'color' || mode === 'high-res' || mode === 'textured' || mode === 'final'
         ? surfels.map((s) => ({ ...s, colorRgb: s.colorRgb ?? { r: .34, g: .39, b: .43 } })) : surfels
@@ -111,8 +111,12 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       if (mode === 'reveal') { const t = ((s.firstObservedAt ?? 0) - earliest) / Math.max(1, latest - earliest); color = { r: t, g: 1 - t, b: .8 } }
       return { ...s, colorRgb: color }
     }) : stageDisplay
-    const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'baseline-canonical' || mode === 'experimental' || mode === 'm88-experimental' || mode === 'retained'
-    const renderMode = pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
+    const comparisonMode = mode === 'baseline-canonical' || mode === 'experimental' || mode === 'm88-experimental'
+    const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
+    // Keep the production/final display untouched. The two A/B arms use the
+    // measured normal/radius-aware splat path with a flat diagnostic color so
+    // differences are geometry/coverage differences, not appearance choices.
+    const renderMode = comparisonMode ? 'splats' : pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
     const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
     if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, activeRefined.textureBindingCandidates, raw.appearanceKeyframes?.keyframes ?? [])
     const prepared = packRealitySurface(resources)

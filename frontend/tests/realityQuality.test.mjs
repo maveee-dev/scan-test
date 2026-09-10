@@ -311,6 +311,13 @@ test('Finish reports actual worker stages and retains physical-style timing fiel
   assert.match(overlay,/className="xr-finish-processing"/);assert.match(overlay,/aria-busy="true"/);assert.match(overlay,/FINISH_STAGE_STEPS\.map/)
   assert.match(styles,/\.xr-finish-spinner[\s\S]*animation: xr-finish-spin/);assert.match(styles,/\.xr-finish-activity > span[\s\S]*animation: xr-finish-sweep/)
 })
+test('Finish snapshot group yields use an XR-safe event-loop task',()=>{
+  const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
+  const helper=session.slice(session.indexOf('function waitForFinishSnapshotYield'),session.indexOf('interface FinishHeartbeatDiagnostics'))
+  assert.match(helper,/setTimeout\(resolve, 0\)/)
+  assert.doesNotMatch(helper,/requestAnimationFrame/)
+  assert.match(session,/await waitForFinishSnapshotYield\(\)/)
+})
 test('finish click publishes processing state before the paint/task boundary',async()=>{
   const source=readFileSync(new URL('../src/features/scanner/hooks/useScannerSession.ts',import.meta.url),'utf8'),finish=source.slice(source.indexOf('const finishScan'))
   assert.ok(finish.indexOf("status: 'finishing'")<finish.indexOf('waitForFinishPaintBoundary()'))

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
 import { test } from 'node:test'
 import ts from 'typescript'
 
@@ -165,4 +166,64 @@ test('M8.8 field layers and memory remain bounded', () => {
   assert.ok(result.candidate.diagnostics.maximumObservedLayersPerCell <= 4)
   assert.ok(result.candidate.diagnostics.peakMemoryBytesEstimate >= result.candidate.diagnostics.numericMemoryBytes)
   assert.equal(result.candidate.diagnostics.candidateLayerSafetyViolations, 0)
+})
+
+function sameCellLayerFrames(layerCount) {
+  const normals = [
+    { x: 0, y: 0, z: 1 }, { x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 },
+    { x: 1, y: 1, z: 0 }, { x: 0, y: 0, z: 1 },
+  ]
+  return Array.from({ length: layerCount }, (_unused, index) =>
+    retainedFrame([point(index, 0, 0, index === 4 ? 2.024 : 2, normals[index])], index + 1))
+}
+
+test('M8.8 separates local layer saturation from global field exhaustion', () => {
+  const four = run(sameCellLayerFrames(4)).candidate.diagnostics
+  assert.equal(four.candidateLocalLayerCapacitySaturated, true)
+  assert.equal(four.candidateLocalLayerCapacitySaturatedCells, 1)
+  assert.equal(four.candidateLocalLayerCapacityRejectedMeasurements, 0)
+  assert.equal(four.candidateGlobalFieldCapacityRejectedMeasurements, 0)
+  assert.equal(four.candidateGlobalFieldCapacityReached, false)
+  assert.equal(four.candidateCapacityReached, false, 'four layers alone is not global exhaustion')
+
+  const five = run(sameCellLayerFrames(5)).candidate.diagnostics
+  assert.equal(five.candidateLocalLayerCapacityRejectedMeasurements, 1)
+  assert.equal(five.candidateGlobalFieldCapacityRejectedMeasurements, 0)
+  assert.equal(five.candidateGlobalFieldCapacityReached, false)
+  assert.equal(five.candidateCapacityRejectedMeasurements, 1)
+  assert.equal(five.candidateCapacityReached, true)
+})
+
+function stableDiagnostics(diagnostics) {
+  const { workerTimeMs: _workerTimeMs, workerStageTimingsMs: _workerStageTimingsMs, ...stable } = diagnostics
+  return stable
+}
+
+test('M8.8 indexed adjacency preserves deterministic output and bounds relation work', () => {
+  const frames = Array.from({ length: 5 }, (_unused, frame) => retainedFrame(plane(14), frame + 1))
+  const first = run(frames)
+  const second = run(frames.map((frame) => ({
+    ...frame,
+    denseFrame: { ...frame.denseFrame, points: frame.denseFrame.points.slice() },
+    normals: frame.normals.slice(),
+  })))
+  assert.deepEqual(first.candidate.surfels, second.candidate.surfels)
+  assert.deepEqual(first.candidate.ownership, second.candidate.ownership)
+  assert.deepEqual(stableDiagnostics(first.candidate.diagnostics), stableDiagnostics(second.candidate.diagnostics))
+  const diagnostics = first.candidate.diagnostics
+  assert.equal(diagnostics.coherenceCellLookups, diagnostics.observedLayerCount * 27)
+  assert.ok(diagnostics.coherenceAdjacencyUndirectedEdgeCount <= diagnostics.coherenceAdjacencyRelationChecks)
+  assert.ok(diagnostics.coherenceAdjacencyRelationChecks * 2 <= diagnostics.coherenceLayerCandidateVisits - diagnostics.observedLayerCount,
+    'each compatible layer pair is evaluated once, not once per direction')
+})
+
+test('M8.8 representative adjacency fixture stays inside a broad non-mobile timing budget', () => {
+  const frames = Array.from({ length: 4 }, (_unused, frame) => retainedFrame(plane(24), frame + 1))
+  const startedAt = performance.now()
+  const result = run(frames)
+  const elapsedMs = performance.now() - startedAt
+  assert.ok(result.candidate.diagnostics.coherenceAdjacencyRelationChecks > 0)
+  // This is intentionally a broad desktop/CI guard; the deterministic work
+  // bound above is the non-flaky regression signal, not this wall-clock ceiling.
+  assert.ok(elapsedMs < 5000, `representative M8.8 fixture took ${elapsedMs.toFixed(1)} ms`)
 })

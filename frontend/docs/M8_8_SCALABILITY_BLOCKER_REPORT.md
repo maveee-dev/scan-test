@@ -54,13 +54,17 @@ boundary varied with call-stack/JIT state. Baseline completed, while candidate
 and A/B failed only when candidate reconstruction was entered.
 
 **I — Fix and post-fix result.** The two unbounded diagnostic spreads are now
-iterative maxima with identical values. The permanent fixture executes
-SMALL=1,600, MEDIUM=12,800, PREVIOUS_STACK_BOUNDARY=124,800 and
-FULL_ROOM=130,000,
-then baseline-only, candidate-only and A/B on the identical 130,000-sample
-snapshot. All complete with no exception; the full candidate took 6,892 ms,
-baseline 1,342 ms and A/B 8,160 ms in the measured run. The full candidate's
-last stage is `applying-room-appearance`.
+iterative maxima with identical values. The coherence/promotion path now uses
+one indexed undirected adjacency pass for component BFS and coherent support,
+with deterministic legacy offset order and no capacity reduction. The
+permanent fixture executes SMALL=1,600, MEDIUM=12,800,
+PREVIOUS_STACK_BOUNDARY=124,800 and FULL_ROOM=130,000, then baseline-only,
+candidate-only and A/B on the identical 130,000-sample snapshot. All complete
+with no exception; the latest measured full candidate took 6,192 ms, baseline
+1,583 ms and A/B 6,706 ms (a separate bounded candidate-only run measured
+2,799 ms due normal JIT/GC variance). The full candidate's last stage is
+`applying-room-appearance`. These desktop results remain above the physical
+performance envelope and do not establish M8.8 quality benefit.
 
 **J — Match-grid correction.** Measured surfels remain 2.5 cm and all existing
 merge/depth/normal/same-frame gates remain. A separate linked match grid uses

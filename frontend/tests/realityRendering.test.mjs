@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { test } from 'node:test'
 import ts from 'typescript'
+import * as THREE from 'three'
 
 // Exercise the actual renderer without a browser, GPU, or additional test dependency.
 function moduleUrl(url, expose = '') {
@@ -58,7 +59,7 @@ if (process.argv.includes('--audit')) {
     ...(process.argv.includes('--capacity') ? [['near-capacity grid', plane(244)]] : []),
   ]) console.log(label, JSON.stringify(measure(surfels).result))
 } else {
-  test('2.5 cm measured plane has balanced coverage independent of IDs', () => {
+test('2.5 cm measured plane has balanced coverage independent of IDs', () => {
     const a = measure(plane())
     const b = measure(plane(32, .025, true))
     assert.equal(a.result.isolated, 0)
@@ -126,6 +127,27 @@ if (process.argv.includes('--audit')) {
       for (const material of resources.materials) material.dispose()
     }
     assert.equal(JSON.stringify(surfels), before)
+  })
+  test('debug screen-space audit reports frustum loss, occlusion and useful pixels deterministically', () => {
+    const camera = new THREE.PerspectiveCamera(60, 320 / 240, .1, 20)
+    camera.position.set(0, 0, 0); camera.updateMatrixWorld()
+    const front = plane(10, .08).map((surfel) => ({ ...surfel, position: { ...surfel.position, z: -3 } }))
+    const back = front.slice(0, 20).map((surfel) => ({
+      ...surfel,
+      id: surfel.id + 1000,
+      // Same camera ray, farther depth: the raster audit must depth-hide these.
+      position: { x: surfel.position.x * 3.1 / 3, y: surfel.position.y * 3.1 / 3, z: -3.1 },
+    }))
+    const outside = { ...front[0], id: 9999, position: { x: 20, y: 0, z: -3 } }
+    const first = renderer.auditRealitySurfaceScreenSpace([...front, ...back, outside], camera, 320, 240)
+    const second = renderer.auditRealitySurfaceScreenSpace([...front, ...back, outside], camera, 320, 240)
+    assert.deepEqual(first, second)
+    assert.equal(first.inputPrimitiveCount, 121)
+    assert.ok(first.frustumRejectedPrimitiveCount >= 1)
+    assert.ok(first.depthHiddenPrimitiveCount >= back.length)
+    assert.ok(first.visiblePrimitiveCount > 0)
+    assert.ok(first.usefulPixelCount > 0)
+    assert.ok(first.holeFraction > 0 && first.holeFraction < 1)
   })
   test('distribution diagnostics distinguish genuine anisotropic sample rows', () => {
     const uniform = measure(plane()).index.distribution

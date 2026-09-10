@@ -58,6 +58,17 @@ function getEpochTimestamp(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.timeOrigin + performance.now()
 }
 
+/**
+ * Yield to a guaranteed event-loop task between large, synchronous Finish
+ * snapshot groups. Window rAF is intentionally not used: an immersive XR
+ * session may suspend Window rAF while XR frame processing is stopped.
+ */
+function waitForFinishSnapshotYield(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0)
+  })
+}
+
 interface FinishHeartbeatDiagnostics {
   readonly rafHeartbeatCount: number
   readonly rafMaxGapMs: number
@@ -192,6 +203,12 @@ export interface FinishPipelineDiagnostics {
     appearanceKeyframes: number
     retainedMeasurements: number
   }>
+  /** Wall-clock boundaries between synchronous snapshot groups. */
+  readonly snapshotGroupTimingsMs: readonly number[]
+  readonly snapshotSynchronousCpuMs: number
+  readonly snapshotYieldCount: number
+  readonly snapshotYieldEpochs: readonly number[]
+  readonly maxUninterruptedSnapshotTaskMs: number
 }
 
 export interface FinishInvocationTiming {
@@ -496,6 +513,20 @@ export class XRSessionService {
       const finishedAt = Date.now()
       const snapshotStageTimingsMs = { liveSurface: 0, spatialScan: 0, baseReality: 0, denseReality: 0,
         rgbKeyframes: 0, appearanceKeyframes: 0, retainedMeasurements: 0 }
+      const snapshotGroupTimingsMs: number[] = [], snapshotYieldEpochs: number[] = []
+      let snapshotGroupStartedAt = getPerformanceTimestamp(), snapshotSynchronousCpuMs = 0, maxUninterruptedSnapshotTaskMs = 0
+      const completeSnapshotGroup = (): void => {
+        const elapsed = getPerformanceTimestamp() - snapshotGroupStartedAt
+        snapshotGroupTimingsMs.push(elapsed)
+        snapshotSynchronousCpuMs += elapsed
+        maxUninterruptedSnapshotTaskMs = Math.max(maxUninterruptedSnapshotTaskMs, elapsed)
+      }
+      const yieldSnapshotGroup = async (): Promise<void> => {
+        completeSnapshotGroup()
+        snapshotYieldEpochs.push(getEpochTimestamp())
+        await waitForFinishSnapshotYield()
+        snapshotGroupStartedAt = getPerformanceTimestamp()
+      }
       const timedSnapshot = <T>(name: keyof typeof snapshotStageTimingsMs, producer: () => T): T => {
         const stageStartedAt = getPerformanceTimestamp()
         const value = producer()
@@ -507,6 +538,7 @@ export class XRSessionService {
       ))
       const realityGeometrySurfels = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getRealityFinalizationSurfels())
       const persistentSurfaceDiagnostics = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getDiagnostics())
+      await yieldSnapshotGroup()
       const finalizedScan = timedSnapshot('spatialScan', () => this.finalizedSpatialScanService.createSnapshot({
         startedAtMs: scanStartedAt,
         finishedAtMs: finishedAt,
@@ -522,19 +554,23 @@ export class XRSessionService {
         persistentSurfaceDiagnostics.surfelCapacity,
         persistentSurfaceDiagnostics.capacityReached,
       ))
+      await yieldSnapshotGroup()
       const rawDenseReality = timedSnapshot('denseReality', () => this.denseRealityReconstructionService.createSnapshot(
         finalizedScan.id,
         finalizedScan.referenceSpaceType,
         this.rawCameraService.isAvailable(),
       ))
+      await yieldSnapshotGroup()
       const realityRgbKeyframes = timedSnapshot('rgbKeyframes', () => this.realityRgbKeyframeService.createSnapshot(
         finalizedScan.id,
         this.rawCameraService.isAvailable(),
       ))
       const depth = this.depthService.getDiagnostics()
       const liveRgb = this.rawCameraService.getDiagnostics(false)
+      await yieldSnapshotGroup()
       const appearanceKeyframes = timedSnapshot('appearanceKeyframes', () => this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable()))
       const retainedMeasurements = timedSnapshot('retainedMeasurements', () => this.retainedMeasurementService.createSnapshot())
+      completeSnapshotGroup()
       const retainedMeasurementFinalizationMs = getPerformanceTimestamp() - finalizationStartedAt
       const canonicalStartedAt = getPerformanceTimestamp()
       const transportState: { value: PostScanCanonicalFusionTransportDiagnostics | null } = { value: null }
@@ -613,6 +649,11 @@ export class XRSessionService {
         finishStartedEpochMs: finishHeartbeatDiagnostics.startedEpochMs,
         finishCompletedEpochMs: finishHeartbeatDiagnostics.completedEpochMs,
         snapshotStageTimingsMs: Object.freeze(snapshotStageTimingsMs),
+        snapshotGroupTimingsMs: Object.freeze([...snapshotGroupTimingsMs]),
+        snapshotSynchronousCpuMs,
+        snapshotYieldCount: snapshotYieldEpochs.length,
+        snapshotYieldEpochs: Object.freeze([...snapshotYieldEpochs]),
+        maxUninterruptedSnapshotTaskMs,
       })
       const denseRealityReconstruction = denseRealityBase
         ? Object.freeze({ ...denseRealityBase, finishPipelineDiagnostics })

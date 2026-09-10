@@ -1,6 +1,7 @@
 # M8.8 — Layered Measured Surface Field Feasibility
 
-Status: BLOCKED pending a physical large-scan validation on the POCO F5.
+Status: PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION; blocked pending
+physical large-scan validation on the POCO F5.
 The bounded software regression now completes the representative synthetic
 room envelope, but this does not advance the scanner build marker, unfreeze
 M7/customization, or replace the M8.7.1.6 production baseline.
@@ -18,6 +19,12 @@ or making browser WebXR on the POCO F5 unacceptable. The next milestone is an
 offline, worker-only A/B using the identical retained physical capture. It is
 not a production rewrite and it must stop if the resource or layer-safety
 gates below fail.
+
+The current bounded optimization is still investigation-only. Desktop
+fixtures show materially less duplicate coherence work, but the representative
+large-arm worker remains above the provisional performance envelope. No
+physical quality benefit is claimed until the identical POCO capture is
+replayed and per-surface coverage is measured.
 
 ## A. First bad stage and exact domains
 
@@ -374,3 +381,44 @@ baseline mount does not serialize the experimental graph.
 Preview modes explicitly expose **M8.7.1.6 Baseline Canonical** and
 **M8.8 Experimental Reconstruction** on one renderer/camera/OrbitControls
 instance; final/default output remains baseline.
+
+## M8.8 optimization evidence (current verdict remains STOP)
+
+The coherence pass now builds one indexed undirected compatibility adjacency
+from the existing 27 neighboring measured cells and reuses it for component
+BFS and coherent support/promotion. Offset and layer order are preserved so
+component IDs, representatives, ownership and floating-point reductions remain
+deterministic. The diagnostic still reports the legacy 27-cell lookup and
+candidate-visit definitions, plus relation checks and accepted undirected-edge
+counts.
+
+Capacity diagnostics now distinguish local four-layer saturation/rejects from
+global 240,000-layer field saturation/rejects. The legacy aggregate fields are
+retained. Reaching four layers in one cell no longer implies global capacity;
+the supplied physical `166` rejects are explained by the local branch because
+the measured `220,484` candidate layers remain below `240,000`.
+
+The experimental and baseline A/B preview modes use the same renderer/camera
+and flat diagnostic colors, but now use the existing measured normal/radius
+oriented rounded-square splat path rather than fixed 8 mm point centers. A
+bounded deterministic screen-space audit reports frustum rejects, visible and
+depth-hidden primitives, useful pixels, hole fraction and overlap tests. It is
+diagnostic only and does not invent physical major-surface counts.
+
+Finish snapshots retain their contents and worker input but yield after four
+major synchronous groups (live, spatial/base, dense, and RGB/diagnostic work)
+before dispatch. `FinishPipelineDiagnostics` records group timings, summed
+synchronous snapshot CPU, yield epochs/count and maximum uninterrupted snapshot
+group duration; the existing rAF/long-task and actual postMessage timestamps
+remain available.
+
+Measured desktop regression (same 130,000-sample synthetic fixture) improved
+candidate-only reconstruction from approximately `9,055.7 ms` before the
+adjacency change to `6,192.3 ms` after it; baseline was `1,583.3 ms` and the
+combined A/B was `6,706.3 ms` in the after run. A separate bounded run measured
+`2,798.9 ms` candidate-only due normal JIT/GC variance. These are not POCO
+measurements. The worker remains above the provisional `<=8 s and <=1.25x`
+physical gate when the A/B and input cost are considered, so the current
+verdict is **PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION**. No
+production promotion, M7/customization change, capacity increase or physical
+scan request follows from this result.

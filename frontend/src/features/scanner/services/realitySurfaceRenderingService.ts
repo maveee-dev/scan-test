@@ -174,6 +174,108 @@ export function getMeasuredCellFootprintAlpha(localX: number, localY: number): n
   return alpha < SPLAT_ALPHA_THRESHOLD ? 0 : alpha
 }
 
+export interface RealityScreenSpaceCoverageDiagnostics {
+  readonly rasterWidth: number
+  readonly rasterHeight: number
+  readonly rasterScale: number
+  readonly inputPrimitiveCount: number
+  readonly frustumRejectedPrimitiveCount: number
+  readonly inFrustumPrimitiveCount: number
+  readonly visiblePrimitiveCount: number
+  readonly depthHiddenPrimitiveCount: number
+  readonly usefulPixelCount: number
+  readonly holeFraction: number
+  readonly rasterTests: number
+  readonly overlapTestsPerUsefulPixel: number
+}
+
+/**
+ * Deterministic, bounded screen-space audit for the experimental A/B preview.
+ * It mirrors the measured splat footprint (normal-derived tangent basis and
+ * surfel radius), depth tests a downsampled viewport, and never creates or
+ * mutates geometry. The downsample keeps a large physical capture from making
+ * the UI thread spend unbounded time on diagnostics.
+ */
+export function auditRealitySurfaceScreenSpace(
+  surfels: readonly FinalizedRealitySurfel[],
+  camera: THREE.Camera,
+  viewportWidth: number,
+  viewportHeight: number,
+): RealityScreenSpaceCoverageDiagnostics {
+  const width = Math.max(1, Math.floor(viewportWidth))
+  const height = Math.max(1, Math.floor(viewportHeight))
+  const rasterScale = Math.min(1, 256 / width, 256 / height)
+  const rasterWidth = Math.max(1, Math.round(width * rasterScale))
+  const rasterHeight = Math.max(1, Math.round(height * rasterScale))
+  const depthBuffer = new Float32Array(rasterWidth * rasterHeight)
+  depthBuffer.fill(Infinity)
+  const writesByPrimitive = new Uint8Array(surfels.length)
+  const center = new THREE.Vector3(), viewPosition = new THREE.Vector3(), normal = new THREE.Vector3()
+  const tangent = new THREE.Vector3(), bitangent = new THREE.Vector3()
+  const edgeU = new THREE.Vector3(), edgeV = new THREE.Vector3(), screenCenter = new THREE.Vector3(), screenU = new THREE.Vector3(), screenV = new THREE.Vector3()
+  let frustumRejectedPrimitiveCount = 0
+  let inFrustumPrimitiveCount = 0
+  let rasterTests = 0
+  camera.updateMatrixWorld()
+  const project = (point: THREE.Vector3, target: THREE.Vector3): THREE.Vector3 => target.copy(point).project(camera)
+  const addDepthTestedFootprint = (surfelIndex: number, surfel: FinalizedRealitySurfel, depth: number): void => {
+    const radius = Math.max(POSITION_EPSILON, surfel.radius)
+    normal.set(surfel.normal.x, surfel.normal.y, surfel.normal.z)
+    if (normal.lengthSq() <= POSITION_EPSILON) return
+    normal.normalize()
+    getStableTangent(normal, tangent)
+    bitangent.crossVectors(normal, tangent).normalize()
+    edgeU.copy(center).addScaledVector(tangent, radius)
+    edgeV.copy(center).addScaledVector(bitangent, radius * SPLAT_MINOR_AXIS_SCALE)
+    project(center, screenCenter); project(edgeU, screenU); project(edgeV, screenV)
+    const radiusX = Math.max(0.75, Math.abs(screenU.x - screenCenter.x) * rasterWidth * 0.5)
+    const radiusY = Math.max(0.75, Math.abs(screenV.y - screenCenter.y) * rasterHeight * 0.5)
+    const centerX = (screenCenter.x * 0.5 + 0.5) * rasterWidth
+    const centerY = (1 - (screenCenter.y * 0.5 + 0.5)) * rasterHeight
+    const x0 = Math.max(0, Math.floor(centerX - radiusX)), x1 = Math.min(rasterWidth - 1, Math.ceil(centerX + radiusX))
+    const y0 = Math.max(0, Math.floor(centerY - radiusY)), y1 = Math.min(rasterHeight - 1, Math.ceil(centerY + radiusY))
+    for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
+      const dx = (x + .5 - centerX) / radiusX, dy = (y + .5 - centerY) / radiusY
+      if (dx * dx + dy * dy > 1) continue
+      rasterTests += 1
+      const pixel = y * rasterWidth + x
+      if (depth < depthBuffer[pixel]) {
+        depthBuffer[pixel] = depth
+        writesByPrimitive[surfelIndex] = 1
+      }
+    }
+  }
+  for (let surfelIndex = 0; surfelIndex < surfels.length; surfelIndex += 1) {
+    const surfel = surfels[surfelIndex]
+    center.set(surfel.position.x, surfel.position.y, surfel.position.z)
+    viewPosition.copy(center).applyMatrix4(camera.matrixWorldInverse)
+    const depth = -viewPosition.z
+    const projected = project(center, screenCenter)
+    if (!Number.isFinite(depth) || depth <= 0 || !Number.isFinite(projected.x) || !Number.isFinite(projected.y) || !Number.isFinite(projected.z) ||
+      projected.x < -1 || projected.x > 1 || projected.y < -1 || projected.y > 1 || projected.z < -1 || projected.z > 1) {
+      frustumRejectedPrimitiveCount += 1
+      continue
+    }
+    inFrustumPrimitiveCount += 1
+    addDepthTestedFootprint(surfelIndex, surfel, depth)
+  }
+  let usefulPixelCount = 0, visiblePrimitiveCount = 0
+  for (const depth of depthBuffer) if (depth < Infinity) usefulPixelCount += 1
+  for (const writes of writesByPrimitive) if (writes > 0) visiblePrimitiveCount += 1
+  return Object.freeze({
+    rasterWidth, rasterHeight, rasterScale,
+    inputPrimitiveCount: surfels.length,
+    frustumRejectedPrimitiveCount,
+    inFrustumPrimitiveCount,
+    visiblePrimitiveCount,
+    depthHiddenPrimitiveCount: inFrustumPrimitiveCount - visiblePrimitiveCount,
+    usefulPixelCount,
+    holeFraction: 1 - usefulPixelCount / Math.max(1, rasterWidth * rasterHeight),
+    rasterTests,
+    overlapTestsPerUsefulPixel: rasterTests / Math.max(1, usefulPixelCount),
+  })
+}
+
 interface NeighborCandidate {
   readonly index: number
   readonly distanceSquared: number

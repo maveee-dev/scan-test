@@ -86,12 +86,23 @@ export interface LayeredMeasuredSurfaceFieldDiagnostics {
   readonly candidateRepresentedOutsideObservedWorldCells: number
   readonly candidateRejectedWorldCells: number
   readonly candidateRejectedLayerCapacityCells: number
+  /** Local four-layer cap: measurements rejected after a cell already has four layers. */
+  readonly candidateLocalLayerCapacityRejectedMeasurements: number
+  /** Global field cap: measurements rejected after the field reaches 240,000 layers. */
+  readonly candidateGlobalFieldCapacityRejectedMeasurements: number
+  /** At least one cell reached the local four-layer limit, whether or not a fifth sample was rejected. */
+  readonly candidateLocalLayerCapacitySaturated: boolean
+  /** The global 240,000-layer field limit was reached or rejected a measurement. */
+  readonly candidateGlobalFieldCapacityReached: boolean
+  readonly candidateLocalLayerCapacitySaturatedCells: number
   readonly candidateCapacityRejectedMeasurements: number
   readonly candidateCapacityReached: boolean
   readonly candidateCellLookups: number
   readonly candidateLayerCandidateVisits: number
   readonly coherenceCellLookups: number
   readonly coherenceLayerCandidateVisits: number
+  readonly coherenceAdjacencyRelationChecks: number
+  readonly coherenceAdjacencyUndirectedEdgeCount: number
   readonly maximumFieldLayers: number
   readonly promotedLayerCount: number
   readonly observedLayerCount: number
@@ -211,6 +222,14 @@ interface SurfaceComponent {
   v: SpatialPoint
 }
 
+interface LayerAdjacencyIndex {
+  readonly neighbors: readonly Uint32Array[]
+  readonly coherenceCellLookups: number
+  readonly coherenceLayerCandidateVisits: number
+  readonly coherenceAdjacencyRelationChecks: number
+  readonly coherenceAdjacencyUndirectedEdgeCount: number
+}
+
 interface SignatureHash {
   first: number
   second: number
@@ -218,6 +237,13 @@ interface SignatureHash {
 
 const NEIGHBOR_OFFSETS: readonly (readonly [number, number, number])[] = [-1, 0, 1]
   .flatMap((x) => [-1, 0, 1].flatMap((y) => [-1, 0, 1].map((z) => [x, y, z] as const)))
+const REVERSE_NEIGHBOR_OFFSET_INDEX = NEIGHBOR_OFFSETS.map(([x, y, z]) =>
+  NEIGHBOR_OFFSETS.findIndex(([candidateX, candidateY, candidateZ]) => candidateX === -x && candidateY === -y && candidateZ === -z),
+)
+// A layer index is bounded by maximumFieldLayers (240,000), so this keeps the
+// offset rank and layer index in one sortable integer without allocating edge
+// objects on every coherence visit.
+const ADJACENCY_LAYER_INDEX_BASE = 1 << 18
 
 const clamp = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value))
 
@@ -479,34 +505,86 @@ function componentOrientations(components: readonly SurfaceComponent[]): Map<num
   return orientations
 }
 
-function buildComponents(layers: readonly LayerAccumulator[]): SurfaceComponent[] {
-  const byCell = new Map<string, LayerAccumulator[]>()
-  for (const layer of layers) {
-    const values = byCell.get(layer.cellKey)
-    if (values) values.push(layer)
-    else byCell.set(layer.cellKey, [layer])
-  }
-  const visited = new Set<LayerAccumulator>(), components: SurfaceComponent[] = []
-  const cellCoordinates = (key: string): [number, number, number] => key.split(':').map(Number) as [number, number, number]
-  const addNeighbors = (layer: LayerAccumulator, visit: (neighbor: LayerAccumulator) => void): void => {
-    const [cx, cy, cz] = cellCoordinates(layer.cellKey)
-    for (const [dx, dy, dz] of NEIGHBOR_OFFSETS) {
-      const entries = byCell.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+/**
+ * Builds one deterministic, undirected compatibility graph for the measured
+ * layers. The old implementation walked the same 27 neighboring cells once
+ * for component BFS and again for coherence/promotion. We still account for
+ * every cell lookup/candidate visit, but evaluate each undirected layer pair
+ * once and reuse the ordered adjacency lists for both consumers.
+ */
+function buildLayerAdjacency(
+  layers: readonly LayerAccumulator[],
+  layersByCell: ReadonlyMap<string, readonly LayerAccumulator[]>,
+): LayerAdjacencyIndex {
+  const layerIndices = new Map<LayerAccumulator, number>()
+  const encodedNeighbors: number[][] = Array.from({ length: layers.length }, () => [])
+  for (let index = 0; index < layers.length; index += 1) layerIndices.set(layers[index], index)
+
+  let coherenceCellLookups = 0
+  let coherenceLayerCandidateVisits = 0
+  let coherenceAdjacencyRelationChecks = 0
+  let coherenceAdjacencyUndirectedEdgeCount = 0
+  for (let layerIndex = 0; layerIndex < layers.length; layerIndex += 1) {
+    const layer = layers[layerIndex]
+    const [cellX, cellY, cellZ] = layer.cellKey.split(':').map(Number) as [number, number, number]
+    for (let offsetIndex = 0; offsetIndex < NEIGHBOR_OFFSETS.length; offsetIndex += 1) {
+      const [offsetX, offsetY, offsetZ] = NEIGHBOR_OFFSETS[offsetIndex]
+      coherenceCellLookups += 1
+      const entries = layersByCell.get(`${cellX + offsetX}:${cellY + offsetY}:${cellZ + offsetZ}`)
       if (!entries) continue
+      // Preserve the legacy diagnostic definition: this includes same-cell
+      // entries and the source layer itself, which is skipped below.
+      coherenceLayerCandidateVisits += entries.length
       for (const neighbor of entries) {
-        if (neighbor === layer) continue
-        const relation = compatible(layer.representative.position, layer.representative.normal, neighbor.representative.position, neighbor.representative.normal)
-        if (relation.tangentDistance <= M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters && relation.planeResidual <= M88_LAYERED_FIELD_CONFIG.coherencePlaneResidualMeters && relation.normalDot >= M88_LAYERED_FIELD_CONFIG.minimumNormalDot) visit(neighbor)
+        const neighborIndex = layerIndices.get(neighbor)
+        if (neighborIndex === undefined || neighborIndex <= layerIndex) continue
+        coherenceAdjacencyRelationChecks += 1
+        const relation = compatible(
+          layer.representative.position,
+          layer.representative.normal,
+          neighbor.representative.position,
+          neighbor.representative.normal,
+        )
+        if (relation.tangentDistance > M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters ||
+          relation.planeResidual > M88_LAYERED_FIELD_CONFIG.coherencePlaneResidualMeters ||
+          relation.normalDot < M88_LAYERED_FIELD_CONFIG.minimumNormalDot) continue
+
+        coherenceAdjacencyUndirectedEdgeCount += 1
+
+        // Store the offset rank with the neighbor index. Sorting by this
+        // packed value reproduces the former per-layer offset/entry order,
+        // keeping component IDs, representatives, and floating-point sums
+        // deterministic while avoiding edge objects and pair-key strings.
+        encodedNeighbors[layerIndex].push(offsetIndex * ADJACENCY_LAYER_INDEX_BASE + neighborIndex)
+        encodedNeighbors[neighborIndex].push(REVERSE_NEIGHBOR_OFFSET_INDEX[offsetIndex] * ADJACENCY_LAYER_INDEX_BASE + layerIndex)
       }
     }
   }
-  for (const root of layers) {
-    if (visited.has(root)) continue
-    const queue = [root]; let queueIndex = 0; visited.add(root); const group: LayerAccumulator[] = []
+
+  const neighbors = encodedNeighbors.map((encoded) => {
+    encoded.sort((left, right) => left - right)
+    return Uint32Array.from(encoded, (value) => value % ADJACENCY_LAYER_INDEX_BASE)
+  })
+  return Object.freeze({ neighbors: Object.freeze(neighbors), coherenceCellLookups, coherenceLayerCandidateVisits, coherenceAdjacencyRelationChecks, coherenceAdjacencyUndirectedEdgeCount })
+}
+
+function buildComponents(
+  layers: readonly LayerAccumulator[],
+  adjacency: readonly Uint32Array[],
+): SurfaceComponent[] {
+  const visited = new Uint8Array(layers.length), components: SurfaceComponent[] = []
+  for (let rootIndex = 0; rootIndex < layers.length; rootIndex += 1) {
+    if (visited[rootIndex]) continue
+    const queue = [rootIndex]; let queueIndex = 0; visited[rootIndex] = 1
+    const group: LayerAccumulator[] = []
     while (queueIndex < queue.length) {
-      const current = queue[queueIndex++]
-      group.push(current)
-      addNeighbors(current, (neighbor) => { if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor) } })
+      const currentIndex = queue[queueIndex++]
+      group.push(layers[currentIndex])
+      for (const neighborIndex of adjacency[currentIndex]) {
+        if (visited[neighborIndex]) continue
+        visited[neighborIndex] = 1
+        queue.push(neighborIndex)
+      }
     }
     const normalSum = group.reduce((sum, layer) => ({ x: sum.x + layer.representative.normal.x, y: sum.y + layer.representative.normal.y, z: sum.z + layer.representative.normal.z }), { x: 0, y: 0, z: 0 })
     const normal = normalize(normalSum), origin = { ...group[0].representative.position }, basis = chooseTangentBasis(normal)
@@ -618,8 +696,10 @@ export class LayeredMeasuredSurfaceFieldService {
     const observedSourceKeys = new Set<string>()
     let inputObservations = 0, candidateConsolidatedMeasurements = 0, sameFrameConsolidated = 0
     const candidateRejectedCellKeys = new Set<string>(), candidateRejectedLayerCapacityCellKeys = new Set<string>()
-    let candidateCapacityRejectedMeasurements = 0, candidateCapacityReached = false
+    let candidateLocalLayerCapacityRejectedMeasurements = 0
+    let candidateGlobalFieldCapacityRejectedMeasurements = 0
     let candidateCellLookups = 0, candidateLayerCandidateVisits = 0, coherenceCellLookups = 0, coherenceLayerCandidateVisits = 0
+    let coherenceAdjacencyRelationChecks = 0, coherenceAdjacencyUndirectedEdgeCount = 0
     stageTimings.input = performance.now() - inputStartedAt
 
     let fieldIntegrationMs = 0
@@ -660,12 +740,12 @@ export class LayeredMeasuredSurfaceFieldService {
         if (!best) {
           if (layers.length >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell) {
             candidateRejectedCellKeys.add(cell); candidateRejectedLayerCapacityCellKeys.add(cell)
-            candidateCapacityRejectedMeasurements += 1; candidateCapacityReached = true
+            candidateLocalLayerCapacityRejectedMeasurements += 1
             continue
           }
           if (allLayers.length >= M88_LAYERED_FIELD_CONFIG.maximumFieldLayers) {
             candidateRejectedCellKeys.add(cell); candidateRejectedLayerCapacityCellKeys.add(cell)
-            candidateCapacityRejectedMeasurements += 1; candidateCapacityReached = true
+            candidateGlobalFieldCapacityRejectedMeasurements += 1
             continue
           }
           best = createLayerAccumulator(cell, observation)
@@ -679,31 +759,23 @@ export class LayeredMeasuredSurfaceFieldService {
 
     onStage?.('cleaning-surfaces')
     const coherenceStartedAt = performance.now()
-    const components = buildComponents(allLayers)
-    const layerCellCoordinates = (key: string): [number, number, number] => key.split(':').map(Number) as [number, number, number]
-    const layerNeighbors = (layer: LayerAccumulator, visit: (neighbor: LayerAccumulator) => void): void => {
-      const [cx, cy, cz] = layerCellCoordinates(layer.cellKey)
-      for (const [dx, dy, dz] of NEIGHBOR_OFFSETS) {
-        coherenceCellLookups += 1
-        const entries = layersByCell.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
-        if (!entries) continue
-        coherenceLayerCandidateVisits += entries.length
-        for (const neighbor of entries) {
-          if (neighbor === layer) continue
-          const relation = compatible(layer.representative.position, layer.representative.normal, neighbor.representative.position, neighbor.representative.normal)
-          if (relation.tangentDistance <= M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters && relation.planeResidual <= M88_LAYERED_FIELD_CONFIG.coherencePlaneResidualMeters && relation.normalDot >= M88_LAYERED_FIELD_CONFIG.minimumNormalDot) visit(neighbor)
-        }
-      }
-    }
-    for (const layer of allLayers) {
+    const adjacency = buildLayerAdjacency(allLayers, layersByCell)
+    const components = buildComponents(allLayers, adjacency.neighbors)
+    coherenceCellLookups = adjacency.coherenceCellLookups
+    coherenceLayerCandidateVisits = adjacency.coherenceLayerCandidateVisits
+    coherenceAdjacencyRelationChecks = adjacency.coherenceAdjacencyRelationChecks
+    coherenceAdjacencyUndirectedEdgeCount = adjacency.coherenceAdjacencyUndirectedEdgeCount
+    for (let layerIndex = 0; layerIndex < allLayers.length; layerIndex += 1) {
+      const layer = allLayers[layerIndex]
       const neighborFrames = new Set<number>(), localNeighborFrames = new Set<number>()
-      layerNeighbors(layer, (neighbor) => {
+      for (const neighborIndex of adjacency.neighbors[layerIndex]) {
+        const neighbor = allLayers[neighborIndex]
         layer.coherentNeighborCount += 1
         for (const frame of neighbor.supportFrames) {
           neighborFrames.add(frame)
           if (!layer.supportFrames.has(frame)) localNeighborFrames.add(frame)
         }
-      })
+      }
       layer.crossFrameNeighborFrames = localNeighborFrames
       layer.crossFrameNeighborCount = localNeighborFrames.size
       // Direct same-cell multi-frame support is sufficient. A layer supported
@@ -750,6 +822,13 @@ export class LayeredMeasuredSurfaceFieldService {
     const observedLayerCount = allLayers.length
     const maximumObservedLayersPerCell = maximumLayersPerCell(layersByCell)
     const maximumCandidateLayersPerCell = maximumLayersPerCell(layersByCell, true)
+    const candidateLocalLayerCapacitySaturatedCells = [...layersByCell.values()].filter((layers) => layers.length >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell).length
+    const candidateLocalLayerCapacitySaturated = candidateLocalLayerCapacitySaturatedCells > 0
+    const candidateGlobalFieldCapacityReached = candidateGlobalFieldCapacityRejectedMeasurements > 0 || allLayers.length >= M88_LAYERED_FIELD_CONFIG.maximumFieldLayers
+    const candidateCapacityRejectedMeasurements = candidateLocalLayerCapacityRejectedMeasurements + candidateGlobalFieldCapacityRejectedMeasurements
+    // Keep the legacy aggregate field, but do not report global exhaustion just
+    // because one local cell reached its four-layer safety bound.
+    const candidateCapacityReached = candidateCapacityRejectedMeasurements > 0 || candidateGlobalFieldCapacityReached
     const candidateLayerSafetyViolations = [...layersByCell.values()].reduce((count, layers) => count + Math.max(0, layers.filter((layer) => layer.promoted).length - M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell), 0)
 
     const metricsStartedAt = performance.now()
@@ -897,12 +976,19 @@ export class LayeredMeasuredSurfaceFieldService {
       candidateRepresentedOutsideObservedWorldCells,
       candidateRejectedWorldCells: candidateRejectedCellKeys.size,
       candidateRejectedLayerCapacityCells: candidateRejectedLayerCapacityCellKeys.size,
+      candidateLocalLayerCapacityRejectedMeasurements,
+      candidateGlobalFieldCapacityRejectedMeasurements,
+      candidateLocalLayerCapacitySaturated,
+      candidateGlobalFieldCapacityReached,
+      candidateLocalLayerCapacitySaturatedCells,
       candidateCapacityRejectedMeasurements,
-      candidateCapacityReached: candidateCapacityReached || allLayers.length >= M88_LAYERED_FIELD_CONFIG.maximumFieldLayers || maximumObservedLayersPerCell >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell,
+      candidateCapacityReached,
       candidateCellLookups,
       candidateLayerCandidateVisits,
       coherenceCellLookups,
       coherenceLayerCandidateVisits,
+      coherenceAdjacencyRelationChecks,
+      coherenceAdjacencyUndirectedEdgeCount,
       maximumFieldLayers: M88_LAYERED_FIELD_CONFIG.maximumFieldLayers,
       promotedLayerCount: promotedLayers.length,
       observedLayerCount,
