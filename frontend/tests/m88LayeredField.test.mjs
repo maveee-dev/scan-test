@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { test } from 'node:test'
@@ -64,6 +65,18 @@ test('M8.8 clean measured plane promotes repeated source representatives', () =>
   assert.ok(result.candidate.diagnostics.candidateSurvivalPercentage > 0)
   assertExactOwnership(result)
   assert.ok(result.candidate.surfels.every((surfel) => result.input.frames.some((frame) => [...frame.denseFrame.points].some((value, index) => index % 3 === 0 && value === surfel.position.x))))
+  assert.ok(result.candidate.diagnostics.medoidDistanceVisitsBeforeEquivalent > result.candidate.diagnostics.medoidDistanceVisits)
+  assert.ok(result.candidate.diagnostics.medoidCandidateVisitsBeforeEquivalent >= result.candidate.diagnostics.medoidCandidateVisits)
+  assert.ok(result.candidate.diagnostics.crossFrameSupportedLayerCount > 0)
+  assert.ok(result.candidate.surfels.every((surfel) => surfel.viewObservationCount >= 1 && surfel.viewObservationCount <= 2))
+  assert.ok(result.candidate.surfels.some((surfel) => surfel.viewObservationCount === 2))
+  const observedWorldKeys = new Set()
+  for (const frame of result.input.frames) for (let sourceIndex = 0; sourceIndex < frame.denseFrame.valid.length; sourceIndex += 1) {
+    if (!frame.denseFrame.valid[sourceIndex] || !frame.normalValid[sourceIndex]) continue
+    const offset = sourceIndex * 3
+    observedWorldKeys.add(`${Math.floor(frame.denseFrame.points[offset] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(frame.denseFrame.points[offset + 1] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(frame.denseFrame.points[offset + 2] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}`)
+  }
+  assert.equal(result.candidate.diagnostics.uniqueObservedWorldCells, observedWorldKeys.size, 'world-cell index must equal the complete valid+normal observed domain')
   console.log('M8.8 synthetic clean A/B', JSON.stringify({ baselineCells: result.candidate.diagnostics.baselineRepresentedWorldCells, candidateCells: result.candidate.diagnostics.candidateRepresentedWorldCells, observedCells: result.candidate.diagnostics.uniqueObservedWorldCells, baselineSurvival: result.candidate.diagnostics.baselineSurvivalPercentage, candidateSurvival: result.candidate.diagnostics.candidateSurvivalPercentage, invented: result.candidate.diagnostics.candidateUnownedOrInventedCount }))
 })
 
@@ -199,6 +212,67 @@ function stableDiagnostics(diagnostics) {
   return stable
 }
 
+function semanticHash(result) {
+  return createHash('sha256').update(JSON.stringify({
+    surfels: result.candidate.surfels,
+    ownership: result.candidate.ownership,
+    diagnostics: {
+      candidateConsolidatedMeasurements: result.candidate.diagnostics.candidateConsolidatedMeasurements,
+      uniqueObservedWorldCells: result.candidate.diagnostics.uniqueObservedWorldCells,
+      candidateRepresentedWorldCells: result.candidate.diagnostics.candidateRepresentedWorldCells,
+      candidateUnownedOrInventedCount: result.candidate.diagnostics.candidateUnownedOrInventedCount,
+      coherentSurfaceComponents: result.candidate.diagnostics.coherentSurfaceComponents,
+      holeClasses: result.candidate.diagnostics.holeClasses,
+    },
+  })).digest('hex').slice(0, 16)
+}
+
+test('M8.8 numeric adjacency preserves HEAD semantic hashes across physical fixtures', () => {
+  const cases = {
+    clean: Array.from({ length: 5 }, (_unused, frame) => retainedFrame(plane(10), frame + 1)),
+    sparse: Array.from({ length: 3 }, (_unused, frame) => {
+      const wall = plane(12), samples = wall.filter((sample) => Math.abs(sample.id % 3) === frame)
+      return retainedFrame(samples, frame + 1, (frame + 1) * .05, { columns: 12, totalCount: 144, sourceIndices: samples.map((sample) => sample.id) })
+    }),
+    noisy: Array.from({ length: 6 }, (_unused, frame) => retainedFrame(plane(12).map((sample, index) => ({ ...sample, position: { ...sample.position, z: sample.position.z + Math.sin(index * 1.7 + frame) * .012 } })), frame + 1)),
+    close: Array.from({ length: 5 }, (_unused, frame) => retainedFrame([...plane(8, -2), ...plane(8, -2.028).map((sample, index) => ({ ...sample, id: index + 1000 })), ...plane(5, -1.92).map((sample, index) => ({ ...sample, id: index + 2000, position: { ...sample.position, x: sample.position.x + .35, y: sample.position.y + .1 } }))], frame + 1)),
+    recess: Array.from({ length: 5 }, (_unused, frame) => {
+      const front = plane(8, -2).filter((sample) => sample.position.x < 0)
+      const back = plane(8, -2.25).filter((sample) => sample.position.x >= 0).map((sample, index) => ({ ...sample, id: index + 1000 }))
+      const side = Array.from({ length: 32 }, (_unused, index) => point(index + 2000, 0, (index % 8) * .025 - .1, -2 - Math.floor(index / 8) * .025, { x: 1, y: 0, z: 0 }))
+      return retainedFrame([...front, ...side, ...back], frame + 1)
+    }),
+    falseForward: [retainedFrame(plane(10), 1), retainedFrame([...plane(10), ...plane(4, -1.95).map((sample, index) => ({ ...sample, id: index + 1000 }))], 2), retainedFrame(plane(10), 3), retainedFrame(plane(10), 4)],
+    gap: Array.from({ length: 4 }, (_unused, frame) => {
+      const wall = plane(12)
+      return retainedFrame([...wall.filter((sample) => sample.position.x < -.08), ...wall.filter((sample) => sample.position.x > .08)], frame + 1)
+    }),
+    empty: [],
+    single: [retainedFrame(plane(4), 1)],
+    saturation: sameCellLayerFrames(5),
+    orthogonal: Array.from({ length: 4 }, (_unused, frame) => retainedFrame(plane(6).map((sample) => ({ ...sample, normal: { x: 0, y: 1, z: 0 }, position: { ...sample.position, y: sample.position.y + frame * .04 } })), frame + 1)),
+    offsetComponents: Array.from({ length: 4 }, (_unused, frame) => retainedFrame([...plane(5, -2), ...plane(5, -2).map((sample, index) => ({ ...sample, id: index + 100, position: { ...sample.position, x: sample.position.x + .8 } }))], frame + 1)),
+    colorFallback: Array.from({ length: 4 }, (_unused, frame) => {
+      const frameData = retainedFrame(plane(5), frame + 1)
+      frameData.colorSourceIndices.fill(-1)
+      return frameData
+    }),
+  }
+  // The original seven values were captured from exact b6483f2 before the
+  // numeric-index change; the six additional cases are semantic locks added
+  // for this redesign and must remain stable thereafter.
+  const expected = {
+    clean: '2f1e8fcb01cb8fab', sparse: '67494cba7b0c76ce', noisy: '61e66d8d059378f9',
+    close: '882b5d3660cd4e22', recess: '9a7425b172e21d4a', falseForward: '9f9ccf4bc819b025', gap: 'e802e49f79cc4d0b',
+    empty: '8f3e7639b1aadd0a', single: '6febc2aa814e8a11', saturation: '7cfcf4f610946585', orthogonal: 'a20a65729c3a4497', offsetComponents: 'd409aa6ebddc02b8', colorFallback: '0c1a94a43c58ee15',
+  }
+  for (const [name, frames] of Object.entries(cases)) {
+    const actual = semanticHash(run(frames))
+    if (expected[name] === 'PLACEHOLDER') console.log(`M8.8 semantic fixture ${name}: ${actual}`)
+    else assert.equal(actual, expected[name], `${name} semantic hash changed`)
+  }
+})
+
 test('M8.8 indexed adjacency preserves deterministic output and bounds relation work', () => {
   const frames = Array.from({ length: 5 }, (_unused, frame) => retainedFrame(plane(14), frame + 1))
   const first = run(frames)
@@ -211,10 +285,62 @@ test('M8.8 indexed adjacency preserves deterministic output and bounds relation 
   assert.deepEqual(first.candidate.ownership, second.candidate.ownership)
   assert.deepEqual(stableDiagnostics(first.candidate.diagnostics), stableDiagnostics(second.candidate.diagnostics))
   const diagnostics = first.candidate.diagnostics
+  const cellCounts = new Map()
+  for (const frame of frames) for (let index = 0; index < frame.denseFrame.valid.length; index += 1) {
+    if (!frame.denseFrame.valid[index] || !frame.normalValid[index]) continue
+    const offset = index * 3
+    const key = `${Math.floor(frame.denseFrame.points[offset] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(frame.denseFrame.points[offset + 1] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(frame.denseFrame.points[offset + 2] / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}`
+    // This clean repeated fixture consolidates to one measured layer per
+    // occupied world cell; count layers, not repeated frame observations.
+    cellCounts.set(key, 1)
+  }
+  const occupiedCells = [...cellCounts.keys()].map((key) => key.split(':').map(Number))
+  const offsets = [-1, 0, 1].flatMap((x) => [-1, 0, 1].flatMap((y) => [-1, 0, 1].map((z) => [x, y, z])))
+  const reverse = offsets.map(([x, y, z]) => offsets.findIndex(([rx, ry, rz]) => rx === -x && ry === -y && rz === -z))
+  const half = offsets.map((_offset, index) => index).filter((index) => offsets[index].some(Boolean) && index < reverse[index])
+  let expectedVisits = 0, expectedNumericLookups = occupiedCells.length * half.length
+  for (const [x, y, z] of occupiedCells) {
+    const a = cellCounts.get(`${x}:${y}:${z}`)
+    expectedVisits += a * a
+    for (const offsetIndex of half) {
+      const [dx, dy, dz] = offsets[offsetIndex]
+      const b = cellCounts.get(`${x + dx}:${y + dy}:${z + dz}`)
+      if (b !== undefined) expectedVisits += 2 * a * b
+    }
+  }
   assert.equal(diagnostics.coherenceCellLookups, diagnostics.observedLayerCount * 27)
+  assert.equal(diagnostics.coherenceLayerCandidateVisits, expectedVisits, 'legacy directed visits must be derived as a² + 2ab')
+  assert.equal(diagnostics.coherenceNumericIndexLookupCount, expectedNumericLookups)
   assert.ok(diagnostics.coherenceAdjacencyUndirectedEdgeCount <= diagnostics.coherenceAdjacencyRelationChecks)
   assert.ok(diagnostics.coherenceAdjacencyRelationChecks * 2 <= diagnostics.coherenceLayerCandidateVisits - diagnostics.observedLayerCount,
     'each compatible layer pair is evaluated once, not once per direction')
+  assert.equal(diagnostics.coherenceNumericIndexLookupCount % 13, 0, 'numeric index enumerates the deterministic half-neighborhood')
+  assert.ok(diagnostics.coherenceNumericIndexLookupCount * 2 <= diagnostics.coherenceCellLookups,
+    'numeric index probes half-neighborhood cells instead of repeating directed lookups')
+  assert.ok(diagnostics.coherenceNumericIndexCollisionBucketCount >= 0)
+  assert.ok(diagnostics.coherenceNumericIndexCollisionProbeCount >= 0)
+  assert.ok(diagnostics.workerStageTimingsMs.coherenceAdjacencyIndex >= 0)
+  assert.ok(diagnostics.workerStageTimingsMs.coherenceConnectedComponents >= 0)
+  assert.ok(diagnostics.workerStageTimingsMs.coherenceSupportPromotion >= 0)
+  assert.equal(diagnostics.consolidationCellIndexLookupCount, diagnostics.inputRetainedMeasurements)
+  assert.ok(diagnostics.consolidationSourceGridNeighborLookups >= diagnostics.consolidationSourceGridNeighborHits)
+  assert.ok(diagnostics.consolidationCellIndexCollisionBucketCount >= 0)
+  assert.ok(diagnostics.consolidationCellIndexCollisionProbeCount >= 0)
+  assert.ok(diagnostics.medoidCandidateVisitsBeforeEquivalent >= diagnostics.medoidCandidateVisits)
+  assert.ok(diagnostics.medoidDistanceVisitsBeforeEquivalent >= diagnostics.medoidDistanceVisits)
+})
+
+test('M8.8 numeric cell hash collisions remain exact-coordinate safe', () => {
+  const result = run([retainedFrame([
+    point(1, -12.499, -.049, .001),
+    point(2, -12.499, .001, -.049),
+  ], 1)]).candidate
+  assert.equal(result.surfels.length, 0, 'single-frame collision fixture must not self-promote')
+  assert.ok(result.diagnostics.coherenceNumericIndexCollisionBucketCount >= 1)
+  // The colliding cells are not adjacent, so adjacency performs no probe;
+  // this field must not include construction/integration probes.
+  assert.equal(result.diagnostics.coherenceNumericIndexCollisionProbeCount, 0)
+  assert.equal(result.diagnostics.candidateUnownedOrInventedCount, 0)
 })
 
 test('M8.8 representative adjacency fixture stays inside a broad non-mobile timing budget', () => {

@@ -1,7 +1,7 @@
 # M8.8 scalability blocker report
 
-Status: software boundary fixed and regression-covered; M8.8 remains blocked
-pending a physical large scan on the POCO F5. This report records the bounded
+Status: software boundary fixed and regression-covered; **Path C — stop M8.8
+before another POCO scan**. This report records the bounded
 investigation and the evidence needed for the lead review. It is not a product
 approval or a request to unfreeze M7/customization.
 
@@ -55,14 +55,20 @@ and A/B failed only when candidate reconstruction was entered.
 
 **I — Fix and post-fix result.** The two unbounded diagnostic spreads are now
 iterative maxima with identical values. The coherence/promotion path now uses
-one indexed undirected adjacency pass for component BFS and coherent support,
-with deterministic legacy offset order and no capacity reduction. The
+one collision-safe numeric-indexed undirected adjacency pass for component BFS
+and coherent support, with deterministic legacy offset order and no capacity
+reduction. Same-cell pairs and one half of the neighbor offsets are evaluated
+once; numeric hash buckets always verify exact integer cell coordinates. The
 permanent fixture executes SMALL=1,600, MEDIUM=12,800,
 PREVIOUS_STACK_BOUNDARY=124,800 and FULL_ROOM=130,000, then baseline-only,
 candidate-only and A/B on the identical 130,000-sample snapshot. All complete
-with no exception; the latest measured full candidate took 6,192 ms, baseline
-1,583 ms and A/B 6,706 ms (a separate bounded candidate-only run measured
-2,799 ms due normal JIT/GC variance). The full candidate's last stage is
+with no exception. Earlier post-stack measurements were 6,192 ms candidate,
+1,583 ms baseline and 6,706 ms A/B; three isolated idle iterations of the
+final representation measured 130,000 candidate/baseline/A-B medians of
+1,177.1/717.7/2,986.8 ms (`1.64x` candidate/baseline), 150,000 medians of
+1,316.4/838.5/3,999.7 ms (`1.57x`), and 180,000 medians of
+1,687.8/1,061.4/4,835.2 ms (`1.59x`). The 180k arm uses 96 frames, within
+the retained evidence bound. The full candidate's last stage is
 `applying-room-appearance`. These desktop results remain above the physical
 performance envelope and do not establish M8.8 quality benefit.
 
@@ -107,11 +113,54 @@ and depth layers. The 130k regression is ~81.25 m² of unique 2.5 cm cells.
 This is a capacity estimate, not measured physical coverage.
 
 **O — Release gate.** Software-only evidence is sufficient to remove the
-specific stack-overflow and 125-bucket scalability blockers, but M8.8 stays
-blocked until a physical large scan verifies XR frame cadence, memory/GC,
-queue pressure, map occupancy, layer preservation, Finish completion and
-quality on the target POCO F5. No retained/final caps or input budgets were
-raised.
+specific stack-overflow and 125-bucket scalability blockers, but the final
+1.57–1.64x large-input ratios still miss the 1.25x feasibility target. A full
+structure-of-arrays rewrite would replace the candidate architecture while its
+physical quality benefit remains unproven, so the lead selects Path C. Another
+POCO scan is not justified by this milestone. No retained/final caps or input
+budgets were raised.
+
+**P — Numeric adjacency audit.** On the 130k/150k/180k synthetic arms the
+service reported 3.51m/4.05m/4.86m legacy directed cell lookups,
+347,120/392,720/459,808 derived legacy candidate visits,
+108,560/121,360/139,904 actual undirected relation checks and
+1.69m/1.95m/2.34m numeric half-neighborhood lookups. The service-reported
+modeled peak estimates are 59.93 MB at 130k, 69.15 MB at 150k and 82.98 MB
+at 180k, based on the
+existing input/representation/working/output formulas (including
+`allLayers * 224 + observedCells * 48 + ownership * 96`). They do not include
+engine-dependent `Map`/record/array overhead or explicitly price the new
+numeric-index records and cell-coordinate fields. No precise typed-array byte
+count is available for those objects, so memory reduction is not proven. The
+fixtures reported 13 exact-coordinate collision probes and zero multi-cell
+collision buckets. Exact semantic hashes for clean, sparse, noisy,
+close-layer, recess, false-forward and unobserved-gap fixtures match the clean
+pre-index source; output ownership and diagnostics remain deterministic. These
+are desktop synthetic results only, not POCO evidence.
+
+**Q — End-to-end representation boundary.** The reviewed Path-A changes now
+reuse the integration world-cell index for adjacency, use numeric collision
+buckets for frame consolidation and source-grid continuity, and replace
+retained-frame/viewpoint Sets with exact 96-bit masks. Singleton hash buckets
+avoid one-array-per-cell allocation, source-grid cell IDs use an Int32Array,
+and raw observed world records allocate layer arrays lazily. Incremental medoid
+scores preserve the first-64 candidate order, tie-break and color fallback;
+on repeated coherent fixtures the former full-scan distance work is reduced to
+the bounded pair updates, while one-sample-per-cell large-room fixtures report
+zero medoid work by construction. The 13-case semantic-lock suite (including
+six additional empty/single/saturation/perpendicular/disconnected/color
+fixtures) remains deterministic; the seven historical hashes are also
+unchanged from the pre-index source. Path A is the
+smallest exact representation optimization; Path B (full typed/SoA rewrite)
+is not implemented because JS object/Map/array overhead is not yet measured;
+Path C is selected: stop this M8.8 candidate before physical quality/cadence
+validation. The modeled
+memory formulas are unchanged and are explicitly lower-bound/conservative;
+new JS index records, coordinate fields and mask object overhead are unknown,
+so no memory reduction is claimed. The observed-domain Set was removed after a
+valid+normal-domain equivalence assertion; world-cell records now define that
+domain. Coherence collision probes are counted only during adjacency lookups,
+not earlier construction/integration lookups.
 
 ## Reproduction and validation commands
 

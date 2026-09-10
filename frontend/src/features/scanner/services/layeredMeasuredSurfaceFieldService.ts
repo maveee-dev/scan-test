@@ -103,6 +103,12 @@ export interface LayeredMeasuredSurfaceFieldDiagnostics {
   readonly coherenceLayerCandidateVisits: number
   readonly coherenceAdjacencyRelationChecks: number
   readonly coherenceAdjacencyUndirectedEdgeCount: number
+  /** Actual numeric-hash neighbor-cell lookups; same-cell pairs are direct. */
+  readonly coherenceNumericIndexLookupCount: number
+  /** Number of hash buckets containing more than one exact cell coordinate. */
+  readonly coherenceNumericIndexCollisionBucketCount: number
+  /** Exact-coordinate comparisons that crossed a hash collision bucket. */
+  readonly coherenceNumericIndexCollisionProbeCount: number
   readonly maximumFieldLayers: number
   readonly promotedLayerCount: number
   readonly observedLayerCount: number
@@ -123,11 +129,25 @@ export interface LayeredMeasuredSurfaceFieldDiagnostics {
   readonly candidateOutputMemoryBytes: number
   readonly peakMemoryBytesEstimate: number
   readonly peakMemoryBytesLowerBound: number
+  readonly consolidationCellIndexLookupCount: number
+  readonly consolidationCellIndexCollisionBucketCount: number
+  readonly consolidationCellIndexCollisionProbeCount: number
+  readonly consolidationSourceGridNeighborLookups: number
+  readonly consolidationSourceGridNeighborHits: number
+  /** Exact work the former full medoid scan would have performed. */
+  readonly medoidCandidateVisitsBeforeEquivalent: number
+  readonly medoidDistanceVisitsBeforeEquivalent: number
+  /** Work performed by the incremental medoid score maintenance. */
+  readonly medoidCandidateVisits: number
+  readonly medoidDistanceVisits: number
   readonly workerStageTimingsMs: Readonly<{
     input: number
     perFrameConsolidation: number
     fieldIntegration: number
     coherenceAndPromotion: number
+    coherenceAdjacencyIndex: number
+    coherenceConnectedComponents: number
+    coherenceSupportPromotion: number
     componentMetrics: number
     finalPacking: number
   }>
@@ -168,26 +188,34 @@ interface MeasuredObservation {
   readonly frameSequence: number
   readonly timestamp: number
   readonly trackingQuality: number
-  readonly cameraPosition: SpatialPoint
-  readonly cameraOrientation: Readonly<{ x: number; y: number; z: number; w: number }>
   readonly position: SpatialPoint
   readonly normal: SpatialPoint
   readonly color: MeasuredColor | null
-  readonly localCellKey: string
-  readonly localGridX: number
-  readonly localGridY: number
-  readonly localNeighborCellKeys?: readonly string[]
+  readonly localCellId: number
+  readonly localNeighborCellIds?: readonly number[]
 }
 
 interface FrameConsolidatedObservation extends MeasuredObservation {
-  readonly localNeighborCellKeys: readonly string[]
+  readonly localNeighborCellIds: readonly number[]
+}
+
+interface MedoidWork {
+  candidateVisitsBeforeEquivalent: number
+  distanceVisitsBeforeEquivalent: number
+  candidateVisits: number
+  distanceVisits: number
 }
 
 interface LayerAccumulator {
-  readonly cellKey: string
+  readonly index: number
+  readonly cellId: number
+  readonly cellX: number
+  readonly cellY: number
+  readonly cellZ: number
   readonly samples: MeasuredObservation[]
-  readonly supportFrames: Set<number>
-  readonly supportViewpoints: Set<string>
+  readonly medoidScores: number[]
+  supportFrameMask: FrameMask
+  supportViewpointMask: ViewpointMask
   representative: MeasuredObservation
   color: MeasuredColor | null
   fallbackColor: MeasuredColor | null
@@ -198,7 +226,6 @@ interface LayerAccumulator {
   colorObservationCount: number
   coherentNeighborCount: number
   crossFrameNeighborCount: number
-  crossFrameNeighborFrames: Set<number>
   sourceLocalContinuity: number
   positionMean: SpatialPoint
   positionM2: SpatialPoint
@@ -215,7 +242,7 @@ interface LayerAccumulator {
 interface SurfaceComponent {
   readonly id: number
   readonly layers: LayerAccumulator[]
-  readonly cellKeys: Set<string>
+  readonly cellIds: Set<number>
   normal: SpatialPoint
   origin: SpatialPoint
   u: SpatialPoint
@@ -228,6 +255,51 @@ interface LayerAdjacencyIndex {
   readonly coherenceLayerCandidateVisits: number
   readonly coherenceAdjacencyRelationChecks: number
   readonly coherenceAdjacencyUndirectedEdgeCount: number
+  readonly coherenceNumericIndexLookupCount: number
+  readonly coherenceNumericIndexCollisionBucketCount: number
+  readonly coherenceNumericIndexCollisionProbeCount: number
+}
+
+interface FrameMask {
+  low: number
+  middle: number
+  high: number
+}
+
+interface ViewpointMask {
+  low: number
+  middle: number
+  high: number
+}
+
+interface ConsolidationWork {
+  cellIndexLookupCount: number
+  cellIndexCollisionBucketCount: number
+  cellIndexCollisionProbeCount: number
+  sourceGridNeighborLookups: number
+  sourceGridNeighborHits: number
+}
+
+interface FrameCellRecord {
+  readonly id: number
+  readonly x: number
+  readonly y: number
+  readonly z: number
+  readonly samples: MeasuredObservation[]
+}
+
+interface WorldCellRecord {
+  readonly id: number
+  readonly x: number
+  readonly y: number
+  readonly z: number
+  layers?: LayerAccumulator[]
+}
+
+interface WorldCellIndex {
+  readonly buckets: Map<number, WorldCellRecord | WorldCellRecord[]>
+  readonly records: WorldCellRecord[]
+  collisionBucketCount: number
 }
 
 interface SignatureHash {
@@ -240,19 +312,76 @@ const NEIGHBOR_OFFSETS: readonly (readonly [number, number, number])[] = [-1, 0,
 const REVERSE_NEIGHBOR_OFFSET_INDEX = NEIGHBOR_OFFSETS.map(([x, y, z]) =>
   NEIGHBOR_OFFSETS.findIndex(([candidateX, candidateY, candidateZ]) => candidateX === -x && candidateY === -y && candidateZ === -z),
 )
+const CENTER_NEIGHBOR_OFFSET_INDEX = NEIGHBOR_OFFSETS.findIndex(([x, y, z]) => x === 0 && y === 0 && z === 0)
+const HALF_NEIGHBOR_OFFSET_INDICES = NEIGHBOR_OFFSETS
+  .map((_offset, index) => index)
+  .filter((index) => index !== CENTER_NEIGHBOR_OFFSET_INDEX && index < REVERSE_NEIGHBOR_OFFSET_INDEX[index])
 // A layer index is bounded by maximumFieldLayers (240,000), so this keeps the
 // offset rank and layer index in one sortable integer without allocating edge
 // objects on every coherence visit.
 const ADJACENCY_LAYER_INDEX_BASE = 1 << 18
+const FRAME_MASK_WORD_BITS = 32
+const FRAME_MASK_MAX_ORDINAL = FRAME_MASK_WORD_BITS * 3 - 1
 
 const clamp = (value: number, minimum: number, maximum: number): number => Math.max(minimum, Math.min(maximum, value))
 
+function createMask(): FrameMask {
+  return { low: 0, middle: 0, high: 0 }
+}
+
+function setMaskBit(mask: FrameMask, ordinal: number): void {
+  if (ordinal < 0 || ordinal > FRAME_MASK_MAX_ORDINAL) return
+  const word = ordinal >>> 5
+  const bit = ordinal & 31
+  const value = (1 << bit) >>> 0
+  if (word === 0) mask.low = (mask.low | value) >>> 0
+  else if (word === 1) mask.middle = (mask.middle | value) >>> 0
+  else mask.high = (mask.high | value) >>> 0
+}
+
+function hasMaskBit(mask: FrameMask, ordinal: number): boolean {
+  if (ordinal < 0 || ordinal > FRAME_MASK_MAX_ORDINAL) return false
+  const word = ordinal >>> 5
+  const bit = ordinal & 31
+  const value = (1 << bit) >>> 0
+  return word === 0 ? (mask.low & value) !== 0 : word === 1 ? (mask.middle & value) !== 0 : (mask.high & value) !== 0
+}
+
+function maskBitCount(mask: FrameMask): number {
+  const count = (value: number): number => {
+    let bits = value >>> 0, total = 0
+    while (bits) {
+      bits = (bits & (bits - 1)) >>> 0
+      total += 1
+    }
+    return total
+  }
+  return count(mask.low) + count(mask.middle) + count(mask.high)
+}
+
+function forEachMaskBit(mask: FrameMask, visit: (ordinal: number) => void): void {
+  for (const [wordIndex, value] of [mask.low, mask.middle, mask.high].entries()) {
+    let bits = value >>> 0
+    while (bits) {
+      const bit = 31 - Math.clz32(bits)
+      visit(wordIndex * FRAME_MASK_WORD_BITS + bit)
+      bits = (bits & ~(1 << bit)) >>> 0
+    }
+  }
+}
+
+function supportViewpointKey(frame: RetainedRealityMeasurementFrame): string {
+  return `${Math.floor(frame.cameraPosition.x / .25)}:${Math.floor(frame.cameraPosition.y / .25)}:${Math.floor(frame.cameraPosition.z / .25)}:${Math.round(frame.cameraOrientation.x * 8)}:${Math.round(frame.cameraOrientation.y * 8)}:${Math.round(frame.cameraOrientation.z * 8)}:${Math.round(frame.cameraOrientation.w * 8)}`
+}
+
 function maximumLayersPerCell(
-  layersByCell: ReadonlyMap<string, readonly LayerAccumulator[]>,
+  worldCells: readonly WorldCellRecord[],
   promotedOnly = false,
 ): number {
   let maximum = 0
-  for (const layers of layersByCell.values()) {
+  for (const cell of worldCells) {
+    const layers = cell.layers
+    if (!layers) continue
     let count = 0
     if (promotedOnly) {
       for (const layer of layers) if (layer.promoted) count += 1
@@ -265,8 +394,61 @@ function maximumLayersPerCell(
 }
 
 const pointKey = (point: SpatialPoint): string => `${Math.floor(point.x / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(point.y / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}:${Math.floor(point.z / M88_LAYERED_FIELD_CONFIG.cellSizeMeters)}`
-const sourceMeasurementKey = (observation: Pick<MeasuredObservation, 'frameSequence' | 'sourceIndex' | 'position'>): string => `${observation.frameSequence}:${observation.sourceIndex}:${observation.position.x}:${observation.position.y}:${observation.position.z}`
-const localKey = (x: number, y: number): string => `${x}:${y}`
+
+function worldCellCoordinates(point: SpatialPoint): [number, number, number] {
+  return [
+    Math.floor(point.x / M88_LAYERED_FIELD_CONFIG.cellSizeMeters),
+    Math.floor(point.y / M88_LAYERED_FIELD_CONFIG.cellSizeMeters),
+    Math.floor(point.z / M88_LAYERED_FIELD_CONFIG.cellSizeMeters),
+  ]
+}
+
+function formatWorldCellKey(x: number, y: number, z: number): string {
+  return `${x}:${y}:${z}`
+}
+
+function numericCellHash(x: number, y: number, z: number): number {
+  let hash = 2166136261
+  hash = Math.imul(hash ^ (x | 0), 16777619) >>> 0
+  hash = Math.imul(hash ^ (y | 0), 16777619) >>> 0
+  hash = Math.imul(hash ^ (z | 0), 16777619) >>> 0
+  return hash
+}
+
+function createWorldCellIndex(): WorldCellIndex {
+  return { buckets: new Map<number, WorldCellRecord | WorldCellRecord[]>(), records: [], collisionBucketCount: 0 }
+}
+
+function findWorldCellRecord(index: WorldCellIndex, x: number, y: number, z: number, collisionProbeCounter?: { value: number }): WorldCellRecord | undefined {
+  const bucket = index.buckets.get(numericCellHash(x, y, z))
+  if (!bucket) return undefined
+  if (!Array.isArray(bucket)) {
+    return bucket.x === x && bucket.y === y && bucket.z === z ? bucket : undefined
+  }
+  for (const candidate of bucket) {
+    if (candidate.x === x && candidate.y === y && candidate.z === z) return candidate
+    if (collisionProbeCounter) collisionProbeCounter.value += 1
+  }
+  return undefined
+}
+
+function getOrCreateWorldCellRecord(index: WorldCellIndex, x: number, y: number, z: number): WorldCellRecord {
+  const existing = findWorldCellRecord(index, x, y, z)
+  if (existing) return existing
+  const hash = numericCellHash(x, y, z)
+  const bucket = index.buckets.get(hash)
+  const cell: WorldCellRecord = { id: index.records.length, x, y, z }
+  if (!bucket) {
+    index.buckets.set(hash, cell)
+  } else if (Array.isArray(bucket)) {
+    bucket.push(cell)
+  } else {
+    index.buckets.set(hash, [bucket, cell])
+    index.collisionBucketCount += 1
+  }
+  index.records.push(cell)
+  return cell
+}
 
 function normalize(point: SpatialPoint): SpatialPoint {
   const magnitude = Math.hypot(point.x, point.y, point.z)
@@ -317,11 +499,15 @@ function colorFromFrame(frame: RetainedRealityMeasurementFrame, sourceToColor: I
   return { r: frame.srgbColors[offset] / 255, g: frame.srgbColors[offset + 1] / 255, b: frame.srgbColors[offset + 2] / 255 }
 }
 
-function chooseMedoid(samples: readonly MeasuredObservation[]): MeasuredObservation {
+function chooseMedoid(samples: readonly MeasuredObservation[], work?: MedoidWork): MeasuredObservation {
   if (samples.length <= 1) return samples[0]
   const candidates = samples.length <= M88_LAYERED_FIELD_CONFIG.maximumMedoidCandidates
     ? samples
     : Array.from({ length: M88_LAYERED_FIELD_CONFIG.maximumMedoidCandidates }, (_unused, index) => samples[Math.floor(index * samples.length / M88_LAYERED_FIELD_CONFIG.maximumMedoidCandidates)])
+  if (work) {
+    work.candidateVisitsBeforeEquivalent += candidates.length
+    work.distanceVisitsBeforeEquivalent += candidates.length * samples.length
+  }
   let best = samples[0], bestScore = Infinity
   // A retained depth grid normally contributes only a handful of points per
   // 1.8 cm cell. The bounded pair loop is exact for those cells and avoids a
@@ -337,19 +523,26 @@ function chooseMedoid(samples: readonly MeasuredObservation[]): MeasuredObservat
   return best
 }
 
-function consolidateFrame(frame: RetainedRealityMeasurementFrame): FrameConsolidatedObservation[] {
+function consolidateFrame(
+  frame: RetainedRealityMeasurementFrame,
+  medoidWork: MedoidWork,
+  consolidationWork: ConsolidationWork,
+): FrameConsolidatedObservation[] {
   const sourceToColor = new Int32Array(frame.denseFrame.valid.length)
   sourceToColor.fill(-1)
   for (let index = 0; index < frame.colorSourceIndices.length; index += 1) {
     const sourceIndex = frame.colorSourceIndices[index]
     if (sourceIndex >= 0 && sourceIndex < sourceToColor.length) sourceToColor[sourceIndex] = index
   }
-  const cells = new Map<string, MeasuredObservation[]>()
+  const cellBuckets = new Map<number, FrameCellRecord | FrameCellRecord[]>()
+  const cells: FrameCellRecord[] = []
   // This map describes the complete source image, not just the samples that
   // happened to land in one spatial cell. It lets continuity cross spatial
   // cell boundaries while still requiring two actually observed neighboring
   // source pixels.
-  const sourceGrid = new Map<string, { spatialKey: string; observation: MeasuredObservation }>()
+  const sourceGridCellIds = new Int32Array(frame.denseFrame.valid.length)
+  sourceGridCellIds.fill(-1)
+  const sourceGridObservations: Array<MeasuredObservation | undefined> = new Array(frame.denseFrame.valid.length)
   const columns = Math.max(1, frame.denseFrame.columns)
   for (let sourceIndex = 0; sourceIndex < frame.denseFrame.valid.length; sourceIndex += 1) {
     if (!frame.denseFrame.valid[sourceIndex] || !frame.normalValid[sourceIndex]) continue
@@ -357,49 +550,84 @@ function consolidateFrame(frame: RetainedRealityMeasurementFrame): FrameConsolid
     const position = { x: frame.denseFrame.points[offset], y: frame.denseFrame.points[offset + 1], z: frame.denseFrame.points[offset + 2] }
     const normal = normalize({ x: frame.normals[offset], y: frame.normals[offset + 1], z: frame.normals[offset + 2] })
     if (![position.x, position.y, position.z, normal.x, normal.y, normal.z].every(Number.isFinite)) continue
-    const localGridX = sourceIndex % columns
-    const localGridY = Math.floor(sourceIndex / columns)
+    const cellX = Math.floor(position.x / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)
+    const cellY = Math.floor(position.y / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)
+    const cellZ = Math.floor(position.z / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)
+    consolidationWork.cellIndexLookupCount += 1
+    const hash = numericCellHash(cellX, cellY, cellZ)
+    const bucket = cellBuckets.get(hash)
+    let cell: FrameCellRecord | undefined
+    if (bucket) {
+      if (Array.isArray(bucket)) {
+        for (const candidate of bucket) {
+          if (candidate.x === cellX && candidate.y === cellY && candidate.z === cellZ) {
+            cell = candidate
+            break
+          }
+          consolidationWork.cellIndexCollisionProbeCount += 1
+        }
+      } else if (bucket.x === cellX && bucket.y === cellY && bucket.z === cellZ) {
+        cell = bucket
+      }
+    }
+    if (!cell) {
+      cell = { id: cells.length, x: cellX, y: cellY, z: cellZ, samples: [] }
+      if (!bucket) cellBuckets.set(hash, cell)
+      else if (Array.isArray(bucket)) bucket.push(cell)
+      else {
+        cellBuckets.set(hash, [bucket, cell])
+        consolidationWork.cellIndexCollisionBucketCount += 1
+      }
+      cells.push(cell)
+    }
     const observation: MeasuredObservation = {
       sourceIndex,
       frameSequence: frame.sequence,
       timestamp: frame.timestamp,
       trackingQuality: frame.trackingQuality,
-      cameraPosition: { ...frame.cameraPosition },
-      cameraOrientation: frame.cameraOrientation,
       position,
       normal,
       color: colorFromFrame(frame, sourceToColor, sourceIndex),
-      localCellKey: localKey(Math.floor(position.x / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters), Math.floor(position.y / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)),
-      localGridX,
-      localGridY,
+      localCellId: cell.id,
     }
-    const spatialKey = `${Math.floor(position.x / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)}:${Math.floor(position.y / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)}:${Math.floor(position.z / M88_LAYERED_FIELD_CONFIG.consolidationCellMeters)}`
-    const values = cells.get(spatialKey)
-    if (values) values.push(observation)
-    else cells.set(spatialKey, [observation])
-    sourceGrid.set(localKey(localGridX, localGridY), { spatialKey, observation })
+    cell.samples.push(observation)
+    sourceGridCellIds[sourceIndex] = cell.id
+    sourceGridObservations[sourceIndex] = observation
   }
   const result: FrameConsolidatedObservation[] = []
-  for (const [spatialKey, samples] of cells) {
-    const medoid = chooseMedoid(samples)
+  for (const cell of cells) {
+    const samples = cell.samples
+    const medoid = chooseMedoid(samples, medoidWork)
     const representative = medoid.color ? medoid : samples.find((sample) => sample.color) ?? medoid
-    const neighborCellKeys = new Set<string>()
+    const neighborCellIds = new Set<number>()
     for (const sample of samples) {
+      const localGridX = sample.sourceIndex % columns
+      const localGridY = Math.floor(sample.sourceIndex / columns)
       for (let x = -1; x <= 1; x += 1) for (let y = -1; y <= 1; y += 1) {
         if (x === 0 && y === 0) continue
-        const neighbor = sourceGrid.get(localKey(sample.localGridX + x, sample.localGridY + y))
-        if (!neighbor || neighbor.spatialKey === spatialKey) continue
-        const relation = compatible(sample.position, sample.normal, neighbor.observation.position, neighbor.observation.normal)
+        const neighborGridX = localGridX + x
+        const neighborGridY = localGridY + y
+        if (neighborGridX < 0 || neighborGridX >= columns || neighborGridY < 0) continue
+        const neighborIndex = neighborGridY * columns + neighborGridX
+        if (neighborIndex >= sourceGridCellIds.length) continue
+        consolidationWork.sourceGridNeighborLookups += 1
+        const neighborCellId = sourceGridCellIds[neighborIndex]
+        if (neighborCellId < 0) continue
+        const neighbor = sourceGridObservations[neighborIndex]
+        if (!neighbor) continue
+        consolidationWork.sourceGridNeighborHits += 1
+        if (neighborCellId === cell.id) continue
+        const relation = compatible(sample.position, sample.normal, neighbor.position, neighbor.normal)
         // Continuity is evidence only when the adjacent source pixels agree in
         // normal, tangent spacing, and measured depth. No empty grid slot is
         // traversed and no synthesized bridge is introduced.
         if (relation.normalDot < M88_LAYERED_FIELD_CONFIG.minimumNormalDot ||
           relation.planeResidual > M88_LAYERED_FIELD_CONFIG.layerPlaneSafetyMeters ||
           relation.tangentDistance > M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters) continue
-        neighborCellKeys.add(neighbor.spatialKey)
+        neighborCellIds.add(neighborCellId)
       }
     }
-    result.push(Object.freeze({ ...representative, localCellKey: spatialKey, localNeighborCellKeys: Object.freeze([...neighborCellKeys].sort()) }))
+    result.push(Object.freeze({ ...representative, localCellId: cell.id, localNeighborCellIds: Object.freeze([...neighborCellIds].sort((left, right) => left - right)) }))
   }
   result.sort((left, right) => left.sourceIndex - right.sourceIndex)
   return result
@@ -507,56 +735,73 @@ function componentOrientations(components: readonly SurfaceComponent[]): Map<num
 
 /**
  * Builds one deterministic, undirected compatibility graph for the measured
- * layers. The old implementation walked the same 27 neighboring cells once
- * for component BFS and again for coherence/promotion. We still account for
- * every cell lookup/candidate visit, but evaluate each undirected layer pair
- * once and reuse the ordered adjacency lists for both consumers.
+ * layers. Occupied cells are indexed numerically once; same-cell pairs and one
+ * deterministic half of the 26 neighboring offsets cover every undirected
+ * layer pair exactly once. Legacy directed lookup/visit counters are derived
+ * arithmetically so diagnostics retain their historical meaning.
  */
 function buildLayerAdjacency(
   layers: readonly LayerAccumulator[],
-  layersByCell: ReadonlyMap<string, readonly LayerAccumulator[]>,
+  worldCellIndex: WorldCellIndex,
 ): LayerAdjacencyIndex {
-  const layerIndices = new Map<LayerAccumulator, number>()
   const encodedNeighbors: number[][] = Array.from({ length: layers.length }, () => [])
-  for (let index = 0; index < layers.length; index += 1) layerIndices.set(layers[index], index)
 
-  let coherenceCellLookups = 0
+  // Preserve the old diagnostic definitions without repeating the directed
+  // string-key traversal: each layer saw all 27 offsets, same-cell visits are
+  // a², and each adjacent cell pair contributes 2ab directed visits.
+  const coherenceCellLookups = layers.length * NEIGHBOR_OFFSETS.length
   let coherenceLayerCandidateVisits = 0
   let coherenceAdjacencyRelationChecks = 0
   let coherenceAdjacencyUndirectedEdgeCount = 0
-  for (let layerIndex = 0; layerIndex < layers.length; layerIndex += 1) {
-    const layer = layers[layerIndex]
-    const [cellX, cellY, cellZ] = layer.cellKey.split(':').map(Number) as [number, number, number]
-    for (let offsetIndex = 0; offsetIndex < NEIGHBOR_OFFSETS.length; offsetIndex += 1) {
+  let coherenceNumericIndexLookupCount = 0
+  const adjacencyCollisionProbeCounter = { value: 0 }
+  const lookupNumericCell = (x: number, y: number, z: number): WorldCellRecord | undefined => {
+    coherenceNumericIndexLookupCount += 1
+    return findWorldCellRecord(worldCellIndex, x, y, z, adjacencyCollisionProbeCounter)
+  }
+  const evaluatePair = (leftIndex: number, rightIndex: number, offsetIndex: number): void => {
+    coherenceAdjacencyRelationChecks += 1
+    const left = layers[leftIndex], right = layers[rightIndex]
+    const relation = compatible(
+      left.representative.position,
+      left.representative.normal,
+      right.representative.position,
+      right.representative.normal,
+    )
+    if (relation.tangentDistance > M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters ||
+      relation.planeResidual > M88_LAYERED_FIELD_CONFIG.coherencePlaneResidualMeters ||
+      relation.normalDot < M88_LAYERED_FIELD_CONFIG.minimumNormalDot) return
+
+    coherenceAdjacencyUndirectedEdgeCount += 1
+
+    // Store the offset rank with the neighbor index. Sorting by this packed
+    // value reproduces the former per-layer offset/entry order, keeping
+    // component IDs, representatives, and floating-point sums deterministic
+    // while avoiding edge objects and pair-key strings.
+    encodedNeighbors[leftIndex].push(offsetIndex * ADJACENCY_LAYER_INDEX_BASE + rightIndex)
+    encodedNeighbors[rightIndex].push(REVERSE_NEIGHBOR_OFFSET_INDEX[offsetIndex] * ADJACENCY_LAYER_INDEX_BASE + leftIndex)
+  }
+  for (const cell of worldCellIndex.records) {
+    const cellLayers = cell.layers
+    const cellLayerCount = cellLayers?.length ?? 0
+    if (!cellLayerCount) continue
+    coherenceLayerCandidateVisits += cellLayerCount * cellLayerCount
+    // Same-cell pairs use the center offset rank and retain insertion order.
+    for (let left = 0; left < cellLayerCount; left += 1) {
+      for (let right = left + 1; right < cellLayerCount; right += 1) {
+        evaluatePair(cellLayers![left].index, cellLayers![right].index, CENTER_NEIGHBOR_OFFSET_INDEX)
+      }
+    }
+    for (const offsetIndex of HALF_NEIGHBOR_OFFSET_INDICES) {
       const [offsetX, offsetY, offsetZ] = NEIGHBOR_OFFSETS[offsetIndex]
-      coherenceCellLookups += 1
-      const entries = layersByCell.get(`${cellX + offsetX}:${cellY + offsetY}:${cellZ + offsetZ}`)
-      if (!entries) continue
-      // Preserve the legacy diagnostic definition: this includes same-cell
-      // entries and the source layer itself, which is skipped below.
-      coherenceLayerCandidateVisits += entries.length
-      for (const neighbor of entries) {
-        const neighborIndex = layerIndices.get(neighbor)
-        if (neighborIndex === undefined || neighborIndex <= layerIndex) continue
-        coherenceAdjacencyRelationChecks += 1
-        const relation = compatible(
-          layer.representative.position,
-          layer.representative.normal,
-          neighbor.representative.position,
-          neighbor.representative.normal,
-        )
-        if (relation.tangentDistance > M88_LAYERED_FIELD_CONFIG.coherenceDistanceMeters ||
-          relation.planeResidual > M88_LAYERED_FIELD_CONFIG.coherencePlaneResidualMeters ||
-          relation.normalDot < M88_LAYERED_FIELD_CONFIG.minimumNormalDot) continue
-
-        coherenceAdjacencyUndirectedEdgeCount += 1
-
-        // Store the offset rank with the neighbor index. Sorting by this
-        // packed value reproduces the former per-layer offset/entry order,
-        // keeping component IDs, representatives, and floating-point sums
-        // deterministic while avoiding edge objects and pair-key strings.
-        encodedNeighbors[layerIndex].push(offsetIndex * ADJACENCY_LAYER_INDEX_BASE + neighborIndex)
-        encodedNeighbors[neighborIndex].push(REVERSE_NEIGHBOR_OFFSET_INDEX[offsetIndex] * ADJACENCY_LAYER_INDEX_BASE + layerIndex)
+      const neighbor = lookupNumericCell(cell.x + offsetX, cell.y + offsetY, cell.z + offsetZ)
+      if (!neighbor) continue
+      const neighborLayers = neighbor.layers
+      if (!neighborLayers?.length) continue
+      coherenceLayerCandidateVisits += 2 * cellLayerCount * neighborLayers.length
+      for (const leftLayer of cellLayers!) for (const rightLayer of neighborLayers) {
+        const leftIndex = leftLayer.index, rightIndex = rightLayer.index
+        evaluatePair(leftIndex, rightIndex, offsetIndex)
       }
     }
   }
@@ -565,7 +810,16 @@ function buildLayerAdjacency(
     encoded.sort((left, right) => left - right)
     return Uint32Array.from(encoded, (value) => value % ADJACENCY_LAYER_INDEX_BASE)
   })
-  return Object.freeze({ neighbors: Object.freeze(neighbors), coherenceCellLookups, coherenceLayerCandidateVisits, coherenceAdjacencyRelationChecks, coherenceAdjacencyUndirectedEdgeCount })
+  return Object.freeze({
+    neighbors: Object.freeze(neighbors),
+    coherenceCellLookups,
+    coherenceLayerCandidateVisits,
+    coherenceAdjacencyRelationChecks,
+    coherenceAdjacencyUndirectedEdgeCount,
+    coherenceNumericIndexLookupCount,
+    coherenceNumericIndexCollisionBucketCount: worldCellIndex.collisionBucketCount,
+    coherenceNumericIndexCollisionProbeCount: adjacencyCollisionProbeCounter.value,
+  })
 }
 
 function buildComponents(
@@ -588,21 +842,22 @@ function buildComponents(
     }
     const normalSum = group.reduce((sum, layer) => ({ x: sum.x + layer.representative.normal.x, y: sum.y + layer.representative.normal.y, z: sum.z + layer.representative.normal.z }), { x: 0, y: 0, z: 0 })
     const normal = normalize(normalSum), origin = { ...group[0].representative.position }, basis = chooseTangentBasis(normal)
-    components.push({ id: components.length, layers: group, cellKeys: new Set(group.map((layer) => layer.cellKey)), normal, origin, ...basis })
+    components.push({ id: components.length, layers: group, cellIds: new Set(group.map((layer) => layer.cellId)), normal, origin, ...basis })
   }
   return components.sort((left, right) => right.layers.length - left.layers.length || left.id - right.id)
 }
 
-function cellSetForSurfels(surfels: readonly FinalizedRealitySurfel[]): Set<string> {
-  return new Set(surfels.map((surfel) => pointKey(surfel.position)))
-}
-
-function createLayerAccumulator(cellKey: string, observation: MeasuredObservation): LayerAccumulator {
+function createLayerAccumulator(cellId: number, cellX: number, cellY: number, cellZ: number, observation: MeasuredObservation, index: number): LayerAccumulator {
   return {
-    cellKey,
+    index,
+    cellId,
+    cellX,
+    cellY,
+    cellZ,
     samples: [],
-    supportFrames: new Set<number>(),
-    supportViewpoints: new Set<string>(),
+    medoidScores: [],
+    supportFrameMask: createMask(),
+    supportViewpointMask: createMask(),
     representative: observation,
     color: observation.color,
     fallbackColor: observation.color,
@@ -613,7 +868,6 @@ function createLayerAccumulator(cellKey: string, observation: MeasuredObservatio
     colorObservationCount: 0,
     coherentNeighborCount: 0,
     crossFrameNeighborCount: 0,
-    crossFrameNeighborFrames: new Set<number>(),
     sourceLocalContinuity: 0,
     positionMean: { x: 0, y: 0, z: 0 },
     positionM2: { x: 0, y: 0, z: 0 },
@@ -628,7 +882,7 @@ function createLayerAccumulator(cellKey: string, observation: MeasuredObservatio
   }
 }
 
-function recordLayerObservation(layer: LayerAccumulator, observation: MeasuredObservation): void {
+function recordLayerObservation(layer: LayerAccumulator, observation: MeasuredObservation, medoidWork: MedoidWork, frameOrdinal: number, viewpointOrdinal: number): void {
   const nextCount = layer.observationCount + 1
   const updatePosition = (axis: 'x' | 'y' | 'z'): void => {
     const delta = observation.position[axis] - layer.positionMean[axis]
@@ -660,12 +914,40 @@ function recordLayerObservation(layer: LayerAccumulator, observation: MeasuredOb
     layer.colorObservationCount += 1
     if (!layer.fallbackColor) layer.fallbackColor = observation.color
   }
-  layer.supportFrames.add(observation.frameSequence)
-  layer.supportViewpoints.add(`${Math.floor(observation.cameraPosition.x / .25)}:${Math.floor(observation.cameraPosition.y / .25)}:${Math.floor(observation.cameraPosition.z / .25)}:${Math.round(observation.cameraOrientation.x * 8)}:${Math.round(observation.cameraOrientation.y * 8)}:${Math.round(observation.cameraOrientation.z * 8)}:${Math.round(observation.cameraOrientation.w * 8)}`)
-  if (layer.samples.length < M88_LAYERED_FIELD_CONFIG.maximumMedoidCandidates) layer.samples.push(observation)
-  layer.representative = chooseMedoid(layer.samples)
+  setMaskBit(layer.supportFrameMask, frameOrdinal)
+  setMaskBit(layer.supportViewpointMask, viewpointOrdinal)
+  if (layer.samples.length < M88_LAYERED_FIELD_CONFIG.maximumMedoidCandidates) {
+    const equivalentSampleCount = layer.samples.length + 1
+    if (equivalentSampleCount > 1) {
+      medoidWork.candidateVisitsBeforeEquivalent += equivalentSampleCount
+      medoidWork.distanceVisitsBeforeEquivalent += equivalentSampleCount * equivalentSampleCount
+    }
+    const previousSampleCount = layer.samples.length
+    let newSampleScore = 0
+    for (let sampleIndex = 0; sampleIndex < previousSampleCount; sampleIndex += 1) {
+      const distance = distanceSquared(layer.samples[sampleIndex].position, observation.position)
+      layer.medoidScores[sampleIndex] += distance
+      newSampleScore += distance
+      medoidWork.distanceVisits += 1
+    }
+    layer.samples.push(observation)
+    layer.medoidScores.push(newSampleScore)
+    if (layer.samples.length > 1) medoidWork.candidateVisits += layer.samples.length
+    let bestIndex = 0
+    let bestScore = layer.medoidScores[0] ?? Infinity
+    for (let sampleIndex = 1; sampleIndex < layer.samples.length; sampleIndex += 1) {
+      const candidate = layer.samples[sampleIndex]
+      const best = layer.samples[bestIndex]
+      const score = layer.medoidScores[sampleIndex]
+      if (score < bestScore || (score === bestScore && (candidate.frameSequence < best.frameSequence || candidate.sourceIndex < best.sourceIndex))) {
+        bestIndex = sampleIndex
+        bestScore = score
+      }
+    }
+    layer.representative = layer.samples[bestIndex] ?? observation
+  }
   layer.color = layer.representative.color ?? layer.samples.find((sample) => sample.color)?.color ?? layer.fallbackColor
-  layer.sourceLocalContinuity += observation.localNeighborCellKeys?.length ?? 0
+  layer.sourceLocalContinuity += observation.localNeighborCellIds?.length ?? 0
 }
 
 function percentile(values: readonly number[], fraction: number): number {
@@ -686,20 +968,49 @@ export class LayeredMeasuredSurfaceFieldService {
     onStage?: (stage: 'reconstructing-geometry' | 'cleaning-surfaces' | 'applying-room-appearance') => void,
   ): LayeredMeasuredSurfaceFieldResult {
     const startedAt = performance.now()
-    const stageTimings = { input: 0, perFrameConsolidation: 0, fieldIntegration: 0, coherenceAndPromotion: 0, componentMetrics: 0, finalPacking: 0 }
+    const stageTimings = {
+      input: 0,
+      perFrameConsolidation: 0,
+      fieldIntegration: 0,
+      coherenceAndPromotion: 0,
+      coherenceAdjacencyIndex: 0,
+      coherenceConnectedComponents: 0,
+      coherenceSupportPromotion: 0,
+      componentMetrics: 0,
+      finalPacking: 0,
+    }
     onStage?.('reconstructing-geometry')
     const inputStartedAt = performance.now()
     const frames = [...snapshot.frames].sort((left, right) => left.sequence - right.sequence || left.timestamp - right.timestamp)
-    const layersByCell = new Map<string, LayerAccumulator[]>()
+    const frameOrdinalBySequence = new Map<number, { frameOrdinal: number; viewpointOrdinal: number }>()
+    const viewpointOrdinalByKey = new Map<string, number>()
+    for (const [frameOrdinal, frame] of frames.entries()) {
+      const viewpointKey = supportViewpointKey(frame)
+      let viewpointOrdinal = viewpointOrdinalByKey.get(viewpointKey)
+      if (viewpointOrdinal === undefined) {
+        viewpointOrdinal = viewpointOrdinalByKey.size
+        viewpointOrdinalByKey.set(viewpointKey, viewpointOrdinal)
+      }
+      frameOrdinalBySequence.set(frame.sequence, { frameOrdinal, viewpointOrdinal })
+    }
+    const framesBySequence = new Map(frames.map((frame) => [frame.sequence, frame]))
+    const worldCellIndex = createWorldCellIndex()
     const allLayers: LayerAccumulator[] = []
-    const observedCells = new Set<string>()
-    const observedSourceKeys = new Set<string>()
     let inputObservations = 0, candidateConsolidatedMeasurements = 0, sameFrameConsolidated = 0
-    const candidateRejectedCellKeys = new Set<string>(), candidateRejectedLayerCapacityCellKeys = new Set<string>()
+    const candidateRejectedCellIds = new Set<number>(), candidateRejectedLayerCapacityCellIds = new Set<number>()
     let candidateLocalLayerCapacityRejectedMeasurements = 0
     let candidateGlobalFieldCapacityRejectedMeasurements = 0
     let candidateCellLookups = 0, candidateLayerCandidateVisits = 0, coherenceCellLookups = 0, coherenceLayerCandidateVisits = 0
     let coherenceAdjacencyRelationChecks = 0, coherenceAdjacencyUndirectedEdgeCount = 0
+    let coherenceNumericIndexLookupCount = 0, coherenceNumericIndexCollisionBucketCount = 0, coherenceNumericIndexCollisionProbeCount = 0
+    const consolidationWork: ConsolidationWork = {
+      cellIndexLookupCount: 0,
+      cellIndexCollisionBucketCount: 0,
+      cellIndexCollisionProbeCount: 0,
+      sourceGridNeighborLookups: 0,
+      sourceGridNeighborHits: 0,
+    }
+    const medoidWork: MedoidWork = { candidateVisitsBeforeEquivalent: 0, distanceVisitsBeforeEquivalent: 0, candidateVisits: 0, distanceVisits: 0 }
     stageTimings.input = performance.now() - inputStartedAt
 
     let fieldIntegrationMs = 0
@@ -714,20 +1025,23 @@ export class LayeredMeasuredSurfaceFieldService {
         validNormalCount += 1
         // The A/B observed domain is complete over all valid+normal measured
         // source points, rather than only over consolidated representatives.
-        observedCells.add(pointKey(position))
+        const [cellX, cellY, cellZ] = worldCellCoordinates(position)
+        getOrCreateWorldCellRecord(worldCellIndex, cellX, cellY, cellZ)
       }
       inputObservations += validNormalCount
       const frameStartedAt = performance.now()
-      const observations = consolidateFrame(frame)
+      const observations = consolidateFrame(frame, medoidWork, consolidationWork)
       stageTimings.perFrameConsolidation += performance.now() - frameStartedAt
       candidateConsolidatedMeasurements += observations.length
       sameFrameConsolidated += Math.max(0, validNormalCount - observations.length)
       const integrationFrameStartedAt = performance.now()
+      const frameOrdinals = frameOrdinalBySequence.get(frame.sequence)
+      if (!frameOrdinals) throw new Error(`Missing frame ordinal for retained frame ${frame.sequence}`)
       for (const observation of observations) {
-        const cell = pointKey(observation.position)
-        observedCells.add(cell)
-        observedSourceKeys.add(sourceMeasurementKey(observation))
-        const layers = layersByCell.get(cell) ?? []
+        const [cellX, cellY, cellZ] = worldCellCoordinates(observation.position)
+        const cellRecord = getOrCreateWorldCellRecord(worldCellIndex, cellX, cellY, cellZ)
+        const cellId = cellRecord.id
+        const layers = cellRecord.layers ?? (cellRecord.layers = [])
         candidateCellLookups += 1
         let best: LayerAccumulator | null = null, bestScore = Infinity
         for (const layer of layers) {
@@ -739,19 +1053,19 @@ export class LayeredMeasuredSurfaceFieldService {
         }
         if (!best) {
           if (layers.length >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell) {
-            candidateRejectedCellKeys.add(cell); candidateRejectedLayerCapacityCellKeys.add(cell)
+            candidateRejectedCellIds.add(cellId); candidateRejectedLayerCapacityCellIds.add(cellId)
             candidateLocalLayerCapacityRejectedMeasurements += 1
             continue
           }
           if (allLayers.length >= M88_LAYERED_FIELD_CONFIG.maximumFieldLayers) {
-            candidateRejectedCellKeys.add(cell); candidateRejectedLayerCapacityCellKeys.add(cell)
+            candidateRejectedCellIds.add(cellId)
             candidateGlobalFieldCapacityRejectedMeasurements += 1
             continue
           }
-          best = createLayerAccumulator(cell, observation)
-          layers.push(best); allLayers.push(best); layersByCell.set(cell, layers)
+          best = createLayerAccumulator(cellId, cellX, cellY, cellZ, observation, allLayers.length)
+          layers.push(best); allLayers.push(best)
         }
-        recordLayerObservation(best, observation)
+        recordLayerObservation(best, observation, medoidWork, frameOrdinals.frameOrdinal, frameOrdinals.viewpointOrdinal)
       }
       fieldIntegrationMs += performance.now() - integrationFrameStartedAt
     }
@@ -759,92 +1073,116 @@ export class LayeredMeasuredSurfaceFieldService {
 
     onStage?.('cleaning-surfaces')
     const coherenceStartedAt = performance.now()
-    const adjacency = buildLayerAdjacency(allLayers, layersByCell)
+    const adjacencyStartedAt = performance.now()
+    const adjacency = buildLayerAdjacency(allLayers, worldCellIndex)
+    stageTimings.coherenceAdjacencyIndex = performance.now() - adjacencyStartedAt
+    const componentsStartedAt = performance.now()
     const components = buildComponents(allLayers, adjacency.neighbors)
+    stageTimings.coherenceConnectedComponents = performance.now() - componentsStartedAt
     coherenceCellLookups = adjacency.coherenceCellLookups
     coherenceLayerCandidateVisits = adjacency.coherenceLayerCandidateVisits
     coherenceAdjacencyRelationChecks = adjacency.coherenceAdjacencyRelationChecks
     coherenceAdjacencyUndirectedEdgeCount = adjacency.coherenceAdjacencyUndirectedEdgeCount
+    coherenceNumericIndexLookupCount = adjacency.coherenceNumericIndexLookupCount
+    coherenceNumericIndexCollisionBucketCount = adjacency.coherenceNumericIndexCollisionBucketCount
+    coherenceNumericIndexCollisionProbeCount = adjacency.coherenceNumericIndexCollisionProbeCount
+    const supportStartedAt = performance.now()
     for (let layerIndex = 0; layerIndex < allLayers.length; layerIndex += 1) {
       const layer = allLayers[layerIndex]
-      const neighborFrames = new Set<number>(), localNeighborFrames = new Set<number>()
+      const neighborFrames = createMask(), localNeighborFrames = createMask()
       for (const neighborIndex of adjacency.neighbors[layerIndex]) {
         const neighbor = allLayers[neighborIndex]
         layer.coherentNeighborCount += 1
-        for (const frame of neighbor.supportFrames) {
-          neighborFrames.add(frame)
-          if (!layer.supportFrames.has(frame)) localNeighborFrames.add(frame)
-        }
+        forEachMaskBit(neighbor.supportFrameMask, (frameOrdinal) => {
+          setMaskBit(neighborFrames, frameOrdinal)
+          if (!hasMaskBit(layer.supportFrameMask, frameOrdinal)) setMaskBit(localNeighborFrames, frameOrdinal)
+        })
       }
-      layer.crossFrameNeighborFrames = localNeighborFrames
-      layer.crossFrameNeighborCount = localNeighborFrames.size
+      layer.crossFrameNeighborCount = maskBitCount(localNeighborFrames)
       // Direct same-cell multi-frame support is sufficient. A layer supported
       // by coherent neighbors instead needs both source-grid continuity in its
       // own frame and independent neighbors from other frames; this prevents a
       // single noisy sheet from self-promoting.
-      const directCrossFrameSupport = layer.supportFrames.size >= 2
+      const directCrossFrameSupport = maskBitCount(layer.supportFrameMask) >= 2
       const coherentCrossFrameSupport = layer.sourceLocalContinuity > 0 &&
         layer.coherentNeighborCount >= M88_LAYERED_FIELD_CONFIG.minimumCoherentNeighbors &&
-        neighborFrames.size >= 2 && layer.crossFrameNeighborCount >= 2
+        maskBitCount(neighborFrames) >= 2 && layer.crossFrameNeighborCount >= 2
       layer.promoted = directCrossFrameSupport || coherentCrossFrameSupport
     }
+    stageTimings.coherenceSupportPromotion = performance.now() - supportStartedAt
     stageTimings.coherenceAndPromotion = performance.now() - coherenceStartedAt
 
     const baselineSurfels = baseline?.surfels ?? []
-    const baselineAllCells = cellSetForSurfels(baselineSurfels)
+    const baselineAllCellIds = new Set<number>()
+    const baselineOutsideCellKeys = new Set<string>()
+    for (const surfel of baselineSurfels) {
+      const [cellX, cellY, cellZ] = worldCellCoordinates(surfel.position)
+      const cell = findWorldCellRecord(worldCellIndex, cellX, cellY, cellZ)
+      if (cell) baselineAllCellIds.add(cell.id)
+      else baselineOutsideCellKeys.add(formatWorldCellKey(cellX, cellY, cellZ))
+    }
     // All same-domain percentages use the candidate's complete observed-cell
     // domain. Baseline cells outside that domain remain visible as a separate
     // diagnostic but cannot inflate baseline survival above 100%.
-    const baselineCells = new Set([...baselineAllCells].filter((cell) => observedCells.has(cell)))
-    const baselineRepresentedOutsideObservedWorldCells = baselineAllCells.size - baselineCells.size
+    // Every world-cell record was created by the complete valid+normal input
+    // pass above, so the index's records are the observed domain itself.
+    const baselineCells = baselineAllCellIds
+    const baselineRepresentedOutsideObservedWorldCells = baselineOutsideCellKeys.size
     const promotedLayers = allLayers.filter((layer) => layer.promoted)
-    const candidateAllCells = new Set(promotedLayers.map((layer) => pointKey(layer.representative.position)))
-    const candidateCells = new Set([...candidateAllCells].filter((cell) => observedCells.has(cell)))
-    const candidateRepresentedOutsideObservedWorldCells = candidateAllCells.size - candidateCells.size
-    const candidateObservedCellMismatchCount = candidateRepresentedOutsideObservedWorldCells
+    const candidateAllCellIds = new Set(promotedLayers.map((layer) => layer.cellId))
+    const candidateCells = candidateAllCellIds
+    const candidateRepresentedOutsideObservedWorldCells = 0
+    const candidateObservedCellMismatchCount = 0
     const ownership: LayeredMeasuredSurfaceOwnership[] = promotedLayers.map((layer, surfelId) => {
-      const sameCellLayers = layersByCell.get(layer.cellKey) ?? []
-      const layerOrdinal = Math.max(0, sameCellLayers.indexOf(layer))
+      const sameCellLayers = worldCellIndex.records[layer.cellId]?.layers
+      const layerOrdinal = sameCellLayers ? Math.max(0, sameCellLayers.indexOf(layer)) : 0
+      const worldCellKey = formatWorldCellKey(layer.cellX, layer.cellY, layer.cellZ)
       return Object.freeze({
         surfelId,
         representativeFrameSequence: layer.representative.frameSequence,
         representativeSourceIndex: layer.representative.sourceIndex,
-        worldCellKey: layer.cellKey,
-        layerId: `${layer.cellKey}:layer-${layerOrdinal}`,
+        worldCellKey,
+        layerId: `${worldCellKey}:layer-${layerOrdinal}`,
         position: Object.freeze({ ...layer.representative.position }),
       })
     })
-    const candidateUnownedOrInventedCount = ownership.reduce((count, owner) => count + (observedSourceKeys.has(sourceMeasurementKey({
-      frameSequence: owner.representativeFrameSequence,
-      sourceIndex: owner.representativeSourceIndex,
-      position: owner.position,
-    })) ? 0 : 1), 0)
+    const candidateUnownedOrInventedCount = ownership.reduce((count, owner) => {
+      const frame = framesBySequence.get(owner.representativeFrameSequence)
+      const sourceIndex = owner.representativeSourceIndex
+      if (!frame || sourceIndex < 0 || sourceIndex >= frame.denseFrame.valid.length) return count + 1
+      const offset = sourceIndex * 3
+      const points = frame.denseFrame.points
+      const exact = points[offset] === owner.position.x && points[offset + 1] === owner.position.y && points[offset + 2] === owner.position.z
+      return exact ? count : count + 1
+    }, 0)
     const observedLayerCount = allLayers.length
-    const maximumObservedLayersPerCell = maximumLayersPerCell(layersByCell)
-    const maximumCandidateLayersPerCell = maximumLayersPerCell(layersByCell, true)
-    const candidateLocalLayerCapacitySaturatedCells = [...layersByCell.values()].filter((layers) => layers.length >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell).length
+    const maximumObservedLayersPerCell = maximumLayersPerCell(worldCellIndex.records)
+    const maximumCandidateLayersPerCell = maximumLayersPerCell(worldCellIndex.records, true)
+    const candidateLocalLayerCapacitySaturatedCells = worldCellIndex.records.filter((cell) => (cell.layers?.length ?? 0) >= M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell).length
     const candidateLocalLayerCapacitySaturated = candidateLocalLayerCapacitySaturatedCells > 0
     const candidateGlobalFieldCapacityReached = candidateGlobalFieldCapacityRejectedMeasurements > 0 || allLayers.length >= M88_LAYERED_FIELD_CONFIG.maximumFieldLayers
     const candidateCapacityRejectedMeasurements = candidateLocalLayerCapacityRejectedMeasurements + candidateGlobalFieldCapacityRejectedMeasurements
     // Keep the legacy aggregate field, but do not report global exhaustion just
     // because one local cell reached its four-layer safety bound.
     const candidateCapacityReached = candidateCapacityRejectedMeasurements > 0 || candidateGlobalFieldCapacityReached
-    const candidateLayerSafetyViolations = [...layersByCell.values()].reduce((count, layers) => count + Math.max(0, layers.filter((layer) => layer.promoted).length - M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell), 0)
+    const candidateLayerSafetyViolations = worldCellIndex.records.reduce((count, cell) => count + Math.max(0, (cell.layers?.filter((layer) => layer.promoted).length ?? 0) - M88_LAYERED_FIELD_CONFIG.maximumLayersPerCell), 0)
 
     const metricsStartedAt = performance.now()
-    const cellToComponent = new Map<string, number>()
-    for (const component of components) for (const layer of component.layers) if (!cellToComponent.has(layer.cellKey)) cellToComponent.set(layer.cellKey, component.id)
+    const cellToComponent = new Map<number, number>()
+    for (const component of components) for (const layer of component.layers) if (!cellToComponent.has(layer.cellId)) cellToComponent.set(layer.cellId, component.id)
     const componentById = new Map(components.map((component) => [component.id, component]))
     const orientationByComponentId = componentOrientations(components)
     const majorComponents = components.slice(0, M88_LAYERED_FIELD_CONFIG.maximumReportedComponents)
     const componentMetrics: LayeredSurfaceComponentMetric[] = []
     let unobservedProjectedCells = 0, baselineMissing = 0, candidateRepresented = 0, candidateStillRejected = 0, conflictingMultilayer = 0
     const componentForPoint = (point: SpatialPoint): SurfaceComponent | null => {
-      const direct = cellToComponent.get(pointKey(point))
+      const [cx, cy, cz] = worldCellCoordinates(point)
+      const directCell = findWorldCellRecord(worldCellIndex, cx, cy, cz)
+      const direct = directCell ? cellToComponent.get(directCell.id) : undefined
       if (direct !== undefined) return componentById.get(direct) ?? null
-      const [cx, cy, cz] = pointKey(point).split(':').map(Number)
       for (const [dx, dy, dz] of NEIGHBOR_OFFSETS) {
-        const id = cellToComponent.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+        const neighborCell = findWorldCellRecord(worldCellIndex, cx + dx, cy + dy, cz + dz)
+        const id = neighborCell ? cellToComponent.get(neighborCell.id) : undefined
         if (id !== undefined) return componentById.get(id) ?? null
       }
       return null
@@ -858,7 +1196,7 @@ export class LayeredMeasuredSurfaceFieldService {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
       for (const [x, y] of values) { minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y) }
       const observedByProjected = observedProjected
-      const componentConflicts = new Set([...component.cellKeys].filter((cell) => (layersByCell.get(cell)?.length ?? 0) > 1))
+      const componentConflicts = new Set([...component.cellIds].filter((cellId) => (worldCellIndex.records[cellId]?.layers?.length ?? 0) > 1))
       conflictingMultilayer += componentConflicts.size
       for (const cell of observedByProjected) {
         if (!baselineProjected.has(cell)) {
@@ -906,7 +1244,7 @@ export class LayeredMeasuredSurfaceFieldService {
     const finalSurfels = promotedLayers.map((layer, id): FinalizedRealitySurfel => {
       const representative = layer.representative
       const color = layer.color
-      const framesSupported = layer.supportFrames.size
+      const framesSupported = maskBitCount(layer.supportFrameMask)
       const varianceDenominator = Math.max(1, layer.observationCount - 1)
       const positionVarianceMetersSquared = (layer.positionM2.x + layer.positionM2.y + layer.positionM2.z) / varianceDenominator
       const depthVarianceMetersSquared = layer.depthM2 / varianceDenominator
@@ -923,21 +1261,21 @@ export class LayeredMeasuredSurfaceFieldService {
         colorSpace: 'srgb' as const,
         geometryConfidence: clamp(.45 + Math.min(.3, framesSupported * .1) + Math.min(.2, layer.coherentNeighborCount * .025) + representative.trackingQuality * .1, 0, 1),
         geometryObservationCount: layer.observationCount,
-        viewObservationCount: layer.supportViewpoints.size,
+        viewObservationCount: maskBitCount(layer.supportViewpointMask),
         firstObservedAt: layer.firstTimestamp,
         lastObservedAt: layer.lastTimestamp,
         positionVarianceMetersSquared,
         depthVarianceMetersSquared,
         normalVariance,
         trackingQuality: layer.trackingQualitySum / Math.max(1, layer.observationCount),
-        duplicateSurfaceCandidate: (layersByCell.get(layer.cellKey)?.length ?? 0) > 1,
+        duplicateSurfaceCandidate: (worldCellIndex.records[layer.cellId]?.layers?.length ?? 0) > 1,
         stabilityClass,
         colorConfidence: Math.min(1, layer.colorObservationCount / 4),
         colorObservationCount: layer.colorObservationCount,
       })
     })
     stageTimings.finalPacking = performance.now() - packingStartedAt
-    const observedCellCount = observedCells.size
+    const observedCellCount = worldCellIndex.records.length
     const candidateCoveragePercentage = Math.min(100, candidateCells.size / Math.max(1, observedCellCount) * 100)
     const baselineCoveragePercentage = Math.min(100, baselineCells.size / Math.max(1, observedCellCount) * 100)
     const observedArea = observedCellCount * M88_LAYERED_FIELD_CONFIG.cellSizeMeters ** 2
@@ -947,7 +1285,7 @@ export class LayeredMeasuredSurfaceFieldService {
     const retainedMedoidSamples = allLayers.reduce((sum, layer) => sum + layer.samples.length, 0)
     const inputMemoryBytes = snapshot.diagnostics.memoryBytes
     const candidateRepresentationMemoryBytes = candidateConsolidatedMeasurements * 48 + retainedMedoidSamples * 96
-    const candidateWorkingMemoryBytes = allLayers.length * 224 + observedCells.size * 48 + ownership.length * 96
+    const candidateWorkingMemoryBytes = allLayers.length * 224 + worldCellIndex.records.length * 48 + ownership.length * 96
     const candidateOutputMemoryBytes = finalSurfels.length * 128 + ownership.length * 96
     const numericMemoryBytes = inputMemoryBytes + candidateRepresentationMemoryBytes + candidateWorkingMemoryBytes + candidateOutputMemoryBytes
     const peakMemoryBytesLowerBound = inputMemoryBytes + candidateRepresentationMemoryBytes + candidateWorkingMemoryBytes
@@ -974,8 +1312,8 @@ export class LayeredMeasuredSurfaceFieldService {
       candidateObservedCellMismatchCount,
       baselineRepresentedOutsideObservedWorldCells,
       candidateRepresentedOutsideObservedWorldCells,
-      candidateRejectedWorldCells: candidateRejectedCellKeys.size,
-      candidateRejectedLayerCapacityCells: candidateRejectedLayerCapacityCellKeys.size,
+      candidateRejectedWorldCells: candidateRejectedCellIds.size,
+      candidateRejectedLayerCapacityCells: candidateRejectedLayerCapacityCellIds.size,
       candidateLocalLayerCapacityRejectedMeasurements,
       candidateGlobalFieldCapacityRejectedMeasurements,
       candidateLocalLayerCapacitySaturated,
@@ -989,14 +1327,17 @@ export class LayeredMeasuredSurfaceFieldService {
       coherenceLayerCandidateVisits,
       coherenceAdjacencyRelationChecks,
       coherenceAdjacencyUndirectedEdgeCount,
+      coherenceNumericIndexLookupCount,
+      coherenceNumericIndexCollisionBucketCount,
+      coherenceNumericIndexCollisionProbeCount,
       maximumFieldLayers: M88_LAYERED_FIELD_CONFIG.maximumFieldLayers,
       promotedLayerCount: promotedLayers.length,
       observedLayerCount,
       maximumObservedLayersPerCell,
       maximumCandidateLayersPerCell,
       candidateLayerSafetyViolations,
-      crossFrameSupportedLayerCount: allLayers.filter((layer) => layer.supportFrames.size >= 2).length,
-      coherentSupportPromotedLayerCount: promotedLayers.filter((layer) => layer.supportFrames.size < 2).length,
+      crossFrameSupportedLayerCount: allLayers.filter((layer) => maskBitCount(layer.supportFrameMask) >= 2).length,
+      coherentSupportPromotedLayerCount: promotedLayers.filter((layer) => maskBitCount(layer.supportFrameMask) < 2).length,
       frameLocalContinuityLayerCount: allLayers.filter((layer) => layer.sourceLocalContinuity > 0).length,
       holeClasses,
       coherentSurfaceComponents: Object.freeze(componentMetrics),
@@ -1009,6 +1350,15 @@ export class LayeredMeasuredSurfaceFieldService {
       candidateOutputMemoryBytes,
       peakMemoryBytesEstimate,
       peakMemoryBytesLowerBound,
+      consolidationCellIndexLookupCount: consolidationWork.cellIndexLookupCount,
+      consolidationCellIndexCollisionBucketCount: consolidationWork.cellIndexCollisionBucketCount,
+      consolidationCellIndexCollisionProbeCount: consolidationWork.cellIndexCollisionProbeCount,
+      consolidationSourceGridNeighborLookups: consolidationWork.sourceGridNeighborLookups,
+      consolidationSourceGridNeighborHits: consolidationWork.sourceGridNeighborHits,
+      medoidCandidateVisitsBeforeEquivalent: medoidWork.candidateVisitsBeforeEquivalent,
+      medoidDistanceVisitsBeforeEquivalent: medoidWork.distanceVisitsBeforeEquivalent,
+      medoidCandidateVisits: medoidWork.candidateVisits,
+      medoidDistanceVisits: medoidWork.distanceVisits,
       workerStageTimingsMs: Object.freeze(stageTimings),
     })
     return Object.freeze({ surfels: Object.freeze(finalSurfels), ownership: Object.freeze(ownership), diagnostics, bounds: calculateBounds(finalSurfels), colorStatistics: calculateColorStatistics(finalSurfels) })

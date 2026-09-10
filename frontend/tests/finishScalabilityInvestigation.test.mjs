@@ -73,11 +73,25 @@ function makeFrame(count, sequence, frameOrdinal) {
 }
 
 function makeSnapshot(totalSamples) {
-  const fullFrames = Math.floor(totalSamples / 1600)
-  const remainder = totalSamples % 1600
   const frames = []
-  for (let frame = 0; frame < fullFrames; frame += 1) frames.push(makeFrame(1600, frame, frame))
-  if (remainder > 0) frames.push(makeFrame(remainder, fullFrames, fullFrames))
+  if (totalSamples <= 153600) {
+    const fullFrames = Math.floor(totalSamples / 1600)
+    const remainder = totalSamples % 1600
+    for (let frame = 0; frame < fullFrames; frame += 1) frames.push(makeFrame(1600, frame, frame))
+    if (remainder > 0) frames.push(makeFrame(remainder, fullFrames, fullFrames))
+  } else {
+    // Keep the stress arm inside retainedRealityMeasurementService's 96-frame
+    // evidence bound. A larger sample count is distributed evenly rather than
+    // silently creating out-of-contract frame ordinals for the three-word masks.
+    const frameCount = 96
+    const samplesPerFrame = Math.ceil(totalSamples / frameCount)
+    let remaining = totalSamples
+    for (let frame = 0; frame < frameCount && remaining > 0; frame += 1) {
+      const count = Math.min(samplesPerFrame, remaining)
+      frames.push(makeFrame(count, frame, frame))
+      remaining -= count
+    }
+  }
   const memoryBytes = frames.reduce((sum, frame) => sum +
     frame.denseFrame.valid.byteLength + frame.denseFrame.normalizedX.byteLength +
     frame.denseFrame.normalizedY.byteLength + frame.denseFrame.distancesMeters.byteLength +
@@ -136,6 +150,38 @@ function runArm(arm, snapshot) {
   }
 }
 
+function layeredBenchmarkSummary(result) {
+  const diagnostics = result?.result?.diagnostics
+  if (!diagnostics) return null
+  return {
+    workerTimeMs: Number(diagnostics.workerTimeMs.toFixed(1)),
+    workerStageTimingsMs: diagnostics.workerStageTimingsMs,
+    observedLayerCount: diagnostics.observedLayerCount,
+    promotedLayerCount: diagnostics.promotedLayerCount,
+    coherenceCellLookups: diagnostics.coherenceCellLookups,
+    coherenceLayerCandidateVisits: diagnostics.coherenceLayerCandidateVisits,
+    coherenceAdjacencyRelationChecks: diagnostics.coherenceAdjacencyRelationChecks,
+    coherenceAdjacencyUndirectedEdgeCount: diagnostics.coherenceAdjacencyUndirectedEdgeCount,
+    coherenceNumericIndexLookupCount: diagnostics.coherenceNumericIndexLookupCount,
+    coherenceNumericIndexCollisionBucketCount: diagnostics.coherenceNumericIndexCollisionBucketCount,
+    coherenceNumericIndexCollisionProbeCount: diagnostics.coherenceNumericIndexCollisionProbeCount,
+    consolidationCellIndexLookupCount: diagnostics.consolidationCellIndexLookupCount,
+    consolidationCellIndexCollisionBucketCount: diagnostics.consolidationCellIndexCollisionBucketCount,
+    consolidationCellIndexCollisionProbeCount: diagnostics.consolidationCellIndexCollisionProbeCount,
+    consolidationSourceGridNeighborLookups: diagnostics.consolidationSourceGridNeighborLookups,
+    consolidationSourceGridNeighborHits: diagnostics.consolidationSourceGridNeighborHits,
+    medoidCandidateVisitsBeforeEquivalent: diagnostics.medoidCandidateVisitsBeforeEquivalent,
+    medoidCandidateVisits: diagnostics.medoidCandidateVisits,
+    medoidDistanceVisitsBeforeEquivalent: diagnostics.medoidDistanceVisitsBeforeEquivalent,
+    medoidDistanceVisits: diagnostics.medoidDistanceVisits,
+    inputMemoryBytes: diagnostics.inputMemoryBytes,
+    candidateRepresentationMemoryBytes: diagnostics.candidateRepresentationMemoryBytes,
+    candidateWorkingMemoryBytes: diagnostics.candidateWorkingMemoryBytes,
+    candidateOutputMemoryBytes: diagnostics.candidateOutputMemoryBytes,
+    peakMemoryBytesEstimate: diagnostics.peakMemoryBytesEstimate,
+  }
+}
+
 test('bounded Finish scalability regression covers graduated full-room and A/B arms', () => {
   const oneCount = Number(process.env.INVESTIGATION_SAMPLES)
   const graduated = Number.isInteger(oneCount) && oneCount > 0 ? [
@@ -160,6 +206,7 @@ test('bounded Finish scalability regression covers graduated full-room and A/B a
   let fullRoomCandidate = null
   for (const [label, count] of graduated) {
     const snapshot = makeSnapshot(count)
+    assert.ok(snapshot.frames.length <= 96, `${label} must stay within the 96 retained-frame mask bound`)
     const candidate = runArm('candidate', snapshot)
     report.push({
       label,
@@ -181,6 +228,7 @@ test('bounded Finish scalability regression covers graduated full-room and A/B a
         candidateRepresentationMemoryBytes: candidate.result?.diagnostics.candidateRepresentationMemoryBytes ?? null,
         candidateWorkingMemoryBytes: candidate.result?.diagnostics.candidateWorkingMemoryBytes ?? null,
         candidateOutputMemoryBytes: candidate.result?.diagnostics.candidateOutputMemoryBytes ?? null,
+        layeredDiagnostics: layeredBenchmarkSummary(candidate),
       },
     })
     console.log('FINISH_SCALABILITY_CASE ' + JSON.stringify(report.at(-1)))
@@ -203,8 +251,23 @@ test('bounded Finish scalability regression covers graduated full-room and A/B a
   report.push({
     sameFullRoomInput: 130000,
     baseline: { ok: baseline.ok, lastStage: baseline.stages.at(-1) ?? null, elapsedMs: Number(baseline.elapsedMs.toFixed(1)), errorName: baseline.errorName ?? null, errorMessage: baseline.errorMessage ?? null, stack: baseline.errorStack ?? null, outputSurfels: baseline.result?.surfels.length ?? null },
-    candidateOnly: { ok: candidate.ok, lastStage: candidate.stages.at(-1) ?? null, elapsedMs: Number(candidate.elapsedMs.toFixed(1)), errorName: candidate.errorName ?? null, errorMessage: candidate.errorMessage ?? null, stack: candidate.errorStack ?? null },
+    candidateOnly: { ok: candidate.ok, lastStage: candidate.stages.at(-1) ?? null, elapsedMs: Number(candidate.elapsedMs.toFixed(1)), baselineRatio: Number((candidate.elapsedMs / Math.max(.001, baseline.elapsedMs)).toFixed(3)), errorName: candidate.errorName ?? null, errorMessage: candidate.errorMessage ?? null, stack: candidate.errorStack ?? null, layeredDiagnostics: layeredBenchmarkSummary(candidate) },
     ab: { ok: both.ok, lastStage: both.stages.at(-1) ?? null, elapsedMs: Number(both.elapsedMs.toFixed(1)), errorName: both.errorName ?? null, errorMessage: both.errorMessage ?? null, stack: both.errorStack ?? null },
+  })
+
+  // A second, safe larger arm catches regressions that only appear above the
+  // historical 130k boundary. It compares the same retained input through
+  // baseline and candidate, but intentionally does not add another A/B pass.
+  const stressSnapshot = makeSnapshot(150000)
+  const stressBaseline = runArm('baseline', stressSnapshot)
+  const stressCandidate = runArm('candidate', stressSnapshot)
+  assert.equal(stressBaseline.ok, true, 'baseline should finish on the safe larger retained input')
+  assert.equal(stressCandidate.ok, true, 'candidate should finish on the safe larger retained input')
+  assert.ok(stressCandidate.result?.diagnostics.peakMemoryBytesEstimate > 0)
+  report.push({
+    sameStressInput: 150000,
+    baseline: { ok: stressBaseline.ok, elapsedMs: Number(stressBaseline.elapsedMs.toFixed(1)), outputSurfels: stressBaseline.result?.surfels.length ?? null },
+    candidateOnly: { ok: stressCandidate.ok, elapsedMs: Number(stressCandidate.elapsedMs.toFixed(1)), baselineRatio: Number((stressCandidate.elapsedMs / Math.max(.001, stressBaseline.elapsedMs)).toFixed(3)), layeredDiagnostics: layeredBenchmarkSummary(stressCandidate) },
   })
   console.log('FINISH_SCALABILITY_INVESTIGATION ' + JSON.stringify(report))
 })

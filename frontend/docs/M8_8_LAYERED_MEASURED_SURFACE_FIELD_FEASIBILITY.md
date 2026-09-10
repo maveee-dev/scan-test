@@ -1,7 +1,7 @@
 # M8.8 — Layered Measured Surface Field Feasibility
 
-Status: PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION; blocked pending
-physical large-scan validation on the POCO F5.
+Status: PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION; **Path C — stop
+M8.8 before another POCO scan**.
 The bounded software regression now completes the representative synthetic
 room envelope, but this does not advance the scanner build marker, unfreeze
 M7/customization, or replace the M8.7.1.6 production baseline.
@@ -10,21 +10,23 @@ The previously observed synthetic Finish stack-overflow blocker is documented
 in `docs/M8_8_SCALABILITY_BLOCKER_REPORT.md`. The current branch removes the
 unbounded diagnostic spread, separates the live match grid from the 2.5 cm
 measured grid, and raises only the live typed-array guardrail to 180,000. A
-physical large scan is still required to validate XR cadence, memory pressure,
-surface-layer quality and end-to-end Finish on target hardware.
+physical large scan would ultimately be required to validate XR cadence, memory
+pressure, surface-layer quality and end-to-end Finish on target hardware, but
+the current desktop ratio does not justify requesting that scan yet.
 
-The question is whether a bounded measured-surface field can recover coherent
+The completed worker-only feasibility question was whether a bounded measured-surface field can recover coherent
 room coverage while preserving real depth layers, without inventing geometry
-or making browser WebXR on the POCO F5 unacceptable. The next milestone is an
-offline, worker-only A/B using the identical retained physical capture. It is
+or making browser WebXR on the POCO F5 unacceptable. This milestone completed
+the offline, worker-only A/B on deterministic retained fixtures. It is
 not a production rewrite and it must stop if the resource or layer-safety
 gates below fail.
 
 The current bounded optimization is still investigation-only. Desktop
 fixtures show materially less duplicate coherence work, but the representative
-large-arm worker remains above the provisional performance envelope. No
-physical quality benefit is claimed until the identical POCO capture is
-replayed and per-surface coverage is measured.
+large-arm worker remains above the provisional relative performance envelope.
+No physical quality benefit is claimed. Because the end-to-end representation
+redesign still misses that gate, an identical POCO replay is not requested in
+this milestone.
 
 ## A. First bad stage and exact domains
 
@@ -296,7 +298,7 @@ larger renderer.
 
 Validation commands for the current repository are:
 
-    npm run test:reality   # 194 passed, 0 failed
+    npm run test:reality   # 204 passed, 0 failed
     npm run build          # passed; existing large-chunk advisory only
     npm run lint           # passed with no findings
     git diff --check       # passed
@@ -384,19 +386,53 @@ instance; final/default output remains baseline.
 
 ## M8.8 optimization evidence (current verdict remains STOP)
 
-The coherence pass now builds one indexed undirected compatibility adjacency
-from the existing 27 neighboring measured cells and reuses it for component
-BFS and coherent support/promotion. Offset and layer order are preserved so
-component IDs, representatives, ownership and floating-point reductions remain
-deterministic. The diagnostic still reports the legacy 27-cell lookup and
-candidate-visit definitions, plus relation checks and accepted undirected-edge
-counts.
+The coherence pass now builds one collision-safe numeric cell index and one
+indexed undirected compatibility adjacency from the existing 27 neighboring
+measured cells. It reuses that adjacency for component BFS and coherent
+support/promotion. Same-cell pairs and one deterministic half of the 26
+neighbor offsets cover every undirected pair exactly once; offset and layer
+order are preserved so component IDs, representatives, ownership and
+floating-point reductions remain deterministic. The diagnostic still reports
+the legacy 27-cell lookup and candidate-visit definitions, plus actual numeric
+index lookups, hash-collision buckets/probes, relation checks and accepted
+undirected-edge counts.
 
 Capacity diagnostics now distinguish local four-layer saturation/rejects from
 global 240,000-layer field saturation/rejects. The legacy aggregate fields are
 retained. Reaching four layers in one cell no longer implies global capacity;
 the supplied physical `166` rejects are explained by the local branch because
 the measured `220,484` candidate layers remain below `240,000`.
+
+The current bounded Path-A implementation also keeps exact source semantics
+while removing avoidable worker churn. Per-frame consolidation uses a
+collision-safe numeric coordinate record and a source-indexed grid array with
+bounds-checked eight-neighbor probes. Integration creates the world-cell
+records once and passes the same collision-safe index into adjacency; public
+world-cell strings are formatted only for ownership/diagnostic output. The
+former repeated medoid rescans are replaced by incremental pair scores for the
+first 64 samples, with the original candidate order and tie-break preserved.
+Retained-frame and deduplicated-viewpoint support use exact three-word masks
+(96-frame bound), and cross-frame neighbor sets are not retained after the
+support decision. These are representation changes only: the 22 mm safety
+gate, layer limits, promotion/evidence thresholds, ownership checks and
+capacity semantics are unchanged.
+
+The semantic-lock suite now covers 13 deterministic cases (clean, sparse,
+noisy, close-layer, recess, false-forward, unobserved-gap, empty, single,
+local-saturation, perpendicular, disconnected-offset and color-fallback).
+The seven historical hashes match the pre-redesign fixture values; the six
+additional cases are now locked as redesign regression fixtures. Diagnostics
+expose consolidation index lookups/collisions,
+source-grid neighbor hits, legacy-vs-incremental medoid work, and the
+adjacency/component/support timing split. Singleton hash buckets avoid one
+array per occupied cell, source-grid cell IDs use an Int32Array, and raw
+observed world records allocate layer arrays lazily. The observed-domain Set
+was removed after an exact valid+normal-domain test proved world-cell records
+equivalent; coherence collision probes are adjacency-phase only. The numeric
+index and masks are ordinary JavaScript records/numbers; the existing
+conservative formula still reports modeled bytes only. Engine-dependent
+Map/array/object overhead is not priced, no exact typed-array byte count exists
+for these structures, and a memory reduction is therefore not claimed.
 
 The experimental and baseline A/B preview modes use the same renderer/camera
 and flat diagnostic colors, but now use the existing measured normal/radius
@@ -412,13 +448,52 @@ synchronous snapshot CPU, yield epochs/count and maximum uninterrupted snapshot
 group duration; the existing rAF/long-task and actual postMessage timestamps
 remain available.
 
-Measured desktop regression (same 130,000-sample synthetic fixture) improved
-candidate-only reconstruction from approximately `9,055.7 ms` before the
-adjacency change to `6,192.3 ms` after it; baseline was `1,583.3 ms` and the
-combined A/B was `6,706.3 ms` in the after run. A separate bounded run measured
-`2,798.9 ms` candidate-only due normal JIT/GC variance. These are not POCO
-measurements. The worker remains above the provisional `<=8 s and <=1.25x`
-physical gate when the A/B and input cost are considered, so the current
-verdict is **PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION**. No
-production promotion, M7/customization change, capacity increase or physical
-scan request follows from this result.
+Three isolated idle iterations of the final representation measured candidate,
+baseline and combined A/B wall medians (ranges) as follows; the 180k arm uses
+exactly 96 frames to stay inside the retained evidence bound:
+
+| Input | Candidate | Baseline | Candidate/Baseline | Combined A/B |
+| --- | ---: | ---: | ---: | ---: |
+| 1,600 / 1 frame | 30.8 ms (29.7–31.7) | 28.0 ms (26.7–28.0) | 1.10× | 39.2 ms (38.2–49.7) |
+| 130,000 / 82 frames | 1,177.1 ms (1,173.8–1,236.2) | 717.7 ms (712.8–722.8) | 1.64× | 2,986.8 ms (2,794.9–3,166.7) |
+| 150,000 / 94 frames | 1,316.4 ms (1,294.7–1,392.9) | 838.5 ms (830.3–842.1) | 1.57× | 3,999.7 ms (3,867.7–4,212.3) |
+| 180,000 / 96 frames | 1,687.8 ms (1,679.6–1,704.9) | 1,061.4 ms (977.0–1,126.9) | 1.59× | 4,835.2 ms (4,553.6–5,135.9) |
+
+Candidate stage medians at 130k/150k/180k were respectively
+consolidation `308/400/505 ms`, integration `198/239/252 ms`,
+coherence/promotion `522/471/703 ms` (adjacency/index `326/275/393 ms`,
+components `75/66/97 ms`, support/promotion `123/130/213 ms`) and component
+metrics `39/49/57 ms`. These separated-room fixtures have one sample per
+world cell, so medoid counters are zero; repeated coherent fixtures exercise
+incremental scoring and report the corresponding before/actual candidate and
+distance work directly. These are not POCO measurements. The candidate remains
+above the provisional `<=1.25x` relative gate, so the current verdict is
+**PERFORMANCE FAIL / QUALITY BENEFIT UNDER INVESTIGATION** and **Path C — stop
+M8.8**. The remaining object/Map indirection would require replacing the
+candidate architecture with a full structure-of-arrays field while its physical
+quality benefit is still unproven. No production promotion, M7/customization
+change, capacity increase or physical scan request follows.
+
+For historical comparison, the earlier post-index/pre-representation validation
+on the same deterministic fixture remained semantically equivalent to the clean
+`b6483f2` source: the permanent clean, sparse, noisy,
+close-layer, recess, false-forward and unobserved-gap fixtures retain their
+captured 16-hex semantic hashes. In the latest full-suite desktop process,
+130,000 layers took `2,053.9 ms` candidate-only versus `804.2 ms` baseline-only
+(`2.554x`); adjacency/index was `525.6 ms`, connected components `82.6 ms`,
+and support/promotion `47.4 ms`. The safe 150,000 arm took `2,472.2 ms`
+candidate versus `911.7 ms` baseline (`2.711x`), with `564.2 ms` adjacency.
+The 130k/150k operation counts were respectively 3.51m/4.05m legacy cell
+lookups, 347,120/392,720 derived legacy candidate visits, 108,560/121,360
+undirected relation checks, and 1.69m/1.95m numeric half-neighborhood lookups;
+the numeric index reported 13 exact-coordinate collision probes and no
+multi-cell collision buckets in these fixtures. The diagnostic's modeled peak
+estimates were 59.93 MB and 69.15 MB, using the existing input,
+representation, working and output formulas (including
+`allLayers * 224 + observedCells * 48 + ownership * 96`). They do not price
+engine-dependent `Map`/record/array overhead or explicitly account for the new
+numeric-index records and cell-coordinate fields. No precise typed-array byte
+count is available for those objects, so memory reduction is not proven;
+operation counts are the reliable index-cost evidence. Run-to-run JIT/GC
+variation is material. Those predecessor ratios motivated the final
+representation redesign above; they are not current measurements.

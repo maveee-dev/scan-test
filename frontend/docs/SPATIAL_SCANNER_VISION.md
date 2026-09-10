@@ -2776,3 +2776,38 @@ renderer/camera/OrbitControls instance, lazily transfers the experimental
 surfel graph only when selected, and records local mount/first-restored-surface
 paint timing without mutating the frozen scan result; physical POCO validation
 and the GO/STOP decision remain pending.
+
+M8.8 is now closed on **Path C**. It proved that broader measured evidence can
+increase represented coverage while preserving close layers, recesses,
+protrusions and exact source ownership, but its final large-input candidate
+remained 1.57–1.64× the M8.7.1.6 baseline against a preferred <=1.25× target.
+Further work would replace the remaining representation with a new SoA system
+without first proving proportional screen-space benefit. Do not micro-optimize,
+promote or physically validate M8.8; M8.7.1.6 remains production.
+
+### M8.9 — Next Reconstruction Architecture Feasibility (decision)
+
+M8.9 compared the current canonical surfels, ordinary and layer-aware sparse
+volumes, depth-keyframe/local meshes, image-backed measured geometry and
+surfel-remeshing alternatives against the actual retained contract and
+browser/POCO constraints. The decision is **Path A — prototype candidate
+found**: advance a Measured Depth-Keyframe Patch Atlas in one bounded offline
+M8.9.1 A/B. See
+[M8.9 next reconstruction architecture feasibility](M8_9_NEXT_RECONSTRUCTION_ARCHITECTURE_FEASIBILITY.md).
+
+The isolated topology prototype consumes the existing retained depth grids and
+emits conservative per-frame indexed triangles whose vertices preserve exact
+frame/sample ownership. Clean, gap, 28 mm layer, protrusion, recess,
+perpendicular-surface, false-forward, 36 mm noise, determinism and bounded-scale
+fixtures pass. A full 96×80×45 envelope produced 345,600 source-owned vertices
+and 667,392 triangles in 18.19 MiB packed output. Desktop construction ranged
+from 636.99 ms isolated to 1,648.89 ms under full-suite load. This does not
+establish POCO, worker, render or screen-space success.
+
+M8.9.1 must add exact experimental projection/depth matrices and RGB-keyframe
+association, bounded local depth fusion, deterministic patch selection and
+fixed-view screen-space audits. It must not complete unsupported pixels, merge
+defended layers or enter production. No POCO test is justified until it proves
+materially better useful-pixel coverage, preserved depth semantics, credible
+same-input runtime and bounded measured peak memory. M7 and customization
+remain frozen.
