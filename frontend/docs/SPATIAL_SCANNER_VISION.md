@@ -2903,3 +2903,40 @@ still required before browser/device runtime or physical-quality claims, and
 before any production promotion. M8.7.1.6 remains production; M8.8 and M8.10
 remain closed. See
 [M8.12 Synchronized RGB-D Capture Contract + Same-Input Browser Proof](M8_12_SYNCHRONIZED_RGBD_CAPTURE_CONTRACT_BROWSER_PROOF.md).
+
+### M8.13 — View-Dependent Visual Reality (experimental)
+
+M8.13 implements the bounded visual experiment enabled by M8.12 while keeping
+M8.7.1.6 as production. An opt-in dedicated worker builds conservative
+source-grid triangles for at most eight synchronized RGB-D keyframes. The
+interactive renderer ranks already-built views against the virtual camera and
+shows at most four direct, source-owned image layers. World positions remain
+measured; RGB UVs use each owning keyframe's retained view/projection and
+crop/orientation/resize mapping. Invalid samples, depth changes above 22 mm,
+edges above 10 cm, degenerate triangles, and unmappable RGB vertices are
+rejected. There is no global merge, inferred completion, hole fill, M7 visual
+substitution, or customization change.
+
+Coverage investigation proved that durable 5 cm coverage cells do not expire
+or downgrade during an active scan. The confusing non-sticking effect came
+from a 220 ms current-frame visual cache, independently expiring weak live
+surfels, and captured cells previously becoming fully transparent. Captured
+cells now retain a faint persistent cue only after the measured-state verdict
+was proven, and finalized diagnostics persist the state counts and presentation
+settings.
+
+Finish profiling proved that the closed M8.10 atlas was still built serially
+after the production canonical result. Its redundancy stage dominated longer
+inputs. Finish now computes only M8.7.1.6; the unused synchronized RGB-D payload
+is excluded from the default quality worker and M8.13 remains explicitly lazy.
+Desktop isolated same-input measurements observed 100.9 ms baseline versus
+342.6 ms former eager total at 12,800 samples, and 753.1 ms versus 4,603.9 ms
+at 130,000 samples. Concurrent full-suite runs were slower but preserved the
+same ownership: 167.2 versus 958.2 ms and 1,810.2 versus 8,806.6 ms. These are
+code-path proxies, not POCO promises.
+
+A same-scene automated fixture renders both architectures and preserves source
+ownership, real gaps, close layers, and the eight-input/four-active bounds.
+One short POCO same-scan A/B is now justified; no physical-quality or production
+promotion claim has yet been made. See
+[M8.13 View-Dependent Visual Reality Experiment](M8_13_VIEW_DEPENDENT_VISUAL_REALITY_EXPERIMENT.md).

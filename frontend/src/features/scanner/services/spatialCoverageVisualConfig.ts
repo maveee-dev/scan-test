@@ -11,7 +11,9 @@ export const COVERAGE_VISUAL_OPACITY = {
   candidate: 0.45,
   observed: 0.3,
   partial: 0.14,
-  captured: 0,
+  // Completed cells remain faintly visible so users can distinguish durable
+  // measured coverage from the short-lived current-frame mask.
+  captured: 0.055,
 } as const
 
 /** Continuous live-mask confidence; persistent states remain discrete. */

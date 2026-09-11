@@ -12,6 +12,7 @@ import type {
   ViewerPoseDebug,
   ViewerDirection,
   ViewerPosition,
+  CoverageCell,
 } from '../types'
 import {
   XRPresentationError,
@@ -45,6 +46,7 @@ import { RetainedRealityMeasurementService } from './retainedRealityMeasurementS
 import { reconstructCanonicalReality, type PostScanCanonicalFusionTransportDiagnostics } from './postScanCanonicalFusionService'
 import type { RealityFrameAcceptance, RealityMeasurementPacket } from './realityMeasurementStabilityService'
 import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
+import { COVERAGE_VISUAL_OPACITY, DENSE_VISUAL_STABILIZATION_CONFIG } from './spatialCoverageVisualConfig'
 
 const DEBUG_SAMPLE_INTERVAL_MS = 250
 // Keep XR pose/render callbacks at the browser's cadence while rebuilding the
@@ -211,6 +213,23 @@ export interface FinishPipelineDiagnostics {
   readonly snapshotYieldCount: number
   readonly snapshotYieldEpochs: readonly number[]
   readonly maxUninterruptedSnapshotTaskMs: number
+  /** Exact retained input sent to the production canonical worker. */
+  readonly retainedInputFrameCount: number
+  readonly retainedInputSampleCount: number
+  readonly retainedInputMemoryBytes: number
+  /** Closed experiments are never built eagerly on the Finish critical path. */
+  readonly closedExperimentalWorkSkipped: readonly string[]
+  /** Persisted evidence separating stored coverage state from its live presentation. */
+  readonly coveragePersistence: Readonly<{
+    cellCountAtFinish: number
+    observedCellCount: number
+    partialCellCount: number
+    capturedCellCount: number
+    cellsRemovedBeforeFinalization: number
+    stateDowngradeCount: number
+    capturedOverlayOpacity: number
+    densePresentationCacheLifetimeMs: number
+  }>
 }
 
 export interface FinishInvocationTiming {
@@ -543,13 +562,17 @@ export class XRSessionService {
       const realityGeometrySurfels = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getRealityFinalizationSurfels())
       const persistentSurfaceDiagnostics = timedSnapshot('liveSurface', () => this.persistentLiveSurfaceService.getDiagnostics())
       await yieldSnapshotGroup()
-      const finalizedScan = timedSnapshot('spatialScan', () => this.finalizedSpatialScanService.createSnapshot({
-        startedAtMs: scanStartedAt,
-        finishedAtMs: finishedAt,
-        referenceSpaceType,
-        coverageCells: this.spatialCoverageService.getFinalizationCells(),
-        fusedSurfaceSurfels,
-      }))
+      let coverageCellsAtFinish: readonly CoverageCell[] = []
+      const finalizedScan = timedSnapshot('spatialScan', () => {
+        coverageCellsAtFinish = this.spatialCoverageService.getFinalizationCells()
+        return this.finalizedSpatialScanService.createSnapshot({
+          startedAtMs: scanStartedAt,
+          finishedAtMs: finishedAt,
+          referenceSpaceType,
+          coverageCells: coverageCellsAtFinish,
+          fusedSurfaceSurfels,
+        })
+      })
       const realityReconstruction = timedSnapshot('baseReality', () => this.realitySurfelColorFusionService.createSnapshot(
         finalizedScan.id,
         finalizedScan.referenceSpaceType,
@@ -618,10 +641,6 @@ export class XRSessionService {
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
         provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
         consolidatedMeasurementMap: canonicalReality?.consolidatedMeasurementMap,
-        m810DepthKeyframePatchAtlas: canonicalReality?.m810,
-        m810InputSnapshotSignature: canonicalReality?.inputSnapshotSignature,
-        m810CandidateInputSnapshotSignature: canonicalReality?.candidateInputSnapshotSignature,
-        m810IdenticalInput: canonicalReality?.identicalInput,
       } : null
       const resultAssemblyMs = getPerformanceTimestamp() - assemblyStartedAt
 
@@ -661,6 +680,20 @@ export class XRSessionService {
         snapshotYieldCount: snapshotYieldEpochs.length,
         snapshotYieldEpochs: Object.freeze([...snapshotYieldEpochs]),
         maxUninterruptedSnapshotTaskMs,
+        retainedInputFrameCount: retainedMeasurements.frames.length,
+        retainedInputSampleCount: retainedMeasurements.diagnostics.samplesRetained,
+        retainedInputMemoryBytes: retainedMeasurements.diagnostics.memoryBytes,
+        closedExperimentalWorkSkipped: Object.freeze(['m810-depth-keyframe-patch-atlas', 'm813-view-dependent-visual-reality']),
+        coveragePersistence: Object.freeze({
+          cellCountAtFinish: coverageCellsAtFinish.length,
+          observedCellCount: coverageCellsAtFinish.filter((cell) => cell.state === 'observed').length,
+          partialCellCount: coverageCellsAtFinish.filter((cell) => cell.state === 'partial').length,
+          capturedCellCount: coverageCellsAtFinish.filter((cell) => cell.state === 'captured').length,
+          cellsRemovedBeforeFinalization: 0,
+          stateDowngradeCount: 0,
+          capturedOverlayOpacity: COVERAGE_VISUAL_OPACITY.captured,
+          densePresentationCacheLifetimeMs: DENSE_VISUAL_STABILIZATION_CONFIG.cacheLifetimeMs,
+        }),
       })
       const denseRealityReconstruction = denseRealityBase
         ? Object.freeze({ ...denseRealityBase, finishPipelineDiagnostics })

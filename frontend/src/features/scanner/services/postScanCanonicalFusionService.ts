@@ -1,9 +1,5 @@
 import { CanonicalRealityFusionService, type CanonicalRealityFusionResult, type CanonicalReconstructionStage } from './canonicalRealityFusionService'
 import { createRetainedRealityMeasurementSnapshotSignature } from './layeredMeasuredSurfaceFieldService'
-import {
-  buildM810DepthKeyframePatchAtlas,
-  type M810DepthKeyframePatchAtlasResult,
-} from './m810DepthKeyframePatchAtlasService'
 import type { RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
 
 function transferBuffers(snapshot: RetainedRealityMeasurementSnapshot): ArrayBuffer[] {
@@ -22,7 +18,7 @@ function transferBuffers(snapshot: RetainedRealityMeasurementSnapshot): ArrayBuf
 }
 
 export interface PostScanWorkerStageTiming {
-  readonly arm: 'baseline' | 'm810'
+  readonly arm: 'baseline'
   readonly stage: CanonicalReconstructionStage
   readonly epochMs: number
 }
@@ -42,12 +38,8 @@ export interface PostScanCanonicalFusionTransportDiagnostics {
 export interface PostScanCanonicalFusionResult extends CanonicalRealityFusionResult {
   /** The unchanged M8.7.1.6 arm; spread fields remain backward-compatible. */
   readonly baseline: CanonicalRealityFusionResult
-  /** Isolated M8.10 arm. It never becomes the production `surfels` field. */
-  readonly m810: M810DepthKeyframePatchAtlasResult
   readonly inputSnapshotSignature: string
   readonly baselineInputSnapshotSignature: string
-  readonly candidateInputSnapshotSignature: string
-  readonly identicalInput: boolean
   readonly transportDiagnostics?: PostScanCanonicalFusionTransportDiagnostics
 }
 
@@ -69,15 +61,11 @@ export function reconstructCanonicalReality(
     const inputSnapshotSignature = createRetainedRealityMeasurementSnapshotSignature(snapshot)
     const baselineReplay = new CanonicalRealityFusionService().reconstruct(snapshot, onStage)
     const baseline = Object.freeze({ ...baselineReplay, diagnostics: Object.freeze({ ...baselineReplay.diagnostics, inputSnapshotSignature }) })
-    const m810 = buildM810DepthKeyframePatchAtlas(snapshot, inputSnapshotSignature)
     return Promise.resolve(Object.freeze({
       ...baseline,
       baseline,
-      m810,
       inputSnapshotSignature,
       baselineInputSnapshotSignature: inputSnapshotSignature,
-      candidateInputSnapshotSignature: m810.diagnostics.inputSnapshotSignature,
-      identicalInput: inputSnapshotSignature === m810.diagnostics.inputSnapshotSignature,
       transportDiagnostics: Object.freeze({
         mainPostMessageBeginEpochMs: null,
         mainPostMessageEndEpochMs: null,
@@ -99,7 +87,7 @@ export function reconstructCanonicalReality(
     worker.onmessage = (event: MessageEvent<{
       id: number
       stage?: CanonicalReconstructionStage
-      stageArm?: 'baseline' | 'm810'
+      stageArm?: 'baseline'
       stageEpochMs?: number
       result?: PostScanCanonicalFusionResult
       transport?: Omit<PostScanCanonicalFusionTransportDiagnostics, 'mainPostMessageBeginEpochMs' | 'mainPostMessageEndEpochMs' | 'mainPostMessageEpochMs' | 'mainResultReceiveEpochMs'>

@@ -21,8 +21,10 @@ function moduleUrl(url) {
 const serviceUrl = new URL('../src/features/scanner/services/', import.meta.url)
 const canonicalModule = await import(moduleUrl(new URL('canonicalRealityFusionService.ts', serviceUrl)))
 const layeredModule = await import(moduleUrl(new URL('layeredMeasuredSurfaceFieldService.ts', serviceUrl)))
+const m810Module = await import(moduleUrl(new URL('m810DepthKeyframePatchAtlasService.ts', serviceUrl)))
 const { CanonicalRealityFusionService } = canonicalModule
 const { LayeredMeasuredSurfaceFieldService } = layeredModule
+const { buildM810DepthKeyframePatchAtlas } = m810Module
 
 function makeFrame(count, sequence, frameOrdinal) {
   const columns = 40
@@ -270,4 +272,30 @@ test('bounded Finish scalability regression covers graduated full-room and A/B a
     candidateOnly: { ok: stressCandidate.ok, elapsedMs: Number(stressCandidate.elapsedMs.toFixed(1)), baselineRatio: Number((stressCandidate.elapsedMs / Math.max(.001, stressBaseline.elapsedMs)).toFixed(3)), layeredDiagnostics: layeredBenchmarkSummary(stressCandidate) },
   })
   console.log('FINISH_SCALABILITY_INVESTIGATION ' + JSON.stringify(report))
+})
+
+test('production Finish scaling excludes the closed atlas and reports same-input savings', () => {
+  const report = []
+  for (const samples of [12800, 130000]) {
+    const snapshot = makeSnapshot(samples)
+    const baseline = runArm('baseline', snapshot)
+    assert.equal(baseline.ok, true)
+    const atlasStartedAt = performance.now()
+    const atlas = buildM810DepthKeyframePatchAtlas(snapshot, `finish-scaling-${samples}`)
+    const closedAtlasMs = performance.now() - atlasStartedAt
+    report.push({
+      samples,
+      frames: snapshot.frames.length,
+      retainedMiB: Number((snapshot.diagnostics.memoryBytes / 1048576).toFixed(2)),
+      optimizedProductionMs: Number(baseline.elapsedMs.toFixed(1)),
+      previousEagerClosedAtlasMs: Number(closedAtlasMs.toFixed(1)),
+      previousEagerTotalMs: Number((baseline.elapsedMs + closedAtlasMs).toFixed(1)),
+      avoidedMs: Number(closedAtlasMs.toFixed(1)),
+      baselineStagesMs: baseline.result.diagnostics.workerStageTimingsMs,
+      atlasStagesMs: atlas.diagnostics.timings,
+    })
+  }
+  console.log('FINISH_BASELINE_ONLY_SCALING ' + JSON.stringify(report))
+  assert.ok(report[1].previousEagerClosedAtlasMs > 0)
+  assert.equal(readFileSync(new URL('../src/features/scanner/services/postScanCanonicalFusion.worker.ts', import.meta.url), 'utf8').includes('buildM810DepthKeyframePatchAtlas'), false)
 })

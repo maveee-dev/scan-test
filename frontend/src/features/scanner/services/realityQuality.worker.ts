@@ -2,17 +2,14 @@
 import { filterRealityConfidence, type RealityConfidenceFilterResult } from './realityConfidenceFiltering'
 import { refineRealityDisplay, type RealityDisplayRefinement } from './realityDisplayRefinement'
 import { appendRealityTextureBatches, createRealitySurfaceRenderResources, packRealitySurface } from './realitySurfaceRenderingService'
-import { createM810PatchAtlasPreparedSurface } from './m810DepthKeyframePatchRenderingService'
-import type { M810DepthKeyframePatchAtlasResult } from './m810DepthKeyframePatchAtlasService'
 import type { FinalizedDenseRealityReconstruction, FinalizedRealitySurfel } from '../types'
 import { PROVISIONAL_EXPIRY_REASON } from './canonicalRealityFusionService'
 
 let raw: FinalizedDenseRealityReconstruction | null = null
 let filtered: RealityConfidenceFilterResult | null = null
 let refined: RealityDisplayRefinement | null = null
-let m810PatchAtlas: M810DepthKeyframePatchAtlasResult | null = null
 
-self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruction; m810PatchAtlas?: M810DepthKeyframePatchAtlasResult; mode: string; id: number }>) => {
+self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruction; mode: string; id: number }>) => {
   try {
     const { source, mode, id } = event.data
     if (source) {
@@ -21,16 +18,9 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       filtered = filterRealityConfidence(canonical)
       refined = refineRealityDisplay(filtered.surfels, source.appearanceKeyframes?.keyframes ?? [])
     }
-    if (event.data.m810PatchAtlas && raw) {
-      m810PatchAtlas = event.data.m810PatchAtlas
-    }
     if (!raw || !filtered || !refined) return
     const live = raw.liveLightweightSurfels ?? raw.fusedRawSurfels ?? raw.surfels
     const canonical = raw.canonicalSurfels ?? raw.surfels
-    const useM810 = mode === 'm810-atlas'
-    // M8.10 is deliberately a measured-only display mode. Do not eagerly run
-    // the production confidence/refinement pipeline for it on initial mount.
-    // If a future candidate-refined mode is added, it can opt into these arms.
     const activeFiltered = filtered
     const activeRefined = refined
     const measured = (raw.rawMeasurements ?? []).map((sample, index): FinalizedRealitySurfel => ({
@@ -110,22 +100,8 @@ self.onmessage = (event: MessageEvent<{ source?: FinalizedDenseRealityReconstruc
       if (mode === 'reveal') { const t = ((s.firstObservedAt ?? 0) - earliest) / Math.max(1, latest - earliest); color = { r: t, g: 1 - t, b: .8 } }
       return { ...s, colorRgb: color }
     }) : stageDisplay
-    const comparisonMode = mode === 'baseline-canonical' || mode === 'baseline-flat-triangles' || mode === 'm810-atlas'
+    const comparisonMode = mode === 'baseline-canonical' || mode === 'baseline-flat-triangles'
     const pointsOnly = diagnostic || mode === 'density' || mode === 'geometry' || mode === 'canonical' || mode === 'retained'
-    // Keep the production/final display untouched. The baseline control uses
-    // the existing measured path; M8.10 uses its indexed flat atlas so A/B
-    // differences are geometry/coverage differences, not appearance choices.
-    if (useM810 && m810PatchAtlas) {
-      const prepared = createM810PatchAtlasPreparedSurface(m810PatchAtlas)
-      const transfers = [...new Set([
-        ...prepared.geometries.flatMap((g) => [
-          ...g.attributes.map((a) => a.array.buffer as ArrayBuffer),
-          ...(g.index ? [g.index.array.buffer as ArrayBuffer] : []),
-        ]),
-      ])]
-      self.postMessage({ id, prepared, stats: activeRefined.stats, filterStats: activeFiltered.stats }, { transfer: transfers })
-      return
-    }
     const renderMode = mode === 'baseline-flat-triangles' ? 'triangles' : comparisonMode ? 'splats' : pointsOnly ? 'points' : mode === 'canonical-triangulated' || mode === 'triangulated' ? 'triangles' : 'dense'
     const resources = createRealitySurfaceRenderResources({ surfels: display }, renderMode)
     if (mode === 'textured' || mode === 'final') appendRealityTextureBatches(resources, display, activeRefined.textureBindingCandidates, raw.appearanceKeyframes?.keyframes ?? [])
