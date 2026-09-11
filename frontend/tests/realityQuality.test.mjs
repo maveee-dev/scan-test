@@ -723,6 +723,13 @@ test('sparse weak multi-view parallel sheet is rejected without topology evidenc
   assert.ok(result.diagnostics.falseParallelLayersCollapsed>0);assert.ok(result.diagnostics.secondLayerClassification.falseDuplicate+result.diagnostics.secondLayerClassification.uncertainParallelLayer>0)
 })
 
+test('diagnostic: repeated full-sheet offset is currently classified as a defended object layer',()=>{
+  const wall=plane(10,-2),offset=plane(10,-1.94).map((s,i)=>sample(10000+i,s.position.x,s.position.y,s.position.z))
+  const result=canonical([retainedFrame([...wall,...offset],1),retainedFrame([...wall,...offset],2,.12),retainedFrame([...wall,...offset],3,.24)])
+  console.log('FULL_SHEET_OFFSET_DIAGNOSTIC',JSON.stringify({surfels:result.surfels.length,offsetSurfels:result.surfels.filter(s=>s.position.z>-1.97).length,trueLayers:result.diagnostics.trueSeparateLayersRetained,object:result.diagnostics.secondLayerClassification.objectProtrusion,falseDuplicate:result.diagnostics.secondLayerClassification.falseDuplicate,uncertain:result.diagnostics.secondLayerClassification.uncertainParallelLayer}))
+  assert.ok(result.surfels.filter(s=>s.position.z>-1.97).length>0)
+})
+
 test('canonical replay is approximately invariant to legal retained-frame order',()=>{
   const wall=plane(8),frames=[1,2,3,4,5].map(i=>retainedFrame(wall.map((s,j)=>sample(j,s.position.x+(i%2)*.005,s.position.y,s.position.z)),i))
   const normal=canonical(frames),reordered=canonical([frames[2],frames[0],frames[4],frames[1],frames[3]])
