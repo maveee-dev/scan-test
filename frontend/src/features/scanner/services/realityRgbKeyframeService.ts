@@ -28,6 +28,10 @@ export interface RealityRgbKeyframeCaptureResult {
   readonly outcome: RealityRgbKeyframeCandidateOutcome
   readonly captured: boolean
   readonly retainedCount: number
+  /** Exact newly captured application-owned keyframe, when captured. */
+  readonly keyframe: RealityRgbKeyframe | null
+  /** Keyframe removed by bounded appearance replacement, when applicable. */
+  readonly replacedKeyframeId: number | null
 }
 
 function now(): number { return typeof performance === 'undefined' ? Date.now() : performance.now() }
@@ -78,7 +82,11 @@ export class RealityRgbKeyframeService {
   private lastDirection: ViewerDirection | null = null
   private lastTimestamp = Number.NEGATIVE_INFINITY
 
-  private result(outcome: RealityRgbKeyframeCandidateOutcome): RealityRgbKeyframeCaptureResult {
+  private result(
+    outcome: RealityRgbKeyframeCandidateOutcome,
+    keyframe: RealityRgbKeyframe | null = null,
+    replacedKeyframeId: number | null = null,
+  ): RealityRgbKeyframeCaptureResult {
     const key = outcomeKey(outcome)
     const candidateOutcomes = { ...this.diagnostics.candidateOutcomes, [key]: this.diagnostics.candidateOutcomes[key] + 1 }
     this.diagnostics = {
@@ -89,7 +97,7 @@ export class RealityRgbKeyframeService {
       rejectedDuplicateCount: outcome === 'duplicate-view-skipped' ? this.diagnostics.rejectedDuplicateCount + 1 : this.diagnostics.rejectedDuplicateCount,
       skippedForPressureCount: outcome === 'pressure-skipped' ? this.diagnostics.skippedForPressureCount + 1 : this.diagnostics.skippedForPressureCount,
     }
-    return { outcome, captured: outcome === 'captured', retainedCount: this.keyframes.length }
+    return { outcome, captured: outcome === 'captured', retainedCount: this.keyframes.length, keyframe, replacedKeyframeId }
   }
 
   private cameraAvailable(rawCamera: XRRawCameraService): boolean {
@@ -161,13 +169,14 @@ export class RealityRgbKeyframeService {
       rotationDeltaDegrees: Number.isFinite(rotation) ? rotation : 0,
       validDepthFraction: Math.min(1, validDepthCount / 3600),
     }
+    const replacedKeyframeId = replaceIndex >= 0 ? this.keyframes[replaceIndex].id : null
     if (replaceIndex >= 0) this.keyframes[replaceIndex] = keyframe
     else this.keyframes.push(keyframe)
     this.lastPosition = { ...position }
     this.lastDirection = { ...direction }
     this.lastTimestamp = timestamp
     const bytes = keyframe.rgb.byteLength + keyframe.cameraTransform.byteLength + keyframe.inverseCameraTransform.byteLength + keyframe.projectionMatrix.byteLength
-    const outcome = this.result('captured')
+    const outcome = this.result('captured', keyframe, replacedKeyframeId)
     this.diagnostics = {
       ...this.diagnostics,
       status: 'active', retainedCount: this.keyframes.length, capacity,

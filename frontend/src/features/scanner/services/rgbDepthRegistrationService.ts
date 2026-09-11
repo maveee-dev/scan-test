@@ -15,7 +15,7 @@ const BYTES_PER_RGBD_VERTEX = 7
 const MAX_VALIDATION_SAMPLES = 6
 const MAX_PAIRING_AGE_MS = 125
 
-interface CameraProjection {
+export interface CameraProjection {
   u: number
   v: number
 }
@@ -60,14 +60,14 @@ export function createInitialRgbDepthRegistrationDebug(): RgbDepthRegistrationDe
   return createInitialDiagnostics()
 }
 
-function projectWorldPointInto(
-  view: XRView,
+export function projectWorldPointIntoCameraUv(
+  viewMatrix: ArrayLike<number>,
+  projectionMatrix: ArrayLike<number>,
   x: number,
   y: number,
   z: number,
   target: CameraProjection,
 ): boolean {
-  const viewMatrix = view.transform.inverse.matrix
   const cameraX = viewMatrix[0] * x + viewMatrix[4] * y + viewMatrix[8] * z + viewMatrix[12]
   const cameraY = viewMatrix[1] * x + viewMatrix[5] * y + viewMatrix[9] * z + viewMatrix[13]
   const cameraZ = viewMatrix[2] * x + viewMatrix[6] * y + viewMatrix[10] * z + viewMatrix[14]
@@ -82,7 +82,6 @@ function projectWorldPointInto(
     return false
   }
 
-  const projectionMatrix = view.projectionMatrix
   const clipX = projectionMatrix[0] * cameraX + projectionMatrix[4] * cameraY + projectionMatrix[8] * cameraZ + projectionMatrix[12]
   const clipY = projectionMatrix[1] * cameraX + projectionMatrix[5] * cameraY + projectionMatrix[9] * cameraZ + projectionMatrix[13]
   const clipW = projectionMatrix[3] * cameraX + projectionMatrix[7] * cameraY + projectionMatrix[11] * cameraZ + projectionMatrix[15]
@@ -101,6 +100,23 @@ function projectWorldPointInto(
   target.u = u
   target.v = v
   return true
+}
+
+function projectWorldPointInto(
+  view: XRView,
+  x: number,
+  y: number,
+  z: number,
+  target: CameraProjection,
+): boolean {
+  return projectWorldPointIntoCameraUv(
+    view.transform.inverse.matrix,
+    view.projectionMatrix,
+    x,
+    y,
+    z,
+    target,
+  )
 }
 
 function createValidationSample(

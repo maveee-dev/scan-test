@@ -2845,3 +2845,61 @@ high-resolution image association and texture rewrite are explicitly outside
 this milestone. M7, customization, live capture, Finish cadence and the
 M8.7.1.6 production build marker remain frozen. See
 [M8.10 Depth-Keyframe Patch Atlas integration feasibility](M8_10_DEPTH_KEYFRAME_PATCH_ATLAS_INTEGRATION_FEASIBILITY.md).
+
+### M8.11 — Reality Delivery Architecture Decision
+
+M8.11 selects **Path B — HYBRID VISUAL/DESIGN ARCHITECTURE FOUND**. The
+evidence does not require one globally fused dense 3D representation for every
+responsibility. Visual Reality should remain a bounded, view-dependent,
+source-owned RGB-D/layered-depth representation that preserves the owning
+photographic keyframe and invalid-depth gaps. A compact measured oriented-splat
+fallback is permissible only for genuinely measured disocclusion support.
+Structural/design/picking geometry remains a separate measured representation;
+M7 or simplified design surfaces must never replace visual Reality or hide
+missing measurements.
+
+The current retained contract has measured world points, normals, normalized
+source coordinates and optional RGB, but it drops the exact per-frame
+view/projection/depth transforms before retention. RGB keyframes retain camera
+metadata but do not yet carry a matched depth-image/validity contract. A new
+M8.11 prototype would therefore be unable to distinguish real RGB-D ownership
+risk from synthetic fixture behavior, so no prototype was added. M8.7.1.6
+remains production; M8.8 and M8.10 remain closed, and no POCO scan is
+justified.
+
+M8.12 should add the bounded contract and an offline same-input browser proof:
+retain 8–12 exact synchronized RGB-D keyframes with depth validity/confidence
+when exposed, complete view/projection/camera transforms, timestamps and
+source-grid ownership; render 2–4 best measured views with strict
+depth/discontinuity gates; optionally use measured splat disocclusion support;
+and compare against M8.7.1.6 on screen holes, sharpness proxy, layer/gap
+safety, upload/first/steady render, CPU/GPU memory and mobile-browser timing.
+There is no global cross-view merge, inferred fill or M7 visual substitution
+in this plan. See [M8.11 Reality Delivery Architecture Decision](M8_11_REALITY_DELIVERY_ARCHITECTURE_DECISION.md).
+
+### M8.12 — Synchronized RGB-D Capture Contract + Same-Input Browser Proof
+
+M8.12 closes the exact ownership gap identified by M8.11 and selects
+**Path A — contract + proof success**. The scanner now retains, only at the
+existing bounded appearance-keyframe cadence, up to eight explicit
+same-XR-frame/same-XR-view RGB-D contracts. Each contract owns the accepted
+image and its crop/orientation/resize mapping, measured depth grid and validity,
+world points, view/projection/depth transforms, capture sequence and timestamp.
+The wording is deliberately limited: WebXR aligns the sources to one XR frame
+and view, but does not guarantee simultaneous hardware sensor exposures.
+
+An opt-in worker proof uses at most two keyframes to show the retained source
+RGB, depth-derived measured geometry, one-keyframe displaced reprojection and
+two-keyframe measured disocclusion. Every visible proof pixel maps to a real
+keyframe, real RGB pixel and three source depth indices. Invalid depth and real
+gaps remain empty; 28 mm layers, an 8 cm step and recess-like bands stay
+separate. No new camera readback, per-XR-frame workload, global surface, M7
+substitution or production renderer was added.
+
+M8.13 is justified only as a bounded experimental view-dependent Visual Reality
+renderer. No POCO scan is required before that experiment begins. A minimal
+target-browser Raw Camera Access + Depth Sensing contract-validation capture is
+still required before browser/device runtime or physical-quality claims, and
+before any production promotion. M8.7.1.6 remains production; M8.8 and M8.10
+remain closed. See
+[M8.12 Synchronized RGB-D Capture Contract + Same-Input Browser Proof](M8_12_SYNCHRONIZED_RGBD_CAPTURE_CONTRACT_BROWSER_PROOF.md).

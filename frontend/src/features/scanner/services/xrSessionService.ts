@@ -39,6 +39,7 @@ import {
 import { RealitySurfelColorFusionService } from './realitySurfelColorFusionService'
 import { DenseRealityReconstructionService } from './denseRealityReconstructionService'
 import { RealityRgbKeyframeService } from './realityRgbKeyframeService'
+import { M812SynchronizedRgbdCaptureService } from './m812SynchronizedRgbdCaptureService'
 import { RealityMeasurementQueueService } from './realityMeasurementQueueService'
 import { RetainedRealityMeasurementService } from './retainedRealityMeasurementService'
 import { reconstructCanonicalReality, type PostScanCanonicalFusionTransportDiagnostics } from './postScanCanonicalFusionService'
@@ -201,6 +202,7 @@ export interface FinishPipelineDiagnostics {
     denseReality: number
     rgbKeyframes: number
     appearanceKeyframes: number
+    synchronizedRgbd: number
     retainedMeasurements: number
   }>
   /** Wall-clock boundaries between synchronous snapshot groups. */
@@ -312,6 +314,7 @@ export class XRSessionService {
 
   private readonly realityRgbKeyframeService = new RealityRgbKeyframeService()
   private readonly appearanceKeyframeService = new RealityRgbKeyframeService(true)
+  private readonly synchronizedRgbdCaptureService = new M812SynchronizedRgbdCaptureService()
   private readonly qualityPolicy = new RealityQualityPolicy()
   private readonly measurementStabilityService = new RealityMeasurementStabilityService()
   private readonly retainedMeasurementService = new RetainedRealityMeasurementService()
@@ -457,6 +460,7 @@ export class XRSessionService {
     this.denseRealityReconstructionService.reset()
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
+    this.synchronizedRgbdCaptureService.reset()
     this.retainedMeasurementService.reset()
     this.qualityPolicy.reset()
     this.realityCaptureEnabled = false
@@ -512,7 +516,7 @@ export class XRSessionService {
       const clickToRetainedFinalizationBeginMs = invocationTiming.clickToProcessingUiFirstPaintMs + finalizationStartedAt - finishStartedAt
       const finishedAt = Date.now()
       const snapshotStageTimingsMs = { liveSurface: 0, spatialScan: 0, baseReality: 0, denseReality: 0,
-        rgbKeyframes: 0, appearanceKeyframes: 0, retainedMeasurements: 0 }
+        rgbKeyframes: 0, appearanceKeyframes: 0, synchronizedRgbd: 0, retainedMeasurements: 0 }
       const snapshotGroupTimingsMs: number[] = [], snapshotYieldEpochs: number[] = []
       let snapshotGroupStartedAt = getPerformanceTimestamp(), snapshotSynchronousCpuMs = 0, maxUninterruptedSnapshotTaskMs = 0
       const completeSnapshotGroup = (): void => {
@@ -569,6 +573,7 @@ export class XRSessionService {
       const liveRgb = this.rawCameraService.getDiagnostics(false)
       await yieldSnapshotGroup()
       const appearanceKeyframes = timedSnapshot('appearanceKeyframes', () => this.appearanceKeyframeService.createSnapshot(finalizedScan.id, this.rawCameraService.isAvailable()))
+      const synchronizedRgbd = timedSnapshot('synchronizedRgbd', () => this.synchronizedRgbdCaptureService.createSnapshot(finalizedScan.id, appearanceKeyframes))
       const retainedMeasurements = timedSnapshot('retainedMeasurements', () => this.retainedMeasurementService.createSnapshot())
       completeSnapshotGroup()
       const retainedMeasurementFinalizationMs = getPerformanceTimestamp() - finalizationStartedAt
@@ -602,6 +607,7 @@ export class XRSessionService {
           averageColorConfidence: canonicalColored.length > 0 ? canonicalColored.reduce((total, surfel) => total + surfel.colorConfidence, 0) / canonicalColored.length : 0,
         }),
         appearanceKeyframes,
+        m812SynchronizedRgbd: synchronizedRgbd,
         qualityTelemetry: this.qualityPolicy.snapshot(),
         depthSource: { width: depth.width, height: depth.height, scale: depth.rawValueToMeters },
         liveRgbDimensions: { width: liveRgb.copyWidth, height: liveRgb.copyHeight },
@@ -690,6 +696,7 @@ export class XRSessionService {
     this.denseRealityReconstructionService.dispose()
     this.realityRgbKeyframeService.dispose()
     this.appearanceKeyframeService.dispose()
+    this.synchronizedRgbdCaptureService.dispose()
     this.liveMap.reset()
   }
 
@@ -975,8 +982,15 @@ export class XRSessionService {
             // pressure. The M8.6 mask keyframe cadence remains unchanged.
             if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1 && appearanceDecision.allowed) {
               const appearanceStartedAt=getPerformanceTimestamp()
-              this.appearanceKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position, this.viewerDirection,
+              const appearanceCapture = this.appearanceKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position, this.viewerDirection,
                 densePointFrame.validPointCount * 3600 / (sampling.columns * sampling.rows), this.rawCameraService, this.qualityPolicy.appearanceMotion())
+              if (appearanceCapture.keyframe) this.synchronizedRgbdCaptureService.retainSameXrFrameCapture({
+                frame,
+                view: primaryView,
+                packet,
+                keyframe: appearanceCapture.keyframe,
+                replacedKeyframeId: appearanceCapture.replacedKeyframeId,
+              })
               this.measurementQueue.recordStage('appearance-copy',getPerformanceTimestamp()-appearanceStartedAt)
             } else if(this.realityCaptureEnabled&&this.rawCameraCopyPhase===1) this.appearanceKeyframeService.recordCandidateOutcome('pressure-skipped')
             let currentRawCameraFrame: RawCameraCopyFrame | null = null
@@ -1276,6 +1290,7 @@ export class XRSessionService {
     this.denseRealityReconstructionService.reset()
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
+    this.synchronizedRgbdCaptureService.reset()
     this.qualityPolicy.reset()
     this.measurementStabilityService.reset()
     this.retainedMeasurementService.reset()
@@ -1375,6 +1390,7 @@ export class XRSessionService {
     this.denseRealityReconstructionService.reset()
     this.realityRgbKeyframeService.reset()
     this.appearanceKeyframeService.reset()
+    this.synchronizedRgbdCaptureService.reset()
     this.qualityPolicy.reset()
     this.measurementStabilityService.reset()
     this.measurementQueue.reset()

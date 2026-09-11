@@ -828,6 +828,8 @@ export interface FinalizedDenseRealityReconstruction {
   readonly m810InputSnapshotSignature?: string
   readonly m810CandidateInputSnapshotSignature?: string
   readonly m810IdenticalInput?: boolean
+  /** Isolated M8.12 frame/view-aligned RGB-D contract; never used by production Reality. */
+  readonly m812SynchronizedRgbd?: import('./services/m812SynchronizedRgbdCaptureService').M812SynchronizedRgbdSnapshot
   /** Bounded measured-only audit points excluded during canonical hypothesis resolution. */
   readonly provisionalExpiryMap?: import('./services/canonicalRealityFusionService').ProvisionalExpiryMap
   /** Bounded one-per-cell samples from the actual per-frame-consolidated replay input. */
