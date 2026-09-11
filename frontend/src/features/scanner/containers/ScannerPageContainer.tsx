@@ -22,6 +22,7 @@ function ScannerPageContainer({ onExit }: ScannerPageContainerProps) {
       pointPreviewCanvasRef={pointPreviewCanvasRef}
       onStartScan={sessionController.startScan}
       onDebugGeometryToggle={sessionController.setDebugGeometryVisible}
+      onCoverageOverlayToggle={sessionController.setCoverageOverlayVisible}
       onPersistentSurfelDebugToggle={sessionController.setPersistentSurfelDebugVisible}
       onRawCameraDebugToggle={sessionController.setRawCameraDebugVisible}
       onRgbDepthDebugToggle={sessionController.setRgbDepthDebugVisible}

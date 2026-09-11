@@ -28,6 +28,8 @@ export interface M812SynchronizedRgbdKeyframe {
   /** Application identity; WebXR does not expose a native sensor-frame id. */
   readonly captureIdentity: string
   readonly frameSequence: number
+  /** Pose epoch that owns both the RGB and depth world coordinates. */
+  readonly trackingEpoch: number
   readonly xrFrameTimestamp: number
   readonly synchronizationBasis: M812SynchronizationBasis
   readonly sameXrFrameInvocation: true
@@ -60,6 +62,9 @@ export interface M812SynchronizedRgbdDiagnostics {
   readonly unpairedRgbKeyframes: number
   readonly lastRetentionMs: number
   readonly maximumRetentionMs: number
+  readonly trackingEpochCount: number
+  readonly trackingEpochIds: readonly number[]
+  readonly incompatibleTrackingStateRejects: number
   readonly memory: M812SynchronizedRgbdMemoryDiagnostics
 }
 
@@ -79,17 +84,19 @@ export interface M812SameXrFrameCaptureInput {
   readonly packet: RealityMeasurementPacket
   readonly keyframe: RealityRgbKeyframe
   readonly replacedKeyframeId: number | null
+  readonly trackingEpoch?: number
 }
 
 export interface M812SameXrFrameCaptureResult {
   readonly accepted: boolean
-  readonly reason: 'retained' | 'timestamp-mismatch' | 'view-metadata-mismatch' | 'invalid-depth-layout'
+  readonly reason: 'retained' | 'timestamp-mismatch' | 'view-metadata-mismatch' | 'invalid-depth-layout' | 'incompatible-tracking-state'
 }
 
 interface RetainedDepthRecord {
   readonly captureIdentity: string
   readonly frameSequence: number
   readonly xrFrameTimestamp: number
+  readonly trackingEpoch: number
   readonly depth: M812SynchronizedDepthOwnership
 }
 
@@ -177,11 +184,18 @@ export class M812SynchronizedRgbdCaptureService {
   private contractMismatchRejects = 0
   private lastRetentionMs = 0
   private maximumRetentionMs = 0
+  private trackingEpochIds = new Set<number>()
+  private incompatibleTrackingStateRejects = 0
 
   public retainSameXrFrameCapture(input: M812SameXrFrameCaptureInput): M812SameXrFrameCaptureResult {
     const startedAt = now()
     this.captureAttempts += 1
     const { frame, view, packet, keyframe } = input
+    const trackingEpoch = input.trackingEpoch ?? 0
+    if (this.trackingEpochIds.size > 0 && !this.trackingEpochIds.has(trackingEpoch)) {
+      this.incompatibleTrackingStateRejects += 1
+      return this.reject('incompatible-tracking-state')
+    }
     // `frame` is intentionally part of the boundary: the only production call
     // passes the XRFrame that produced packet depth into the camera-copy call.
     if (!frame || keyframe.timestamp !== packet.timestamp) return this.reject('timestamp-mismatch')
@@ -219,8 +233,10 @@ export class M812SynchronizedRgbdCaptureService {
       captureIdentity: `xr-frame-${packet.sequence}:rgb-keyframe-${keyframe.id}`,
       frameSequence: packet.sequence,
       xrFrameTimestamp: packet.timestamp,
+      trackingEpoch,
       depth: ownedDepth,
     })
+    this.trackingEpochIds.add(trackingEpoch)
     // The appearance service is bounded to eight. This guard prevents an
     // accidental future caller from turning this proof store into scan history.
     while (this.records.size > M812_SYNCHRONIZED_RGBD_CAPACITY) {
@@ -242,6 +258,7 @@ export class M812SynchronizedRgbdCaptureService {
         captureIdentity: record.captureIdentity,
         frameSequence: record.frameSequence,
         xrFrameTimestamp: record.xrFrameTimestamp,
+        trackingEpoch: record.trackingEpoch,
         synchronizationBasis: 'same-xr-frame-view-aligned',
         sameXrFrameInvocation: true,
         depthCurrentness: 'current-xr-frame-requested-user-agent-should-provide',
@@ -264,6 +281,9 @@ export class M812SynchronizedRgbdCaptureService {
         unpairedRgbKeyframes: appearance.keyframes.length - paired.length,
         lastRetentionMs: this.lastRetentionMs,
         maximumRetentionMs: this.maximumRetentionMs,
+        trackingEpochCount: new Set(paired.map((capture) => capture.trackingEpoch)).size,
+        trackingEpochIds: Object.freeze([...new Set(paired.map((capture) => capture.trackingEpoch))].sort((left, right) => left - right)),
+        incompatibleTrackingStateRejects: this.incompatibleTrackingStateRejects,
         memory: memoryDiagnostics(paired),
       },
     }
@@ -276,6 +296,8 @@ export class M812SynchronizedRgbdCaptureService {
     this.contractMismatchRejects = 0
     this.lastRetentionMs = 0
     this.maximumRetentionMs = 0
+    this.trackingEpochIds.clear()
+    this.incompatibleTrackingStateRejects = 0
   }
 
   public dispose(): void { this.reset() }

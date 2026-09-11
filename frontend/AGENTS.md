@@ -512,27 +512,25 @@ Optimize for proving this spatial scanning pipeline first.
 
 ---
 
-# Automatic Codex Orchestration
+# Agent Orchestration
 
-The main model currently selected in the Codex UI or CLI is always the lead/boss. Do not hard-code or override the lead model in project configuration. Changing the selected main model changes the lead only; it does not change the project worker. The user does not need to switch models, request a worker, or name Luna during normal work.
+This repository uses a single-agent workflow.
 
-The lead owns understanding the request, planning, architecture, difficult root-cause reasoning, security-sensitive decisions, product and scope decisions, interpretation of ambiguity, task decomposition, implementation direction, integration, final code review, final validation, final approval, and the final response.
+- Use GPT-5.6 Luna with Max reasoning effort only.
+- Do not spawn subagents, workers, delegates, or secondary models.
+- Do not use Terra, Sol, or any other model as a worker or reviewer.
+- Do not use `fork_context` or parallel agent delegation.
+- The current Luna Max agent owns:
+  - planning
+  - repository inspection
+  - implementation
+  - debugging
+  - testing
+  - benchmarking
+  - review
+  - documentation
+  - final reporting
 
-`luna-worker` is the only project worker. Do not spawn Codex's built-in `default`, `worker`, or `explorer` roles or any other custom agent for project work; delegate all worker tasks to `luna-worker`. It is fixed to `gpt-5.6-luna` at `max` reasoning effort (Luna Max). The lead automatically delegates bounded work to Luna when delegation materially reduces lead usage or improves speed or context quality. Luna may handle substantial and routine implementation, debugging, refactoring, repository exploration, searches, execution tracing, targeted tests, test runs, documentation, repetitive work, mechanical edits, bounded investigation, and fixes requested after lead review.
+If the active model is not Luna Max, do not silently substitute another model.
 
-Use this routing policy:
-
-* For a trivial task, the lead may work directly when delegation overhead exceeds the work.
-* For normal implementation, the lead establishes scope, architecture, direction, constraints, and acceptance criteria; Luna implements and validates; the lead reviews the actual changes and results.
-* For debugging, the lead may diagnose directly or ask Luna to gather evidence. Once the implementation direction is established, Luna performs the bounded fix and the lead reviews it.
-* For hard root-cause work, the lead owns the conclusion. Luna may inspect files, trace paths, collect diagnostics, create targeted tests, and verify explicit hypotheses.
-* For architecture-heavy work, the lead decides the architecture and delegates bounded implementation pieces to Luna afterward.
-* Final review, validation, approval, and the user response always belong to the lead.
-
-Before delegation, the lead must form the high-level plan and give Luna one coherent bounded assignment with an explicit task, applicable repository instructions, relevant files or areas, constraints, acceptance criteria, required validation, expected report, and stop condition. Start Luna with fresh/bounded context when the client supports it; do not copy or fork the full lead conversation unless the assignment genuinely requires that context. Avoid duplicate work and avoid fragmenting one coherent task into repeated tiny delegations.
-
-Luna must follow the lead's established architecture and implementation direction, preserve unrelated changes, stay inside the assigned scope, and return control after the assignment. Luna must not independently change architecture, expand project scope, make consequential security or product decisions, or spawn any subagents/workers. Luna must report findings or changes, every changed file, validation commands and results, warnings, and unresolved issues.
-
-The lead must wait for required Luna results, inspect Luna's actual output and repository diff rather than accepting its summary blindly, and run or verify final validation. If review finds a defect, the lead should return one bounded correction to Luna when useful, then review again. Only one worker thread may be open at a time.
-
-Optimize for low lead-model usage without sacrificing correctness. Prefer Luna for safely delegated exploration, implementation, testing, refactoring, documentation, and repetitive work after the lead establishes direction. Keep lead effort focused on planning, difficult diagnosis, architecture, consequential decisions, security and scope, review, integration, final validation, approval, and the final response.
+Keep work sequential and evidence-driven.

@@ -91,6 +91,7 @@ export interface ScannerSessionController {
   cancelScan: () => void
   finishScan: () => void
   setDebugGeometryVisible: (visible: boolean) => void
+  setCoverageOverlayVisible: (visible: boolean) => void
   setPersistentSurfelDebugVisible: (visible: boolean) => void
   setRawCameraDebugVisible: (visible: boolean) => void
   setRgbDepthDebugVisible: (visible: boolean) => void
@@ -259,6 +260,17 @@ export function useScannerSession(
           return
         }
 
+        if (error instanceof XRSessionError && error.code === 'scan-spatial-invalid') {
+          statusRef.current = 'scanning'
+          setSessionState((currentState) => ({
+            ...currentState,
+            status: 'scanning',
+            finishStage: null,
+            error: error.message,
+          }))
+          return
+        }
+
         statusRef.current = 'error'
         setSessionState((currentState) => ({
           ...currentState,
@@ -321,6 +333,19 @@ export function useScannerSession(
       return
     }
 
+    const scanHealth = service.getScanHealth()
+    if (!scanHealth.finishAllowed) {
+      // Keep the session running so the user can recover; the overlay exposes
+      // the same state and deliberately offers no "finish anyway" escape.
+      setSessionState((currentState) => ({
+        ...currentState,
+        error: scanHealth.status === 'invalid'
+          ? 'Spatial tracking became invalid. Restart the scan before finishing.'
+          : 'Spatial tracking is recovering. Hold still before finishing.',
+      }))
+      return
+    }
+
     const finishClickedAt = typeof performance === 'undefined' ? Date.now() : performance.now()
     statusRef.current = 'finishing'
     setSessionState((currentState) => ({
@@ -371,6 +396,10 @@ export function useScannerSession(
     service.setDebugGeometryVisible(visible)
   }, [service])
 
+  const setCoverageOverlayVisible = useCallback((visible: boolean) => {
+    service.setCoverageOverlayVisible(visible)
+  }, [service])
+
   const setPersistentSurfelDebugVisible = useCallback((visible: boolean) => {
     service.setPersistentSurfelDebugVisible(visible)
   }, [service])
@@ -412,6 +441,7 @@ export function useScannerSession(
     cancelScan,
     finishScan,
     setDebugGeometryVisible,
+    setCoverageOverlayVisible,
     setPersistentSurfelDebugVisible,
     setRawCameraDebugVisible,
     setRgbDepthDebugVisible,

@@ -1,8 +1,21 @@
 import type { DenseDepthFrameObservation, DenseSpatialPointFrame, ScannerReferenceSpaceType, SpatialPoint } from '../types'
 import type { ScanTrajectoryPoint } from './realityQualityPolicy'
 
-export type RealityMeasurementRejectionReason = 'none' | 'tracking' | 'motion' | 'pose-discontinuity' | 'depth' | 'consistency'
+export type RealityMeasurementRejectionReason = 'none' | 'tracking' | 'motion' | 'pose-discontinuity' | 'reference-space-reset' | 'depth' | 'consistency'
 export type ScanQualityGuidance = 'good' | 'move-slower' | 'tracking-unstable' | 'scan-again' | 'move-around-object' | 'more-coverage'
+export type ScanSpatialHealthStatus = 'healthy' | 'recovering' | 'invalid'
+export type ScanSpatialHealthReason = 'none' | 'pose-discontinuity' | 'reference-space-reset' | 'repeated-discontinuities'
+export interface ScanSpatialHealth {
+  readonly status: ScanSpatialHealthStatus
+  readonly finishAllowed: boolean
+  readonly reason: ScanSpatialHealthReason
+  readonly quarantineActive: boolean
+  readonly poseEpochCount: number
+  readonly acceptedPoseEpochCount: number
+  readonly relocalizationLikeEvents: number
+  readonly referenceSpaceResetCount: number
+  readonly stableRecoveryFrames: number
+}
 export interface RealityFrameConsistency { consistentRatio: number; duplicateRatio: number; unknownRatio: number; establishedSamples: number }
 export interface RealityMeasurementPacket {
   readonly sequence: number; readonly timestamp: number; readonly referenceSpaceType: ScannerReferenceSpaceType
@@ -14,7 +27,7 @@ export interface RealityMeasurementPacket {
   readonly attempted: number; readonly valid: number; readonly validRatio: number; readonly medianDepth: number
   readonly p05Depth: number; readonly p95Depth: number; readonly discontinuityRatio: number; readonly isolatedOutlierRatio: number
 }
-export interface RealityFrameAcceptance { packet: RealityMeasurementPacket; accepted: boolean; reason: RealityMeasurementRejectionReason; trackingQuality: number; consistency: RealityFrameConsistency }
+export interface RealityFrameAcceptance { packet: RealityMeasurementPacket; accepted: boolean; reason: RealityMeasurementRejectionReason; trackingQuality: number; consistency: RealityFrameConsistency; trackingEpoch: number }
 export interface RawRealityMeasurement { position: SpatialPoint; normal: SpatialPoint; timestamp: number; frameSequence: number; accepted: boolean; rejectionReason: RealityMeasurementRejectionReason }
 export interface RealityMeasurementDiagnostics {
   candidateTicks: number; cadenceSkipped: number; backpressureSkipped: number
@@ -27,12 +40,38 @@ export interface RealityMeasurementDiagnostics {
   translationP50Meters: number; translationP90Meters: number; translationP95Meters: number
   rotationP50Degrees: number; rotationP90Degrees: number; rotationP95Degrees: number
   largestAngularVelocityDegreesPerSecond: number; relocalizationLikeEvents: number; stableRecoveryFrames: number
+  referenceSpaceResetCount: number; poseEpochCount: number; acceptedPoseEpochCount: number
+  quarantineActive: boolean; scanSpatialValidity: ScanSpatialHealthStatus; scanSpatialValidityReason: ScanSpatialHealthReason
   validRatio: number; outlierRatio: number; medianDepthMeters: number; p95DepthMeters: number
   guidance: ScanQualityGuidance; validationMs: number
   acceptedPercentage: number; fusedPercentage: number; usefulPercentage: number
 }
 
 const MIN_VALID_SAMPLES = 96, MIN_VALID_RATIO = .18, MAX_RAW_MEASUREMENTS = 30000
+
+/**
+ * Spatial-validity policy calibrated against the available POCO translation
+ * trace and deterministic motion/recovery fixtures. Keep this explicit so a
+ * future device trace can change policy without hiding the boundary in the
+ * frame evaluator.
+ */
+export const REALITY_SPATIAL_VALIDITY_CONFIG = Object.freeze({
+  suspiciousJumpMaxIntervalSeconds: .75,
+  suspiciousTranslationMeters: .45,
+  suspiciousTranslationVelocityMetersPerSecond: 1,
+  suspiciousRotationDegrees: 75,
+  suspiciousAngularVelocityDegreesPerSecond: 180,
+  motionMaxIntervalSeconds: .5,
+  motionTranslationMeters: .35,
+  motionTranslationVelocityMetersPerSecond: 2.8,
+  motionRotationDegrees: 48,
+  motionAngularVelocityDegreesPerSecond: 220,
+  recoveryStableFrames: 3,
+  recoveryTranslationMeters: .12,
+  recoveryRotationDegrees: 15,
+  recoveryConsistencyRatio: .32,
+  repeatedDiscontinuityLimit: 2,
+})
 const copyMatrix = (value: ArrayLike<number> | null | undefined) => value ? new Float32Array(value) : null
 const percentile = (sorted: readonly number[], p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))] : 0
 const quaternionDot = (a: ScanTrajectoryPoint['orientation'], b: ScanTrajectoryPoint['orientation']) => Math.abs(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w)
@@ -43,6 +82,11 @@ export class RealityMeasurementStabilityService {
   private lastSeen: ScanTrajectoryPoint | null = null
   private quarantine = false
   private recoveryFrames = 0
+  private hardInvalid = false
+  private referenceSpaceResetCount = 0
+  private poseEpochCount = 1
+  private acceptedPoseEpochs = new Set<number>()
+  private scanSpatialValidityReason: ScanSpatialHealthReason = 'none'
   private raw: RawRealityMeasurement[] = []
   private translations: number[] = []
   private rotations: number[] = []
@@ -92,24 +136,44 @@ export class RealityMeasurementStabilityService {
     if(previous){if(this.translations.length>=512)this.translations.shift();if(this.rotations.length>=512)this.rotations.shift();this.translations.push(translation);this.rotations.push(rotation)}
     this.lastSeen=packet.pose
     let reason: RealityMeasurementRejectionReason='none'
-    const impossibleJump = previous !== null && dt < .7 && ((translation > .75 && velocity > 2.5) || (rotation > 75 && angularVelocity > 180))
-    const unreliableMotion = previous !== null && dt < .5 && ((translation > .35 && velocity > 2.8) || (rotation > 48 && angularVelocity > 220))
+    // A relocalization can be smaller than the old 0.75 m "impossible" jump,
+    // yet still be far beyond a controlled phone scan. Quarantine the 0.45 m
+    // class so a stable frame in a shifted coordinate island cannot enter the
+    // retained map. Keep the earlier rotational boundary until a device trace
+    // provides evidence of an angular reset: a coherent 45–70° room turn must
+    // remain usable, while an abrupt 75°+ turn is still treated as a reset-like
+    // discontinuity.
+    const validityConfig = REALITY_SPATIAL_VALIDITY_CONFIG
+    const suspiciousJump = previous !== null && dt < validityConfig.suspiciousJumpMaxIntervalSeconds && ((translation > validityConfig.suspiciousTranslationMeters && velocity > validityConfig.suspiciousTranslationVelocityMetersPerSecond) || (rotation > validityConfig.suspiciousRotationDegrees && angularVelocity > validityConfig.suspiciousAngularVelocityDegreesPerSecond))
+    const unreliableMotion = previous !== null && dt < validityConfig.motionMaxIntervalSeconds && ((translation > validityConfig.motionTranslationMeters && velocity > validityConfig.motionTranslationVelocityMetersPerSecond) || (rotation > validityConfig.motionRotationDegrees && angularVelocity > validityConfig.motionAngularVelocityDegreesPerSecond))
     const depthFailure = packet.valid < MIN_VALID_SAMPLES ? 'sample-count'
       : packet.validRatio < MIN_VALID_RATIO ? 'valid-ratio'
         : !Number.isFinite(packet.medianDepth) || packet.medianDepth <= 0 || packet.p95Depth > 20 ? 'range'
           : packet.isolatedOutlierRatio > .28 ? 'outliers'
             : packet.discontinuityRatio > .72 ? 'discontinuity' : null
     const badDepth = depthFailure !== null
-    if (impossibleJump) { reason='pose-discontinuity'; this.quarantine=true; this.recoveryFrames=0; this.diagnostics.relocalizationLikeEvents++ }
+    if (this.hardInvalid) reason=this.referenceSpaceResetCount > 0 ? 'reference-space-reset' : 'tracking'
+    else if (suspiciousJump) {
+      reason='pose-discontinuity'; this.quarantine=true; this.recoveryFrames=0
+      this.scanSpatialValidityReason='pose-discontinuity'; this.diagnostics.relocalizationLikeEvents++
+      this.poseEpochCount += 1
+      // Repeated excursions make a scan untrustworthy even if each excursion
+      // is rejected locally; this is the Finish validity gate.
+      if (this.diagnostics.relocalizationLikeEvents >= validityConfig.repeatedDiscontinuityLimit) {
+        this.hardInvalid=true; this.scanSpatialValidityReason='repeated-discontinuities'
+      }
+    }
     else if (unreliableMotion) reason='motion'
     else if (badDepth) reason='depth'
     else if (this.quarantine) {
-      const localStable = translation < .12 && rotation < 15
+      const localStable = translation < validityConfig.recoveryTranslationMeters && rotation < validityConfig.recoveryRotationDegrees
       this.recoveryFrames = localStable ? this.recoveryFrames + 1 : 0
       // After a relocalization-like jump, only established-world agreement or
       // return near the last accepted pose can release quarantine.
       const returned = accepted ? Math.hypot(packet.pose.position.x-accepted.position.x,packet.pose.position.y-accepted.position.y,packet.pose.position.z-accepted.position.z) < .3 : true
-      if (this.recoveryFrames >= 3 && (returned || consistency.consistentRatio >= .32)) this.quarantine=false
+      if (this.recoveryFrames >= validityConfig.recoveryStableFrames && (returned || consistency.consistentRatio >= validityConfig.recoveryConsistencyRatio)) {
+        this.quarantine=false; this.scanSpatialValidityReason='none'
+      }
       else reason='tracking'
     }
     if (reason==='none' && consistency.establishedSamples >= 32 && consistency.duplicateRatio > .58 && consistency.consistentRatio < .12) reason='consistency'
@@ -126,13 +190,48 @@ export class RealityMeasurementStabilityService {
       else this.diagnostics.depthRejectedRange++
     }
     else if(reason==='pose-discontinuity')this.diagnostics.poseDiscontinuityRejected++
+    else if(reason==='reference-space-reset')this.diagnostics.trackingRejected++
     else this.diagnostics.consistencyRejected++
+    if (acceptedFrame) this.acceptedPoseEpochs.add(0)
+    this.diagnostics.referenceSpaceResetCount=this.referenceSpaceResetCount
+    this.diagnostics.poseEpochCount=this.poseEpochCount
+    this.diagnostics.acceptedPoseEpochCount=this.acceptedPoseEpochs.size
+    this.diagnostics.quarantineActive=this.quarantine
+    this.diagnostics.scanSpatialValidity=this.getScanHealth().status
+    this.diagnostics.scanSpatialValidityReason=this.getScanHealth().reason
     this.diagnostics.stableRecoveryFrames=this.recoveryFrames;this.diagnostics.validRatio=packet.validRatio;this.diagnostics.outlierRatio=packet.isolatedOutlierRatio
     this.diagnostics.medianDepthMeters=packet.medianDepth;this.diagnostics.p95DepthMeters=packet.p95Depth
     this.diagnostics.guidance=reason==='motion'?'move-slower':reason==='tracking'||reason==='pose-discontinuity'?'tracking-unstable':reason==='depth'||reason==='consistency'?'scan-again':consistency.establishedSamples>0&&consistency.unknownRatio>.65?'more-coverage':consistency.establishedSamples>0&&consistency.consistentRatio>.75?'move-around-object':'good'
     this.diagnostics.validationMs=performance.now()-started
     this.captureRaw(packet,acceptedFrame,reason)
-    return { packet, accepted: acceptedFrame, reason, trackingQuality: acceptedFrame ? Math.max(.5,1-Math.min(1,velocity/3)*.3-Math.min(1,angularVelocity/240)*.2) : 0, consistency }
+    // Accepted packets stay in epoch 0: no transform migration is attempted,
+    // and quarantine must fully resolve before another packet can be retained.
+    return { packet, accepted: acceptedFrame, reason, trackingQuality: acceptedFrame ? Math.max(.5,1-Math.min(1,velocity/3)*.3-Math.min(1,angularVelocity/240)*.2) : 0, consistency, trackingEpoch: 0 }
+  }
+
+  /** A native XRReferenceSpace reset changes the effective world origin. No
+   * transform migration is attempted, so all prior measurements are invalid. */
+  public recordReferenceSpaceReset(): void {
+    this.referenceSpaceResetCount += 1
+    this.hardInvalid = true
+    this.quarantine = true
+    this.recoveryFrames = 0
+    this.poseEpochCount += 1
+    this.scanSpatialValidityReason = 'reference-space-reset'
+    this.diagnostics.referenceSpaceResetCount = this.referenceSpaceResetCount
+    this.diagnostics.poseEpochCount = this.poseEpochCount
+    this.diagnostics.quarantineActive = true
+    this.diagnostics.scanSpatialValidity = 'invalid'
+    this.diagnostics.scanSpatialValidityReason = this.scanSpatialValidityReason
+  }
+
+  public getScanHealth(): ScanSpatialHealth {
+    const status: ScanSpatialHealthStatus = this.hardInvalid ? 'invalid' : this.quarantine ? 'recovering' : 'healthy'
+    const reason = this.hardInvalid && this.referenceSpaceResetCount > 0 ? 'reference-space-reset' : this.hardInvalid ? 'repeated-discontinuities' : this.quarantine ? 'pose-discontinuity' : 'none'
+    return { status, finishAllowed: status === 'healthy', reason, quarantineActive: this.quarantine,
+      poseEpochCount: this.poseEpochCount, acceptedPoseEpochCount: this.acceptedPoseEpochs.size,
+      relocalizationLikeEvents: this.diagnostics.relocalizationLikeEvents, referenceSpaceResetCount: this.referenceSpaceResetCount,
+      stableRecoveryFrames: this.recoveryFrames }
   }
 
   public recordCandidateTick(): void { this.diagnostics.candidateTicks++ }
@@ -148,8 +247,8 @@ export class RealityMeasurementStabilityService {
     acceptedPercentage:this.diagnostics.accepted/considered*100,fusedPercentage:this.diagnostics.fusedSuccessfully/considered*100,
     usefulPercentage:(this.diagnostics.producedNewSamples+this.diagnostics.matchedExistingSamples)>0?this.diagnostics.fusedSuccessfully/considered*100:0 } }
   public createRawSnapshot(): RawRealityMeasurement[] { return this.raw.map((s)=>({ ...s, position:{...s.position}, normal:{...s.normal} })) }
-  public reset(): void { this.lastAccepted=null;this.lastSeen=null;this.quarantine=false;this.recoveryFrames=0;this.raw=[];this.translations=[];this.rotations=[];this.diagnostics=this.createDiagnostics() }
-  private createDiagnostics(): RealityMeasurementDiagnostics { return { candidateTicks:0,cadenceSkipped:0,backpressureSkipped:0,ticksConsidered:0,accepted:0,fusedSuccessfully:0,producedNewSamples:0,matchedExistingSamples:0,skippedTogether:0,motionRejected:0,trackingRejected:0,depthRejected:0,depthRejectedMissing:0,depthRejectedValidRatio:0,depthRejectedSampleCount:0,depthRejectedOutliers:0,depthRejectedDiscontinuity:0,depthRejectedRange:0,poseDiscontinuityRejected:0,consistencyRejected:0,badDepthFrames:0,largestTranslationMeters:0,largestRotationDegrees:0,largestVelocityMetersPerSecond:0,translationP50Meters:0,translationP90Meters:0,translationP95Meters:0,rotationP50Degrees:0,rotationP90Degrees:0,rotationP95Degrees:0,largestAngularVelocityDegreesPerSecond:0,relocalizationLikeEvents:0,stableRecoveryFrames:0,validRatio:0,outlierRatio:0,medianDepthMeters:0,p95DepthMeters:0,guidance:'more-coverage',validationMs:0,acceptedPercentage:0,fusedPercentage:0,usefulPercentage:0 } }
+  public reset(): void { this.lastAccepted=null;this.lastSeen=null;this.quarantine=false;this.recoveryFrames=0;this.hardInvalid=false;this.referenceSpaceResetCount=0;this.poseEpochCount=1;this.acceptedPoseEpochs.clear();this.scanSpatialValidityReason='none';this.raw=[];this.translations=[];this.rotations=[];this.diagnostics=this.createDiagnostics() }
+  private createDiagnostics(): RealityMeasurementDiagnostics { return { candidateTicks:0,cadenceSkipped:0,backpressureSkipped:0,ticksConsidered:0,accepted:0,fusedSuccessfully:0,producedNewSamples:0,matchedExistingSamples:0,skippedTogether:0,motionRejected:0,trackingRejected:0,depthRejected:0,depthRejectedMissing:0,depthRejectedValidRatio:0,depthRejectedSampleCount:0,depthRejectedOutliers:0,depthRejectedDiscontinuity:0,depthRejectedRange:0,poseDiscontinuityRejected:0,consistencyRejected:0,badDepthFrames:0,largestTranslationMeters:0,largestRotationDegrees:0,largestVelocityMetersPerSecond:0,translationP50Meters:0,translationP90Meters:0,translationP95Meters:0,rotationP50Degrees:0,rotationP90Degrees:0,rotationP95Degrees:0,largestAngularVelocityDegreesPerSecond:0,relocalizationLikeEvents:0,stableRecoveryFrames:0,referenceSpaceResetCount:0,poseEpochCount:1,acceptedPoseEpochCount:0,quarantineActive:false,scanSpatialValidity:'healthy',scanSpatialValidityReason:'none',validRatio:0,outlierRatio:0,medianDepthMeters:0,p95DepthMeters:0,guidance:'more-coverage',validationMs:0,acceptedPercentage:0,fusedPercentage:0,usefulPercentage:0 } }
   private captureRaw(packet: RealityMeasurementPacket, accepted: boolean, reason: RealityMeasurementRejectionReason): void {
     const stride=Math.max(1,Math.ceil(packet.valid/256)), frame=packet.denseFrame
     let seen=0

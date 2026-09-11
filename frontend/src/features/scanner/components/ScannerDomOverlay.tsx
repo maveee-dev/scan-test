@@ -31,6 +31,7 @@ interface ScannerDomOverlayProps {
   onCancelScan: () => void
   onDenseMaskStabilizationOptionsChange: (options: DenseMaskStabilizationOptions) => void
   onDebugGeometryToggle: (visible: boolean) => void
+  onCoverageOverlayToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
   onRawCameraDebugToggle: (visible: boolean) => void
   onRgbDepthDebugToggle: (visible: boolean) => void
@@ -226,14 +227,45 @@ function formatCoverageGuidance(guidance: CoverageGuidance): string {
   }
 }
 
-function formatScanQualityGuidance(guidance: NonNullable<ScannerSessionState['debug']['measurement']>['guidance']): string {
-  switch (guidance) {
-    case 'move-slower': return 'Move slower'
-    case 'tracking-unstable': return 'Tracking unstable — hold phone steady'
+function formatScanGuidance(
+  measurementGuidance: NonNullable<ScannerSessionState['debug']['measurement']>['guidance'] | null,
+  coverageGuidance: CoverageGuidance,
+  spatialValidity: NonNullable<ScannerSessionState['debug']['measurement']>['scanSpatialValidity'] | null,
+  scanReady: boolean,
+): string {
+  if (spatialValidity === 'invalid') {
+    return 'Tracking unstable — restart scan'
+  }
+
+  if (spatialValidity === 'recovering') {
+    return 'Tracking unstable — hold still'
+  }
+
+  if (scanReady) {
+    return 'Enough good data — ready to finish'
+  }
+
+  switch (measurementGuidance) {
+    case 'move-slower': return 'Keep scanning — move slowly'
+    case 'tracking-unstable': return 'Tracking unstable — hold still'
     case 'scan-again': return 'Scan this area again'
-    case 'move-around-object': return 'Move around the object for another angle'
-    case 'more-coverage': return 'More coverage needed — move sideways or scan around corners'
-    default: return 'Scan quality good'
+    case 'move-around-object': return 'Keep scanning — move around the object'
+    case 'more-coverage': return 'Keep scanning — move to another area'
+    default: break
+  }
+
+  switch (coverageGuidance) {
+    case 'area-captured-move-to-a-new-surface': return 'Move to another area'
+    case 'continue-scanning-from-another-angle': return 'Keep scanning from another angle'
+    default: return 'Keep scanning'
+  }
+}
+
+function formatScanSpatialHealth(status: NonNullable<ScannerSessionState['debug']['measurement']>['scanSpatialValidity']): string {
+  switch (status) {
+    case 'invalid': return 'Spatial validity failed — restart scan'
+    case 'recovering': return 'Tracking recovering — hold still'
+    default: return 'Spatially valid'
   }
 }
 
@@ -252,6 +284,7 @@ function ScannerDomOverlay({
   onCancelScan,
   onDenseMaskStabilizationOptionsChange,
   onDebugGeometryToggle,
+  onCoverageOverlayToggle,
   onPersistentSurfelDebugToggle,
   onRawCameraDebugToggle,
   onRgbDepthDebugToggle,
@@ -262,6 +295,7 @@ function ScannerDomOverlay({
 }: ScannerDomOverlayProps) {
   const [isDebugOpen, setIsDebugOpen] = useState(false)
   const [isDenseGeometryVisible, setIsDenseGeometryVisible] = useState(false)
+  const [isCoverageOverlayVisible, setIsCoverageOverlayVisible] = useState(false)
   const [isPersistentSurfelDebugVisible, setIsPersistentSurfelDebugVisible] = useState(false)
   const [isRgbDepthDebugVisible, setIsRgbDepthDebugVisible] = useState(false)
   const [finishWarningVisible, setFinishWarningVisible] = useState(false)
@@ -289,7 +323,8 @@ function ScannerDomOverlay({
   const measurement = sessionState.debug.measurement
   const measurementQueue = sessionState.debug.measurementQueue
   const elapsedSeconds = Math.max(1, sessionState.debug.performance.xrSessionElapsedMs / 1000)
-  const scanReady = (measurement?.accepted ?? 0) >= 24 &&
+  const spatiallyValid = measurement?.scanSpatialValidity === 'healthy'
+  const scanReady = spatiallyValid && (measurement?.accepted ?? 0) >= 24 &&
     denseReality.stableSampleCount >= 800 &&
     ((denseReality.viewDiverseSampleCount ?? 0) >= 100 || (sessionState.debug.quality?.distanceWalkedMeters ?? 0) >= .4)
 
@@ -315,11 +350,13 @@ function ScannerDomOverlay({
   function handleCancelScan(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsCoverageOverlayVisible(false)
     setIsPersistentSurfelDebugVisible(false)
     setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
     onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
+    onCoverageOverlayToggle(false)
     onPersistentSurfelDebugToggle(false)
     onCancelScan()
   }
@@ -336,11 +373,13 @@ function ScannerDomOverlay({
     setFinishWarningVisible(false)
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsCoverageOverlayVisible(false)
     setIsPersistentSurfelDebugVisible(false)
     setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
     onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
+    onCoverageOverlayToggle(false)
     onPersistentSurfelDebugToggle(false)
     onFinishScan()
   }
@@ -351,11 +390,13 @@ function ScannerDomOverlay({
     onRawCameraDebugToggle(nextOpen)
     if (!nextOpen) {
       setIsDenseGeometryVisible(false)
+      setIsCoverageOverlayVisible(false)
       setIsPersistentSurfelDebugVisible(false)
       setIsRgbDepthDebugVisible(false)
       onRawCameraDebugToggle(false)
       onRgbDepthDebugToggle(false)
       onDebugGeometryToggle(false)
+      onCoverageOverlayToggle(false)
       onPersistentSurfelDebugToggle(false)
     }
   }
@@ -363,11 +404,13 @@ function ScannerDomOverlay({
   function handleDebugClose(): void {
     setIsDebugOpen(false)
     setIsDenseGeometryVisible(false)
+    setIsCoverageOverlayVisible(false)
     setIsPersistentSurfelDebugVisible(false)
     setIsRgbDepthDebugVisible(false)
     onRawCameraDebugToggle(false)
     onRgbDepthDebugToggle(false)
     onDebugGeometryToggle(false)
+    onCoverageOverlayToggle(false)
     onPersistentSurfelDebugToggle(false)
   }
 
@@ -448,28 +491,29 @@ function ScannerDomOverlay({
             <strong>{depthStatus}</strong>
           </div>
           <div className="xr-scanner-hud-status-item">
-            <span>View coverage</span>
-            <strong>{formatCoveragePercentage(coverage.currentViewCoverage)}</strong>
-          </div>
-          <div className="xr-scanner-hud-status-item">
-            <span>Captured / unique</span>
-            <strong>{coverage.capturedCells} / {coverage.totalUniqueCells}</strong>
-          </div>
-          <div className="xr-scanner-hud-status-item">
             <span>Reality</span>
             <strong>{formatRealityCaptureStatus(realityColor.captureStatus)}</strong>
           </div>
+          <div className="xr-scanner-hud-status-item">
+            <span>Spatial validity</span>
+            <strong>{measurement ? formatScanSpatialHealth(measurement.scanSpatialValidity) : 'Waiting'}</strong>
+          </div>
         </div>
 
-        <p className="xr-scanner-hud-guidance">{sessionState.debug.measurement
-          ? formatScanQualityGuidance(sessionState.debug.measurement.guidance)
-          : formatCoverageGuidance(coverage.guidance)}</p>
+        <p className="xr-scanner-hud-guidance">{formatScanGuidance(
+          measurement?.guidance ?? null,
+          coverage.guidance,
+          measurement?.scanSpatialValidity ?? null,
+          scanReady,
+        )}</p>
 
         {finishWarningVisible && <div role="alert" className="xr-scanner-hud-guidance">
-          <p>More scanning needed for a clean model. Move slowly and capture the room from another angle.</p>
+          <p>{!spatiallyValid
+            ? `${formatScanSpatialHealth(measurement?.scanSpatialValidity ?? 'recovering')}. Finish is blocked until all retained measurements share one stable world.`
+            : 'More scanning needed for a clean model. Move slowly and capture the room from another angle.'}</p>
           <div className="xr-scanner-hud-actions">
             <button type="button" onClick={() => setFinishWarningVisible(false)}>Continue scanning</button>
-            <button type="button" onClick={completeFinishScan}>Finish anyway</button>
+            {spatiallyValid && <button type="button" onClick={completeFinishScan}>Finish anyway</button>}
           </div>
         </div>}
 
@@ -518,6 +562,18 @@ function ScannerDomOverlay({
             }}
           >
             {isDenseGeometryVisible ? 'Hide Raw Depth' : 'Show Raw Depth'}
+          </button>
+          <button
+            type="button"
+            className="xr-scanner-debug-geometry"
+            aria-pressed={isCoverageOverlayVisible}
+            onClick={() => {
+              const nextVisible = !isCoverageOverlayVisible
+              setIsCoverageOverlayVisible(nextVisible)
+              onCoverageOverlayToggle(nextVisible)
+            }}
+          >
+            {isCoverageOverlayVisible ? 'Hide Coverage Overlay' : 'Show Coverage Overlay'}
           </button>
           <button
             type="button"
@@ -590,6 +646,14 @@ function ScannerDomOverlay({
             <div>
               <span>RGB-D Debug Visualization</span>
               <strong>{isRgbDepthDebugVisible ? 'Visible' : 'Hidden'}</strong>
+            </div>
+            <div>
+              <span>Coverage overlay</span>
+              <strong>{isCoverageOverlayVisible ? 'Visible' : 'Hidden'}</strong>
+            </div>
+            <div>
+              <span>Spatial validity</span>
+              <strong>{measurement ? formatScanSpatialHealth(measurement.scanSpatialValidity) : 'Waiting'}</strong>
             </div>
           </div>
 
@@ -1082,6 +1146,9 @@ function ScannerDomOverlay({
               <span>Spatial coverage / current view</span>
               <strong>{formatCoveragePercentage(coverage.currentViewCoverage)}</strong>
             </div>
+            <p className="xr-dom-overlay-coverage-guidance">
+              Completeness and persistence describe measured area only; spatial validity is a separate tracking-health gate.
+            </p>
             <div className="xr-dom-overlay-coverage-meta">
               <div className="xr-dom-overlay-dense-toggles">
                 <span>Dense stabilization test toggles</span>
@@ -1402,6 +1469,18 @@ function ScannerDomOverlay({
               <div>
                 <span>Coverage renderer</span>
                 <strong>{formatCoverageRenderStatus(coverage.render.status)}</strong>
+              </div>
+              <div>
+                <span>Coverage overlay</span>
+                <strong>{coverage.render.coverageOverlayVisible ? 'Visible' : 'Hidden'}</strong>
+              </div>
+              <div>
+                <span>Render calls / skips</span>
+                <strong>{coverage.render.renderCallCount} / {coverage.render.renderSkipCount}</strong>
+              </div>
+              <div>
+                <span>WebGL draw calls</span>
+                <strong>{coverage.render.drawCallCount}</strong>
               </div>
               <div>
                 <span>Invalid normals rejected</span>

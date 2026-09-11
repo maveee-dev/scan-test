@@ -21,6 +21,7 @@ interface ScannerPageProps {
   sessionState: ScannerSessionState
   onStartScan: () => void
   onDebugGeometryToggle: (visible: boolean) => void
+  onCoverageOverlayToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
   onRawCameraDebugToggle: (visible: boolean) => void
   onRgbDepthDebugToggle: (visible: boolean) => void
@@ -120,6 +121,7 @@ function ScannerPage({
   canStartScan,
   onCancelScan,
   onDebugGeometryToggle,
+  onCoverageOverlayToggle,
   onPersistentSurfelDebugToggle,
   onRawCameraDebugToggle,
   onRgbDepthDebugToggle,
@@ -201,6 +203,7 @@ function ScannerPage({
           liveMap={liveMap}
           onCancelScan={onCancelScan}
           onDebugGeometryToggle={onDebugGeometryToggle}
+          onCoverageOverlayToggle={onCoverageOverlayToggle}
           onPersistentSurfelDebugToggle={onPersistentSurfelDebugToggle}
           onRawCameraDebugToggle={onRawCameraDebugToggle}
           onRgbDepthDebugToggle={onRgbDepthDebugToggle}
@@ -355,7 +358,7 @@ function ScannerPage({
                     <button
                       type="button"
                       className="scan-button"
-                      disabled={isEnding}
+                      disabled={isEnding || sessionState.debug.measurement?.scanSpatialValidity !== 'healthy'}
                       onClick={onFinishScan}
                     >
                       {isFinishing ? finishStageLabel : 'Finish Scan'}

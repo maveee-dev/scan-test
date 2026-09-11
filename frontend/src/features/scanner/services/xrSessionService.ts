@@ -44,7 +44,7 @@ import { M812SynchronizedRgbdCaptureService } from './m812SynchronizedRgbdCaptur
 import { RealityMeasurementQueueService } from './realityMeasurementQueueService'
 import { RetainedRealityMeasurementService } from './retainedRealityMeasurementService'
 import { reconstructCanonicalReality, type PostScanCanonicalFusionTransportDiagnostics } from './postScanCanonicalFusionService'
-import type { RealityFrameAcceptance, RealityMeasurementPacket } from './realityMeasurementStabilityService'
+import type { RealityFrameAcceptance, RealityMeasurementPacket, ScanSpatialHealth } from './realityMeasurementStabilityService'
 import type { RgbDepthRegistrationResult } from './rgbDepthRegistrationService'
 import { COVERAGE_VISUAL_OPACITY, DENSE_VISUAL_STABILIZATION_CONFIG } from './spatialCoverageVisualConfig'
 
@@ -152,6 +152,7 @@ export type XRSessionErrorCode =
   | 'session-ended'
   | 'frame-processing-failed'
   | 'session-stop-failed'
+  | 'scan-spatial-invalid'
 
 export class XRSessionError extends Error {
   readonly code: XRSessionErrorCode
@@ -344,6 +345,8 @@ export class XRSessionService {
 
   private referenceSpace: XRReferenceSpace | null = null
 
+  private referenceSpaceResetListener: ((event: Event) => void) | null = null
+
   private referenceSpaceType: ScannerReferenceSpaceType | null = null
 
   private frameRequestId: number | null = null
@@ -424,6 +427,14 @@ export class XRSessionService {
   public setDebugGeometryVisible(visible: boolean): void {
     this.rawCurrentDepthVisible = visible
     this.spatialCoverageRenderService.setDebugGeometryVisible(visible)
+  }
+
+  public setCoverageOverlayVisible(visible: boolean): void {
+    this.spatialCoverageRenderService.setCoverageOverlayVisible(visible)
+  }
+
+  public getScanHealth(): ScanSpatialHealth {
+    return this.measurementStabilityService.getScanHealth()
   }
 
   public setPersistentSurfelDebugVisible(visible: boolean): void {
@@ -515,6 +526,15 @@ export class XRSessionService {
       throw new XRSessionError(
         'The scan reference space is not ready to finalize.',
         'reference-space-failed',
+      )
+    }
+    const scanHealth = this.measurementStabilityService.getScanHealth()
+    if (!scanHealth.finishAllowed) {
+      throw new XRSessionError(
+        scanHealth.status === 'invalid'
+          ? 'Spatial tracking became invalid. Restart the scan before finishing.'
+          : 'Spatial tracking is recovering. Hold still before finishing.',
+        'scan-spatial-invalid',
       )
     }
     const scanStartedAt = this.scanStartedAt
@@ -806,6 +826,14 @@ export class XRSessionService {
 
       this.referenceSpace = referenceSpaceResult.referenceSpace
       this.referenceSpaceType = referenceSpaceResult.type
+      this.referenceSpaceResetListener = () => {
+        // WebXR keeps the XRReferenceSpace object but may reset its effective
+        // origin. Existing world-space samples cannot be transformed safely,
+        // so mark the scan invalid and stop admitting new measurements.
+        this.measurementStabilityService.recordReferenceSpaceReset()
+        this.emitDiagnostics()
+      }
+      this.referenceSpace.addEventListener('reset', this.referenceSpaceResetListener)
       this.startFrameProcessing(session)
     } catch (error) {
       const presentationDiagnostics = this.presentationService.getDiagnostics()
@@ -923,7 +951,6 @@ export class XRSessionService {
         position: { x: pose.transform.position.x, y: pose.transform.position.y, z: pose.transform.position.z },
         orientation: { x: pose.transform.orientation.x, y: pose.transform.orientation.y, z: pose.transform.orientation.z, w: pose.transform.orientation.w }, timestamp: time,
       } : null
-      if (physicalPose) this.qualityPolicy.observePose(physicalPose)
       if (!primaryView) {
         this.latestSpatialObservations = []
         if(time-this.lastDenseMaskUpdatedAt>=DENSE_MASK_UPDATE_INTERVAL_MS) {
@@ -1009,6 +1036,11 @@ export class XRSessionService {
           this.measurementQueue.recordStage('packet-validation',getPerformanceTimestamp()-validationStartedAt)
           const densePointFrame=packet.denseFrame
           if (acceptance.accepted) {
+            // The trajectory is a scan-quality diagnostic, so it must contain
+            // only poses that actually owned an accepted measurement. Recording
+            // every XR pose previously counted relocalization jumps as walked
+            // distance (29.93 m on the controlled 26 s run).
+            this.qualityPolicy.observePose(physicalPose)
             this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
             const appearanceDecision = this.qualityPolicy.appearanceCaptureDecision(this.measurementQueue.getDiagnostics().queueDepth)
             // High-resolution appearance is optional and yields first under
@@ -1023,6 +1055,7 @@ export class XRSessionService {
                 packet,
                 keyframe: appearanceCapture.keyframe,
                 replacedKeyframeId: appearanceCapture.replacedKeyframeId,
+                trackingEpoch: acceptance.trackingEpoch,
               })
               this.measurementQueue.recordStage('appearance-copy',getPerformanceTimestamp()-appearanceStartedAt)
             } else if(this.realityCaptureEnabled&&this.rawCameraCopyPhase===1) this.appearanceKeyframeService.recordCandidateOutcome('pressure-skipped')
@@ -1064,7 +1097,7 @@ export class XRSessionService {
             // Final geometry must not depend on optional raw-camera access.
             // RGB evidence remains optional and is retained only when an
             // accepted packet owns a matching registration result.
-            this.retainedMeasurementService.consider(packet, acceptance.trackingQuality, queuedRegistration)
+            this.retainedMeasurementService.consider(packet, acceptance.trackingQuality, queuedRegistration, acceptance.trackingEpoch)
             const result=this.measurementQueue.enqueue({packet,acceptance,registration:queuedRegistration,
               cameraDirection:{...(this.viewerDirection??{x:0,y:0,z:-1})},depthReconstructionDurationMs,sampling})
             if(result==='replaced'||result==='dropped')this.measurementStabilityService.recordBackpressureSkipped()
@@ -1292,6 +1325,7 @@ export class XRSessionService {
 
     this.stopFrameProcessing(session)
     this.removeSessionEndListener(session)
+    this.removeReferenceSpaceResetListener()
     this.activeSession = null
     this.referenceSpace = null
     this.referenceSpaceType = null
@@ -1389,6 +1423,13 @@ export class XRSessionService {
     }
   }
 
+  private removeReferenceSpaceResetListener(): void {
+    if (this.referenceSpace && this.referenceSpaceResetListener) {
+      this.referenceSpace.removeEventListener('reset', this.referenceSpaceResetListener)
+    }
+    this.referenceSpaceResetListener = null
+  }
+
   private resetSessionDiagnostics(): void {
     this.glContextStatus = 'unknown'
     this.baseLayerStatus = 'unknown'
@@ -1408,6 +1449,7 @@ export class XRSessionService {
     this.rgbDepthDebugVisible = false
     this.realityCaptureEnabled = false
     this.rawCameraCopyPhase = 0
+    this.removeReferenceSpaceResetListener()
     this.scanStartedAt = null
     this.requestedEndReason = null
     this.depthService.dispose()

@@ -18,7 +18,7 @@ const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMea
 const { getFullFrameCopyDimensions } = await load('xrRawCameraService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
-const { RealityMeasurementStabilityService } = await load('realityMeasurementStabilityService')
+const { RealityMeasurementStabilityService, REALITY_SPATIAL_VALIDITY_CONFIG } = await load('realityMeasurementStabilityService')
 const { filterRealityConfidence } = await load('realityConfidenceFiltering')
 const { RealityMeasurementQueueService } = await load('realityMeasurementQueueService')
 const { CanonicalRealityFusionService, CANONICAL_REALITY_CONFIG, CONSOLIDATED_MEASUREMENT_MAP_CAPACITY, PROVISIONAL_EXPIRY_MAP_CAPACITY, PROVISIONAL_EXPIRY_REASON } = await load('canonicalRealityFusionService')
@@ -47,13 +47,14 @@ function feedUniqueDense(service, count, sequence, xOffset = 0, z = -2) {
   const frame = uniqueDenseFrame(count, xOffset, z)
   service.process(null, frame, { copySampleNormal: (_index, out) => { out.x = 0; out.y = 0; out.z = 1; return true } }, null, sequence * 500, { frameSequence: sequence, trackingQuality: 1, maxInputSamples: count })
 }
-function measurementInput(sequence, x=0, timestamp=sequence*100, validCount=400) {
+function yawOrientation(degrees) { const radians=degrees*Math.PI/180; return {x:0,y:Math.sin(radians/2),z:0,w:Math.cos(radians/2)} }
+function measurementInput(sequence, x=0, timestamp=sequence*100, validCount=400, orientation={x:0,y:0,z:0,w:1}) {
   const columns=20,rows=20,total=columns*rows,valid=new Uint8Array(total),distancesMeters=new Float32Array(total).fill(2),points=new Float32Array(total*3),nx=new Float32Array(total),ny=new Float32Array(total)
   for(let i=0;i<total;i++){valid[i]=i<validCount?1:0;const gx=i%columns,gy=Math.floor(i/columns);nx[i]=(gx+.5)/columns;ny[i]=(gy+.5)/rows;points[i*3]=(gx-columns/2)*.025+x;points[i*3+1]=(gy-rows/2)*.025;points[i*3+2]=-2}
   const spatial={columns,rows,valid,normalizedX:nx,normalizedY:ny,distancesMeters,points,attemptedSampleCount:total,validPointCount:validCount,rejectedPointCount:total-validCount}
   const depth={columns,rows,attemptedSampleCount:total,validSampleCount:validCount,rejectedSampleCount:total-validCount,valid,normalizedX:nx,normalizedY:ny,distancesMeters,depthProjectionMatrix:identity(),depthTransformMatrix:identity(),viewProjectionMatrix:perspective(),viewTransformMatrix:identity()}
   const matrix=identity();matrix[12]=x
-  return {sequence,timestamp,referenceSpaceType:'local-floor',samplingPhase:sequence%4,qualityTier:0,pose:pose(x,timestamp),view:{transform:{matrix,inverse:{matrix:identity()}},projectionMatrix:perspective()},depth,spatial,depthWidth:160,depthHeight:90,depthScale:1}
+  return {sequence,timestamp,referenceSpaceType:'local-floor',samplingPhase:sequence%4,qualityTier:0,pose:{...pose(x,timestamp),orientation:{...orientation}},view:{transform:{matrix,inverse:{matrix:identity()}},projectionMatrix:perspective()},depth,spatial,depthWidth:160,depthHeight:90,depthScale:1}
 }
 function supported(s, overrides={}) { return {...s,geometryObservationCount:5,viewObservationCount:2,firstObservedAt:0,lastObservedAt:1200,trackingQuality:.95,positionVarianceMetersSquared:.00001,depthVarianceMetersSquared:.000004,normalVariance:.01,stabilityClass:'high',...overrides} }
 function keyframe(size = 64) { return { id: 1, timestamp: 1, width: size, height: size, rgb: new Uint8Array(size * size * 3).fill(210), cameraTransform: identity(), inverseCameraTransform: identity(), projectionMatrix: perspective(), qualityScore: 1, mapping: { sourceCameraWidth: size, sourceCameraHeight: size, copyWidth: size, copyHeight: size, sourceUvRect: { x:0,y:0,width:1,height:1 }, orientation: 'upright' } } }
@@ -338,6 +339,62 @@ test('pose discontinuity is rejected and cannot immediately duplicate the room',
   const jump=gate.evaluate(gate.createPacket(measurementInput(2,1.3,200)),consistent);assert.equal(jump.reason,'pose-discontinuity');assert.equal(jump.accepted,false)
   assert.equal(gate.getDiagnostics().relocalizationLikeEvents,1)
 })
+test('moderate origin jump is quarantined and shifted frames never enter the accepted world',()=>{
+  const gate=new RealityMeasurementStabilityService(),unknown={consistentRatio:0,duplicateRatio:0,unknownRatio:1,establishedSamples:100}
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(1,0,100)),unknown).accepted,true)
+  const jump=gate.evaluate(gate.createPacket(measurementInput(2,.52,350)),unknown)
+  assert.equal(jump.reason,'pose-discontinuity');assert.equal(jump.accepted,false)
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(3,.52,600)),unknown).accepted,false)
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(4,.52,850)),unknown).accepted,false)
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(5,.52,1100)),unknown).accepted,false)
+  assert.equal(gate.getScanHealth().status,'recovering')
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(6,0,1350)),unknown).accepted,false)
+  assert.equal(gate.getScanHealth().status,'invalid')
+  assert.equal(gate.getDiagnostics().accepted,1)
+})
+test('reference-space reset invalidates the scan without attempting transform migration',()=>{
+  const gate=new RealityMeasurementStabilityService(),unknown={consistentRatio:0,duplicateRatio:0,unknownRatio:1,establishedSamples:0}
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(1,0,100)),unknown).accepted,true)
+  gate.recordReferenceSpaceReset()
+  assert.equal(gate.getScanHealth().status,'invalid');assert.equal(gate.getScanHealth().finishAllowed,false)
+  const result=gate.evaluate(gate.createPacket(measurementInput(2,.02,350)),unknown)
+  assert.equal(result.reason,'reference-space-reset');assert.equal(result.accepted,false)
+  assert.equal(gate.getDiagnostics().referenceSpaceResetCount,1)
+})
+test('calibration accepts normal handheld translation and quick coherent motion',()=>{
+  const gate=new RealityMeasurementStabilityService(),world={consistentRatio:.5,duplicateRatio:0,unknownRatio:.5,establishedSamples:100}
+  assert.ok(.4 < REALITY_SPATIAL_VALIDITY_CONFIG.suspiciousTranslationMeters)
+  assert.ok(.52 > REALITY_SPATIAL_VALIDITY_CONFIG.suspiciousTranslationMeters)
+  assert.equal(REALITY_SPATIAL_VALIDITY_CONFIG.suspiciousRotationDegrees,75)
+  for(let i=0;i<12;i++) assert.equal(gate.evaluate(gate.createPacket(measurementInput(i+1,i*.08,100+i*250)),world).accepted,true)
+  const quick=new RealityMeasurementStabilityService()
+  assert.equal(quick.evaluate(quick.createPacket(measurementInput(1,0,100)),world).accepted,true)
+  assert.equal(quick.evaluate(quick.createPacket(measurementInput(2,.4,350)),world).accepted,true)
+  assert.equal(gate.getScanHealth().status,'healthy');assert.equal(gate.getDiagnostics().relocalizationLikeEvents,0)
+  assert.equal(quick.getScanHealth().status,'healthy');assert.equal(quick.getDiagnostics().relocalizationLikeEvents,0)
+})
+test('calibration keeps coherent room turns usable but rejects an abrupt angular reset',()=>{
+  const world={consistentRatio:.5,duplicateRatio:0,unknownRatio:.5,establishedSamples:100}
+  const turning=new RealityMeasurementStabilityService()
+  assert.equal(turning.evaluate(turning.createPacket(measurementInput(1,0,100,400,yawOrientation(0))),world).accepted,true)
+  assert.equal(turning.evaluate(turning.createPacket(measurementInput(2,0,350,400,yawOrientation(45))),world).accepted,true)
+  assert.equal(turning.evaluate(turning.createPacket(measurementInput(3,0,600,400,yawOrientation(90))),world).accepted,true)
+  assert.equal(turning.evaluate(turning.createPacket(measurementInput(4,0,850,400,yawOrientation(135))),world).accepted,true)
+  assert.equal(turning.evaluate(turning.createPacket(measurementInput(5,0,1100,400,yawOrientation(180))),world).accepted,true)
+  assert.equal(turning.getScanHealth().status,'healthy');assert.equal(turning.getDiagnostics().relocalizationLikeEvents,0)
+  const resetLike=new RealityMeasurementStabilityService()
+  resetLike.evaluate(resetLike.createPacket(measurementInput(1,0,100,400,yawOrientation(0))),world)
+  const result=resetLike.evaluate(resetLike.createPacket(measurementInput(2,0,250,400,yawOrientation(90))),world)
+  assert.equal(result.reason,'pose-discontinuity');assert.equal(result.accepted,false);assert.equal(resetLike.getScanHealth().status,'recovering')
+})
+test('short tracking or depth occlusion does not create a new pose epoch',()=>{
+  const gate=new RealityMeasurementStabilityService(),world={consistentRatio:.5,duplicateRatio:0,unknownRatio:.5,establishedSamples:100}
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(1,0,100)),world).accepted,true)
+  gate.recordTrackingMissing();gate.recordDepthMissing()
+  assert.equal(gate.getScanHealth().status,'healthy');assert.equal(gate.getDiagnostics().poseEpochCount,1)
+  assert.equal(gate.evaluate(gate.createPacket(measurementInput(2,.03,600)),world).accepted,true)
+  assert.equal(gate.getDiagnostics().poseEpochCount,1);assert.equal(gate.getScanHealth().finishAllowed,true)
+})
 test('bad or skipped frame updates no partial measurement state',()=>{
   const gate=new RealityMeasurementStabilityService(),bad=gate.createPacket(measurementInput(1,0,100,40))
   assert.equal(gate.evaluate(bad,{consistentRatio:0,duplicateRatio:0,unknownRatio:1,establishedSamples:0}).reason,'depth')
@@ -463,6 +520,31 @@ test('Live Map throttles display work before core measurement capture',()=>{
 test('React diagnostics cadence backs off under scanner pressure',()=>{
   const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
   assert.match(session,/scannerUnderPressure\?DEBUG_SAMPLE_INTERVAL_MS\*3:DEBUG_SAMPLE_INTERVAL_MS/)
+})
+test('normal scan HUD uses plain guidance while coverage percentages stay diagnostic-only',()=>{
+  const overlay=readFileSync(new URL('../src/features/scanner/components/ScannerDomOverlay.tsx',import.meta.url),'utf8')
+  const renderer=readFileSync(new URL('../src/features/scanner/services/spatialCoverageRenderService.ts',import.meta.url),'utf8')
+  assert.match(overlay,/function formatScanGuidance\(/)
+  assert.match(overlay,/Enough good data — ready to finish/)
+  assert.match(overlay,/Move to another area/)
+  assert.match(overlay,/Show Coverage Overlay/)
+  assert.doesNotMatch(overlay,/span>Coverage completeness<\/span>/)
+  assert.doesNotMatch(overlay,/span>Coverage persistence<\/span>/)
+  assert.match(renderer,/private coverageOverlayVisible = false/)
+  assert.match(renderer,/this\.coverageOverlayVisible && this\.candidateSurfaceVisible/)
+  assert.match(renderer,/this\.coverageOverlayVisible && this\.persistentSurfaceVertexCount/)
+  assert.match(renderer,/this\.diagnostics\.renderSkipCount \+= 1/)
+  assert.match(renderer,/this\.diagnostics\.drawCallCount \+= 1/)
+  assert.match(overlay,/Render calls \/ skips/)
+  assert.match(overlay,/WebGL draw calls/)
+})
+test('reference-space reset handling invalidates the same world instead of migrating it',()=>{
+  const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
+  assert.match(session,/referenceSpace\.addEventListener\('reset', this\.referenceSpaceResetListener\)/)
+  assert.match(session,/measurementStabilityService\.recordReferenceSpaceReset\(\)/)
+  assert.match(session,/removeReferenceSpaceResetListener\(\)/)
+  assert.match(session,/retainedMeasurementService\.consider\(packet, acceptance\.trackingQuality, queuedRegistration, acceptance\.trackingEpoch\)/)
+  assert.match(session,/retainSameXrFrameCapture\([\s\S]*trackingEpoch: acceptance\.trackingEpoch/)
 })
 
 test('depth rejection categories remain explicit and mutually attributable',()=>{
@@ -671,6 +753,15 @@ test('retained accepted geometry frames are bounded and preserve the full tempor
   for(let i=1;i<=140;i++){const packet=gate.createPacket(measurementInput(i,i*.03,i*200));store.consider(packet,.9,null)}
   const snapshot=store.createSnapshot();assert.ok(snapshot.frames.length<=RETAINED_REALITY_CONFIG.maxFrames);assert.ok(snapshot.diagnostics.temporalCompactions>0);assert.ok(snapshot.frames.at(-1).sequence>120);assert.ok(snapshot.diagnostics.memoryBytes>0)
   assert.equal(snapshot.diagnostics.retainedColorEvidenceCount,0);assert.equal(snapshot.diagnostics.retainedFrameCoverage.length,snapshot.frames.length);assert.ok(snapshot.diagnostics.compactionReplacements>0)
+})
+test('retained replay refuses a second tracking epoch instead of spanning incompatible worlds',()=>{
+  const store=new RetainedRealityMeasurementService(),gate=new RealityMeasurementStabilityService()
+  const first=gate.createPacket(measurementInput(1,0,200)),second=gate.createPacket(measurementInput(2,4,400))
+  assert.equal(store.consider(first,.9,null,0),true)
+  assert.equal(store.consider(second,.9,null,1),false)
+  const snapshot=store.createSnapshot()
+  assert.deepEqual(snapshot.diagnostics.trackingEpochIds,[0]);assert.equal(snapshot.diagnostics.trackingEpochCount,1)
+  assert.equal(snapshot.diagnostics.incompatibleTrackingStateRejects,1);assert.equal(snapshot.diagnostics.incompatibleTrackingStateSpan,false)
 })
 test('retained snapshot coverage contributions match unique proxy-cell semantics',()=>{
   const store=new RetainedRealityMeasurementService(),gate=new RealityMeasurementStabilityService()

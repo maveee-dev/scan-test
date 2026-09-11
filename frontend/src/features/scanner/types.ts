@@ -268,6 +268,12 @@ export interface SpatialCoverageRenderDebug {
   persistentSurfelCount: number
   candidateVertexCount: number
   candidateRenderUpdateCount: number
+  /** The measured coverage patches are hidden during the normal scan HUD. */
+  coverageOverlayVisible: boolean
+  /** Cumulative renderer calls and actual WebGL draw calls for later A/B timing. */
+  renderCallCount: number
+  renderSkipCount: number
+  drawCallCount: number
   candidateSurfaceVisible: boolean
   denseVertexCount: number
   denseRenderUpdateCount: number

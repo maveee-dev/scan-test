@@ -19,6 +19,8 @@ const MAX_COVERAGE_PROXY_PROBES_PER_FRAME = 384
 
 export interface RetainedRealityMeasurementFrame {
   readonly sequence: number
+  /** Stable accepted pose epoch; frames from a different epoch are never replayed together. */
+  readonly trackingEpoch: number
   readonly timestamp: number
   readonly samplingPhase: number
   readonly trackingQuality: number
@@ -58,6 +60,10 @@ export interface RetainedRealityMeasurementDiagnostics {
   readonly earliestTimestamp: number | null
   readonly latestTimestamp: number | null
   readonly retainedFrameCoverage: readonly RetainedRealityFrameCoverageSummary[]
+  readonly trackingEpochCount: number
+  readonly trackingEpochIds: readonly number[]
+  readonly incompatibleTrackingStateRejects: number
+  readonly incompatibleTrackingStateSpan: boolean
 }
 
 export interface RetainedRealityMeasurementSnapshot {
@@ -143,15 +149,24 @@ export class RetainedRealityMeasurementService {
   private temporalCompactions = 0
   private compactionReplacements = 0
   private coverageLostDueToRemoval = 0
+  private acceptedTrackingEpoch: number | null = null
+  private incompatibleTrackingStateRejects = 0
 
   public consider(
     packet: RealityMeasurementPacket,
     trackingQuality: number,
     registration: RgbDepthRegistrationResult | null,
+    trackingEpoch = 0,
   ): boolean {
     this.framesConsidered += 1
+    if (this.acceptedTrackingEpoch !== null && trackingEpoch !== this.acceptedTrackingEpoch) {
+      this.incompatibleTrackingStateRejects += 1
+      return false
+    }
+    this.acceptedTrackingEpoch ??= trackingEpoch
     const candidate: RetainedRealityMeasurementFrame = Object.freeze({
       sequence: packet.sequence,
+      trackingEpoch,
       timestamp: packet.timestamp,
       samplingPhase: packet.samplingPhase,
       trackingQuality,
@@ -245,6 +260,7 @@ export class RetainedRealityMeasurementService {
       uniqueProxyCellContribution: uniqueProxyCellContributions[index] ?? 0,
       colorEvidenceCount: frame.colorSourceIndices.length,
     })))
+    const trackingEpochIds = [...new Set(this.frames.map((frame) => frame.trackingEpoch))].sort((left, right) => left - right)
     return Object.freeze({
       frames: Object.freeze([...this.frames]),
       diagnostics: Object.freeze({
@@ -263,6 +279,10 @@ export class RetainedRealityMeasurementService {
         earliestTimestamp: this.frames[0]?.timestamp ?? null,
         latestTimestamp: this.frames.at(-1)?.timestamp ?? null,
         retainedFrameCoverage,
+        trackingEpochCount: trackingEpochIds.length,
+        trackingEpochIds: Object.freeze(trackingEpochIds),
+        incompatibleTrackingStateRejects: this.incompatibleTrackingStateRejects,
+        incompatibleTrackingStateSpan: trackingEpochIds.length > 1,
       }),
     })
   }
@@ -275,5 +295,7 @@ export class RetainedRealityMeasurementService {
     this.temporalCompactions = 0
     this.compactionReplacements = 0
     this.coverageLostDueToRemoval = 0
+    this.acceptedTrackingEpoch = null
+    this.incompatibleTrackingStateRejects = 0
   }
 }

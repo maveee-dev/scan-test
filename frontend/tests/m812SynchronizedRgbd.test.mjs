@@ -135,6 +135,18 @@ test('contract binds RGB, depth, pose and projection to one explicit XR-frame/vi
   assert.equal(capture.depth.sampleIndexing, 'row-major-grid-index')
 })
 
+test('synchronized RGB-D retention rejects a keyframe from a different pose epoch', () => {
+  const first = keyframe(20), second = keyframe(21), service = new M812SynchronizedRgbdCaptureService()
+  assert.equal(service.retainSameXrFrameCapture({ frame: {}, view: viewFor(first), packet: packetFor(first), keyframe: first, replacedKeyframeId: null, trackingEpoch: 0 }).accepted, true)
+  const rejected = service.retainSameXrFrameCapture({ frame: {}, view: viewFor(second), packet: packetFor(second), keyframe: second, replacedKeyframeId: null, trackingEpoch: 1 })
+  assert.deepEqual(rejected, { accepted: false, reason: 'incompatible-tracking-state' })
+  const snapshot = service.createSnapshot('scan', appearanceSnapshot([first]))
+  assert.equal(snapshot.diagnostics.trackingEpochCount, 1)
+  assert.deepEqual(snapshot.diagnostics.trackingEpochIds, [0])
+  assert.equal(snapshot.diagnostics.incompatibleTrackingStateRejects, 1)
+  assert.equal(snapshot.keyframes[0].trackingEpoch, 0)
+})
+
 test('contract rejects timestamp, view metadata, and invalid depth-layout ambiguity', () => {
   const rgb = keyframe(1), service = new M812SynchronizedRgbdCaptureService()
   assert.equal(service.retainSameXrFrameCapture({ frame: {}, view: viewFor(rgb), packet: packetFor(rgb, { timestamp: rgb.timestamp + 1 }), keyframe: rgb, replacedKeyframeId: null }).reason, 'timestamp-mismatch')

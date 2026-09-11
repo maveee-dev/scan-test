@@ -150,6 +150,8 @@ export class SpatialCoverageRenderService {
 
   private candidateSurfaceVisible = true
 
+  private coverageOverlayVisible = false
+
   private rgbDepthDebugVisible = false
 
   private diagnostics: SpatialCoverageRenderDebug = this.createInitialDiagnostics()
@@ -385,6 +387,11 @@ export class SpatialCoverageRenderService {
     this.diagnostics.persistentSurfelDebugVisible = visible
   }
 
+  public setCoverageOverlayVisible(visible: boolean): void {
+    this.coverageOverlayVisible = visible
+    this.diagnostics.coverageOverlayVisible = visible
+  }
+
   public setCandidateSurfaceVisible(visible: boolean): void {
     this.candidateSurfaceVisible = visible
     this.diagnostics.candidateSurfaceVisible = visible
@@ -396,6 +403,12 @@ export class SpatialCoverageRenderService {
   }
 
   public render(views: readonly XRView[]): void {
+    this.diagnostics.renderCallCount += 1
+    const candidateVisible = this.coverageOverlayVisible && this.candidateSurfaceVisible && this.candidateSurfaceVertexCount > 0
+    const persistentVisible = this.coverageOverlayVisible && this.persistentSurfaceVertexCount > 0
+    const persistentDebugVisible = this.persistentSurfelDebugVisible && this.persistentSurfaceVertexCount > 0
+    const denseVisible = this.debugGeometryVisible && this.denseVertexCount > 0
+    const rgbDepthVisible = this.rgbDepthDebugVisible && this.rgbDepthVertexCount > 0 && this.rgbDepthBuffer !== null
     if (
       this.diagnostics.status !== 'ready' ||
       !this.target ||
@@ -406,11 +419,9 @@ export class SpatialCoverageRenderService {
       !this.candidateSurfaceBuffer ||
       !this.projectionUniform ||
       !this.viewUniform ||
-      (this.denseVertexCount === 0 &&
-        this.persistentSurfaceVertexCount === 0 &&
-        this.candidateSurfaceVertexCount === 0 &&
-        this.rgbDepthVertexCount === 0)
+      (!candidateVisible && !persistentVisible && !persistentDebugVisible && !denseVisible && !rgbDepthVisible)
     ) {
+      this.diagnostics.renderSkipCount += 1
       return
     }
 
@@ -436,38 +447,45 @@ export class SpatialCoverageRenderService {
         gl.uniformMatrix4fv(this.projectionUniform, false, view.projectionMatrix)
         gl.uniformMatrix4fv(this.viewUniform, false, view.transform.inverse.matrix)
 
-        if (this.candidateSurfaceVisible && this.candidateSurfaceVertexCount > 0) {
+        if (candidateVisible) {
           gl.bindBuffer(gl.ARRAY_BUFFER, this.candidateSurfaceBuffer)
           this.configureVertexAttributes(gl)
           gl.disable(gl.CULL_FACE)
           gl.drawArrays(gl.TRIANGLES, 0, this.candidateSurfaceVertexCount)
+          this.diagnostics.drawCallCount += 1
         }
 
-        if (this.persistentSurfaceVertexCount > 0) {
+        if (persistentVisible || persistentDebugVisible) {
           gl.bindBuffer(gl.ARRAY_BUFFER, this.persistentSurfaceBuffer)
           this.configureVertexAttributes(gl)
-          gl.enable(gl.CULL_FACE)
-          gl.cullFace(gl.BACK)
-          gl.drawArrays(gl.TRIANGLES, 0, this.persistentSurfaceVertexCount)
-          if (this.persistentSurfelDebugVisible) {
+          if (persistentVisible) {
+            gl.enable(gl.CULL_FACE)
+            gl.cullFace(gl.BACK)
+            gl.drawArrays(gl.TRIANGLES, 0, this.persistentSurfaceVertexCount)
+            this.diagnostics.drawCallCount += 1
+          }
+          if (persistentDebugVisible) {
             gl.drawArrays(gl.POINTS, 0, this.persistentSurfaceVertexCount)
+            this.diagnostics.drawCallCount += 1
           }
         }
 
-        if (this.debugGeometryVisible && this.denseVertexCount > 0) {
+        if (denseVisible) {
           gl.bindBuffer(gl.ARRAY_BUFFER, this.denseBuffer)
           this.configureVertexAttributes(gl)
           gl.disable(gl.CULL_FACE)
           gl.drawArrays(gl.TRIANGLES, 0, this.denseVertexCount)
           gl.drawArrays(gl.POINTS, 0, this.denseVertexCount)
+          this.diagnostics.drawCallCount += 2
         }
 
-        if (this.rgbDepthDebugVisible && this.rgbDepthVertexCount > 0 && this.rgbDepthBuffer) {
+        if (rgbDepthVisible && this.rgbDepthBuffer) {
           gl.bindBuffer(gl.ARRAY_BUFFER, this.rgbDepthBuffer)
           this.configureVertexAttributes(gl)
           gl.disable(gl.DEPTH_TEST)
           gl.disable(gl.CULL_FACE)
           gl.drawArrays(gl.POINTS, 0, this.rgbDepthVertexCount)
+          this.diagnostics.drawCallCount += 1
           gl.enable(gl.DEPTH_TEST)
         }
       }
@@ -503,6 +521,7 @@ export class SpatialCoverageRenderService {
     this.debugGeometryVisible = false
     this.persistentSurfelDebugVisible = false
     this.candidateSurfaceVisible = true
+    this.coverageOverlayVisible = false
     this.rgbDepthDebugVisible = false
     this.diagnostics = this.createInitialDiagnostics()
   }
@@ -520,6 +539,10 @@ export class SpatialCoverageRenderService {
       persistentSurfelCount: 0,
       candidateVertexCount: 0,
       candidateRenderUpdateCount: 0,
+      coverageOverlayVisible: false,
+      renderCallCount: 0,
+      renderSkipCount: 0,
+      drawCallCount: 0,
       candidateSurfaceVisible: true,
       denseVertexCount: 0,
       denseRenderUpdateCount: 0,
