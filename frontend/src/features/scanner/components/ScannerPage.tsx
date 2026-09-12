@@ -1,4 +1,4 @@
-import type { RefObject } from 'react'
+import { useRef, type RefObject } from 'react'
 import type {
   DepthSensingStatus,
   ScannerCapabilities,
@@ -10,6 +10,8 @@ import type {
 import '../../../App.css'
 import ScannerDomOverlay from './ScannerDomOverlay'
 import ScannerFinishedView from './ScannerFinishedView'
+import ScannerLoadedReplayView from './ScannerLoadedReplayView'
+import type { LoadedScanReplayReview } from '../services/scanReplayLoadService'
 
 interface ScannerPageProps {
   liveMap: import('../services/liveRealityMap').LiveRealityMap
@@ -19,7 +21,13 @@ interface ScannerPageProps {
   overlayRootRef: RefObject<HTMLDivElement | null>
   pointPreviewCanvasRef: RefObject<HTMLCanvasElement | null>
   sessionState: ScannerSessionState
+  loadedScanReview: LoadedScanReplayReview | null
+  isLoadingScan: boolean
+  scanLoadStage: string
+  scanLoadError: string | null
   onStartScan: () => void
+  onLoadScan: (file: File) => void
+  onLoadAnotherScan: () => void
   onDebugGeometryToggle: (visible: boolean) => void
   onCoverageOverlayToggle: (visible: boolean) => void
   onPersistentSurfelDebugToggle: (visible: boolean) => void
@@ -134,9 +142,16 @@ function ScannerPage({
   overlayRootRef,
   pointPreviewCanvasRef,
   sessionState,
+  loadedScanReview,
+  isLoadingScan,
+  scanLoadStage,
+  scanLoadError,
+  onLoadScan,
+  onLoadAnotherScan,
   liveMap,
   status,
 }: ScannerPageProps) {
+  const scanFileInputRef = useRef<HTMLInputElement>(null)
   const isChecking = status === 'checking'
   const allSupported = capabilities?.webxr === true && capabilities.immersiveAr === true
   const isStarting = sessionState.status === 'starting'
@@ -232,10 +247,15 @@ function ScannerPage({
 
         <main
           className="scanner-main"
-          aria-labelledby={isFinished ? undefined : 'scanner-title'}
-          aria-label={isFinished ? 'Finalized spatial scan' : undefined}
+          aria-labelledby={isFinished || loadedScanReview ? undefined : 'scanner-title'}
+          aria-label={isFinished ? 'Finalized spatial scan' : loadedScanReview ? 'Loaded scan replay' : undefined}
         >
-          {isFinished && sessionState.finalizedScan ? (
+          {loadedScanReview ? (
+            <ScannerLoadedReplayView
+              review={loadedScanReview}
+              onLoadAnotherScan={onLoadAnotherScan}
+            />
+          ) : isFinished && sessionState.finalizedScan ? (
             <ScannerFinishedView
               onDiscardScan={onDiscardScan}
               onStartNewScan={onStartNewScan}
@@ -372,13 +392,44 @@ function ScannerPage({
                   type="button"
                   className="scan-button"
                   aria-busy={isStarting}
-                  disabled={!canStartScan || isStarting}
+                  disabled={!canStartScan || isStarting || isLoadingScan}
                   onClick={onStartScan}
                 >
                   {isStarting ? 'Starting...' : 'Start Scan'}
                 </button>
               )}
             </div>
+
+            {!isActive && !isFinished && !loadedScanReview ? (
+              <section className="scanner-load-scan" aria-label="Load a saved scan">
+                <div className="scanner-load-copy">
+                  <strong>Already have a scan?</strong>
+                  <span>Choose a saved .scan file from this computer to inspect it here.</span>
+                </div>
+                <button
+                  type="button"
+                  className="scan-button scan-button-secondary"
+                  disabled={isLoadingScan}
+                  onClick={() => scanFileInputRef.current?.click()}
+                >
+                  {isLoadingScan ? 'Loading Scan...' : 'Load Scan'}
+                </button>
+                <input
+                  ref={scanFileInputRef}
+                  className="scanner-load-file-input"
+                  type="file"
+                  accept=".scan,application/octet-stream"
+                  aria-label="Choose a saved scan file"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0]
+                    event.currentTarget.value = ''
+                    if (file) onLoadScan(file)
+                  }}
+                />
+                {isLoadingScan ? <p className="scanner-load-message" role="status">{scanLoadStage}</p> : null}
+                {scanLoadError ? <p className="session-error scanner-load-message" role="alert">{scanLoadError}</p> : null}
+              </section>
+            ) : null}
 
             {sessionState.status === 'error' && sessionState.error ? (
               <p className="session-error" role="alert">
@@ -491,6 +542,8 @@ function ScannerPage({
           <span>
             {isActive
               ? 'Pose + world coverage'
+              : loadedScanReview
+                ? 'Loaded scan review'
               : isFinished
                 ? 'Finalized scan review'
                 : 'Capability check + session test'}

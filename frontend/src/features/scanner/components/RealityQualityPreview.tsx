@@ -10,7 +10,7 @@ import M813ViewDependentVisualRealityPreview from './M813ViewDependentVisualReal
 import ScanCaptureDownload from './ScanCaptureDownload'
 
 const modes = [['raw-accepted', '1. Raw Accepted Measurement Audit'], ['live', '2. Live Lightweight Fusion'], ['retained', '3. Per-Frame Consolidated Measurements'], ['canonical', '4. Post-Scan Canonical Fusion'], ['baseline-canonical', 'M8.7.1.6 Baseline Canonical'], ['baseline-flat-triangles', 'M8.7.1.6 Flat Triangle Control'], ['confidence', '5. Confidence Filtered Canonical'], ['hybrid', '6. Canonical Hybrid Mesh + Surfels'], ['base-color', '7. Base Real RGB Canonical'], ['high-res', '8. High-Res Color Refined'], ['final', '9. Final M8.7.1.6 Reality'], ['textured', '10. Textured Canonical Reality'], ['provisional-expiry', 'Provisional Outcomes Map (diagnostic)'], ['canonical-triangulated', 'Triangulation Only (diagnostic)'], ['layers', 'Depth Layers — 10 cm range bands'], ['discontinuities', 'Depth Discontinuities'], ['new', 'New Geometry — first observed time'], ['views', 'Multi-View Observation Count'], ['reveal', 'Recess / Occlusion Reveal'], ['trajectory', 'Scan Trajectory']]
-export default function RealityQualityPreview({ source }: { source: FinalizedDenseRealityReconstruction }) {
+export default function RealityQualityPreview({ source, replayMode = false }: { source: FinalizedDenseRealityReconstruction; replayMode?: boolean }) {
   const host = useRef<HTMLDivElement>(null), worker = useRef<Worker | null>(null), requestId = useRef(0)
   const [mode, setMode] = useState('final'), [busy, setBusy] = useState(true), [error, setError] = useState('')
   const [showExperiments, setShowExperiments] = useState(false)
@@ -124,15 +124,19 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
   const appearanceSource = source.appearanceKeyframes?.keyframes.at(-1)?.mapping
   const texture = result?.prepared.textureStats
   const lowestTextureRegions = texture?.spatialRegionCoverage.slice().sort((a, b) => a.percentage - b.percentage || b.totalTriangles - a.totalTriangles).slice(0, 6) ?? []
+  const availableModes = replayMode
+    ? modes.filter(([value]) => ['retained', 'canonical', 'baseline-canonical', 'baseline-flat-triangles', 'confidence', 'hybrid', 'base-color', 'high-res', 'final', 'textured'].includes(value))
+    : modes
   const lowQuality = Boolean(filter && (filter.repeatability.stableSampleRatio < .3 || filter.floatingComponentsRejected > Math.max(4,filter.connectedComponentCount*.35)) || measurement && measurement.accepted < Math.max(3,measurement.ticksConsidered*.35))
   return <section aria-label="Captured room model" style={{ marginBlock: 24 }}>
     <h2>Your captured room</h2>
     <p>Drag to look around; pinch to zoom. Check the model from several sides. Missing measurements and reconstruction errors can both leave gaps.</p>
     <p>Walls remain measured surfaces. Object sides and recesses keep their recorded depth. Hidden surfaces and exact dimensions are not verified by this preview.</p>
-    {lowQuality && <p role="alert">This capture has limited reliable geometry. Download the scan capture to help diagnose missing or distorted surfaces.</p>}
-    <ScanCaptureDownload key={source.scanId} source={source} />
+    {replayMode && <p>This preview was rebuilt locally from the saved measurements. Live scan coverage history is not included in the capture file.</p>}
+    {lowQuality && <p role="alert">This capture has limited reliable geometry. Missing or distorted surfaces may remain in the preview.</p>}
+    {!replayMode && <ScanCaptureDownload key={source.scanId} source={source} />}
     <details><summary>Compare reconstruction stages</summary>
-    <label>Quality comparison <select value={mode} onChange={(e) => select(e.target.value)}>{modes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    <label>Quality comparison <select value={mode} onChange={(e) => select(e.target.value)}>{availableModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     {mode === 'layers' && <p>Range bands from the first recorded scanner position, not inferred planar layers.</p>}
     {mode === 'reveal' && <p>First-observed time: green/blue is earlier, magenta is later. This shows when geometry was revealed; it does not label a recess semantically.</p>}
     {mode === 'views' && <p>Orange: one angular view bin. Green: multiple bins. Repeat ticks alone do not establish viewpoint diversity.</p>}
@@ -159,7 +163,7 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
     />}
     {showExperiments && <M812SynchronizedRgbdProofPreview snapshot={source.m812SynchronizedRgbd} />}
     </details>}
-    <details><summary>Frame acceptance, stability, components and repeatability</summary>
+    {!replayMode && <details><summary>Frame acceptance, stability, components and repeatability</summary>
     {canonical?.visibility && <p>Measured visibility: checked {canonical.visibility.checkedFrames} calibrated views; removed {canonical.visibility.removedSamples} samples contradicted by clear-space measurements. Preserved nearer-object occlusions in {canonical.visibility.occludedComparisons} comparisons.</p>}
       <p>Measurement funnel: candidate ticks {measurement?.candidateTicks ?? 0}; cadence skipped {measurement?.cadenceSkipped ?? 0}; stationary skipped {measurement?.skippedTogether ?? 0}; backpressure skipped {measurement?.backpressureSkipped ?? 0}; considered {measurement?.ticksConsidered ?? 0}; accepted {measurement?.accepted ?? 0}; fused {measurement?.fusedSuccessfully ?? 0}. Acceptance {measurement?.acceptedPercentage.toFixed(1) ?? 0}%; fused {measurement?.fusedPercentage.toFixed(1) ?? 0}%.</p>
       <p>Rejected: motion {measurement?.motionRejected ?? 0}; tracking {measurement?.trackingRejected ?? 0}; depth {measurement?.depthRejected ?? 0}; pose discontinuity {measurement?.poseDiscontinuityRejected ?? 0}; world consistency {measurement?.consistencyRejected ?? 0}. Depth reasons: missing {measurement?.depthRejectedMissing ?? 0}; valid ratio {measurement?.depthRejectedValidRatio ?? 0}; sample count {measurement?.depthRejectedSampleCount ?? 0}; outliers {measurement?.depthRejectedOutliers ?? 0}; discontinuity {measurement?.depthRejectedDiscontinuity ?? 0}; range {measurement?.depthRejectedRange ?? 0}.</p>
@@ -187,8 +191,8 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
       {filter && <><p>Confidence filter retained {filter.retainedSamples}/{filter.sourceSamples}; stable {filter.stableSamples}; low-confidence {filter.lowConfidenceSamples}; view-diverse {filter.viewDiverseSamples}; single-view {filter.singleViewSamples}. Removed {filter.samplesRemoved} display candidates.</p>
         <p>Components {filter.connectedComponentCount}; floating low-confidence components excluded {filter.floatingComponentsRejected}; duplicate-sheet candidates {filter.duplicateCandidates}, rejected {filter.duplicateCandidatesRejected}, multi-view confirmed {filter.duplicateCandidatesMultiViewConfirmed}, supported second surface {filter.duplicateCandidatesSupportedSecondSurface}, recess-topology retained {filter.duplicateCandidatesRetainedForRecessTopology}. Mean position/depth/normal variation {filter.meanPositionStdMeters.toFixed(4)} m / {filter.meanDepthStdMeters.toFixed(4)} m / {filter.meanNormalStd.toFixed(3)}. Analysis {filter.componentAnalysisMs.toFixed(1)} ms.</p>
         <p>Repeatability: extent {filter.repeatability.extentMeters.x.toFixed(2)} × {filter.repeatability.extentMeters.y.toFixed(2)} × {filter.repeatability.extentMeters.z.toFixed(2)} m; major components {filter.repeatability.majorComponentCount}; stable {(filter.repeatability.stableSampleRatio*100).toFixed(1)}%; low confidence {(filter.repeatability.lowConfidenceSampleRatio*100).toFixed(1)}%; largest unsupported component {filter.repeatability.largestUnsupportedComponentSamples} samples; ceiling-height proxy {filter.repeatability.ceilingHeightEstimateMeters?.toFixed(2) ?? 'N/A'} m.</p></>}
-    </details>
-    <details><summary>Depth, appearance, memory and walking diagnostics</summary>
+    </details>}
+    {!replayMode && <details><summary>Depth, appearance, memory and walking diagnostics</summary>
       <p>Depth source {source.depthSource?.width ?? '?'} × {source.depthSource?.height ?? '?'}; scale {source.depthSource?.scale ?? '?'} m/raw unit. Tier {q?.tier ?? 0}, four temporal phases. Attempted {q?.attempted ?? 0}; valid {q?.valid ?? 0}. Last processing {q?.processingMs.toFixed(1) ?? '?'} ms.</p>
       <p>Live lightweight matching: last {fusion.createdThisTick ?? 0} new / {fusion.fusedThisTick ?? 0} matched ({fusion.matchRatioPercentage?.toFixed(1) ?? '?'}%). Processed frames {fusion.liveProcessedFrameCount ?? 0}; per-frame budget {fusion.liveMaximumSamplesPerFrame ?? '?'}; decimated samples {fusion.liveInputDecimatedSampleCount ?? 0}. Failed match evidence: distance {fusion.matchDistanceRejectCount ?? 0}; normal {fusion.matchNormalRejectCount ?? 0}; depth layer {fusion.matchDepthLayerRejectCount ?? 0}; empty bucket {fusion.matchBucketMissCount ?? 0}; candidate budget {fusion.matchCandidateBudgetRejectCount ?? 0}. Fusion p50/p95/max {fusion.fusionP50Ms?.toFixed(1) ?? '?'} / {fusion.fusionP95Ms?.toFixed(1) ?? '?'} / {fusion.fusionMaxMs?.toFixed(1) ?? '?'} ms.</p>
       <p>View diversity baseline p50/p90 {fusion.viewBaselineP50Meters?.toFixed(2) ?? '?'} / {fusion.viewBaselineP90Meters?.toFixed(2) ?? '?'} m; angle p50/p90 {fusion.viewAngleP50Degrees?.toFixed(1) ?? '?'} / {fusion.viewAngleP90Degrees?.toFixed(1) ?? '?'}°. View-diverse {fusion.viewDiverseSampleCount ?? 0}; single-view {fusion.singleViewSampleCount ?? 0}.</p>
@@ -207,6 +211,6 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
       <p>Canvas {renderInfo.width} × {renderInfo.height}; DPR {renderInfo.dpr}; {renderInfo.fps} FPS; {renderInfo.drawCalls} draw calls. Browser render proxy: resource restore/setup {renderInfo.restoreSetupMs?.toFixed(1) ?? 'N/A'} ms; first renderer.render after each prepared resource {renderInfo.firstRenderCallMs?.toFixed(1) ?? 'N/A'} ms; rolling steady renderer.render {renderInfo.rollingRenderCallMs?.toFixed(2) ?? 'N/A'} ms. These timings are browser proxies for setup/compile/draw; exact GPU upload is not measured.</p>
       <p>Position/normal/color memory figures are packed-equivalent estimates; derived samples are JS objects. Browser peak memory and GPU allocations require device profiling. Snapshot cloning temporarily duplicates raw samples/keyframes; only one preview is mounted at a time.</p>
       <p>Walked {q?.distanceWalkedMeters.toFixed(2) ?? '0'} m; trajectory {q?.trajectory.length ?? 0}/1024 poses; stationary ticks skipped {q?.skippedStationaryTicks ?? 0}. Walking distance is tracked pose-path length, not drift-corrected ground truth.</p>
-    </details>
+    </details>}
   </section>
 }

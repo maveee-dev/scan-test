@@ -12,6 +12,7 @@ const { encodeScanReplay, decodeScanReplay } = await load('scanReplayCaptureServ
 const { retainedMeasurementTransferBuffers } = await load('retainedRealityMeasurementService')
 const { CanonicalRealityFusionService } = await load('canonicalRealityFusionService')
 const { createRetainedRealityMeasurementSnapshotSignature } = await load('layeredMeasuredSurfaceFieldService')
+const { loadScanReplayFile } = await load('scanReplayLoadService')
 const identity = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1])
 const projection = () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,-1,-1, 0,0,-.1,0])
 function frame(sequence, cameraX = (sequence - 1) * .12, depth = 2) {
@@ -106,6 +107,25 @@ test('binary capture round trip keeps exact arrays, calibration, image rows and 
   const before = reconstruct(input.measurements)
   assert.ok(before.length > 0)
   assert.deepEqual(reconstruct(decoded.measurements), before)
+})
+
+test('local scan loader rebuilds a review from the selected file without uploading it', async () => {
+  const bytes = await encodeScanReplay(capture()).arrayBuffer()
+  const stages = []
+  const review = await loadScanReplayFile({
+    name: 'phone-room.scan',
+    size: bytes.byteLength,
+    arrayBuffer: async () => bytes,
+  }, (stage) => stages.push(stage))
+
+  assert.equal(review.fileName, 'phone-room.scan')
+  assert.equal(review.frameCount, 3)
+  assert.equal(review.sampleCount, 3 * 16 * 16)
+  assert.ok(review.reconstruction.surfels.length > 0)
+  assert.equal(review.reconstruction.canonicalSurfels, review.reconstruction.surfels)
+  assert.equal(review.reconstruction.appearanceKeyframes.keyframes.length, 1)
+  assert.ok(stages.includes('reading-file'))
+  assert.ok(stages.includes('reconstructing-geometry'))
 })
 
 test('calibration changes the replay signature', () => {

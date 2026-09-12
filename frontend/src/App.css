@@ -2456,6 +2456,48 @@
   border-top: 1px solid var(--line);
 }
 
+.scanner-load-scan {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 16px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.scanner-load-copy strong,
+.scanner-load-copy span {
+  display: block;
+}
+
+.scanner-load-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.scanner-load-copy span {
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scanner-load-scan .scan-button {
+  min-width: 120px;
+}
+
+.scanner-load-file-input {
+  display: none;
+}
+
+.scanner-load-message {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+}
+
 .scanner-session-actions {
   display: flex;
   flex: 1;
@@ -2878,6 +2920,10 @@
 
   .capability-card {
     padding: 18px;
+  }
+
+  .scanner-load-scan {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .capability-card-header {
