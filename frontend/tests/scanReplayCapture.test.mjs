@@ -121,11 +121,55 @@ test('local scan loader rebuilds a review from the selected file without uploadi
   assert.equal(review.fileName, 'phone-room.scan')
   assert.equal(review.frameCount, 3)
   assert.equal(review.sampleCount, 3 * 16 * 16)
+  assert.equal(review.sampleLabel, 'Retained measurements')
   assert.ok(review.reconstruction.surfels.length > 0)
   assert.equal(review.reconstruction.canonicalSurfels, review.reconstruction.surfels)
   assert.equal(review.reconstruction.appearanceKeyframes.keyframes.length, 1)
   assert.ok(stages.includes('reading-file'))
   assert.ok(stages.includes('reconstructing-geometry'))
+})
+
+test('large JSON scan exports stream past auxiliary payloads and keep the saved room model', async () => {
+  const exported = JSON.stringify({
+    version: 1,
+    exportedAt: '2026-09-12T00:00:00Z',
+    ignored: { text: '"reconstruction":{"surfels":[]}', nested: [{ value: 12 }] },
+    reconstruction: {
+      scanId: 'json-room',
+      referenceSpaceType: 'local-floor',
+      status: 'available',
+      surfels: [{ id: 7, position: { x: 1, y: 2, z: 3 }, normal: { x: 0, y: 0, z: 1 }, radius: .04,
+        colorRgb: { r: .8, g: .5, b: .2 }, geometryConfidence: .9, colorConfidence: .7,
+        colorObservationCount: 2, geometryObservationCount: 3, viewObservationCount: 1 }],
+      m812SynchronizedRgbd: { largeExperimentalPayload: ['ignored', { text: 'escaped quote: \\" and brackets: [}]' }] },
+    },
+  })
+  const bytes = new TextEncoder().encode(exported)
+  let offset = 0
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (offset >= bytes.length) { controller.close(); return }
+      const end = Math.min(offset + 23, bytes.length)
+      controller.enqueue(bytes.slice(offset, end))
+      offset = end
+    },
+  })
+  const stages = []
+  const review = await loadScanReplayFile({
+    name: 'laptop-room.json',
+    type: 'application/json',
+    size: bytes.byteLength,
+    stream: () => stream,
+  }, (stage) => stages.push(stage))
+  assert.equal(review.fileName, 'laptop-room.json')
+  assert.equal(review.capturedBuild, 'JSON scan export')
+  assert.equal(review.frameCount, null)
+  assert.equal(review.sampleCount, null)
+  assert.equal(review.reconstruction.surfels.length, 1)
+  assert.deepEqual(review.reconstruction.surfels[0].colorRgb, { r: .8, g: .5, b: .2 })
+  assert.deepEqual(review.reconstruction.bounds, { min: { x: 1, y: 2, z: 3 }, max: { x: 1, y: 2, z: 3 } })
+  assert.equal(review.reconstruction.status, 'available')
+  assert.ok(stages.includes('parsing-json'))
 })
 
 test('calibration changes the replay signature', () => {

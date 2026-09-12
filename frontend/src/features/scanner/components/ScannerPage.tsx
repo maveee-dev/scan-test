@@ -404,7 +404,7 @@ function ScannerPage({
               <section className="scanner-load-scan" aria-label="Load a saved scan">
                 <div className="scanner-load-copy">
                   <strong>Already have a scan?</strong>
-                  <span>Choose a saved .scan file from this computer to inspect it here.</span>
+                  <span>Choose a saved .scan or .json scan file from this computer to inspect it here.</span>
                 </div>
                 <button
                   type="button"
@@ -418,7 +418,7 @@ function ScannerPage({
                   ref={scanFileInputRef}
                   className="scanner-load-file-input"
                   type="file"
-                  accept=".scan,application/octet-stream"
+                  accept=".scan,.json,application/octet-stream,application/json"
                   aria-label="Choose a saved scan file"
                   onChange={(event) => {
                     const file = event.currentTarget.files?.[0]

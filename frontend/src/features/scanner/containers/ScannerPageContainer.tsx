@@ -6,6 +6,7 @@ import { loadScanReplayFile, type LoadedScanReplayReview, type ScanReplayLoadSta
 
 const LOAD_STAGE_LABELS: Record<ScanReplayLoadStage, string> = {
   'reading-file': 'Reading the saved scan locally…',
+  'parsing-json': 'Reading the saved room model…',
   'reconstructing-geometry': 'Rebuilding measured room geometry…',
   'cleaning-surfaces': 'Preparing the room preview…',
   'applying-room-appearance': 'Applying saved room appearance…',

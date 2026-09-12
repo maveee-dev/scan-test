@@ -10,7 +10,7 @@ import M813ViewDependentVisualRealityPreview from './M813ViewDependentVisualReal
 import ScanCaptureDownload from './ScanCaptureDownload'
 
 const modes = [['raw-accepted', '1. Raw Accepted Measurement Audit'], ['live', '2. Live Lightweight Fusion'], ['retained', '3. Per-Frame Consolidated Measurements'], ['canonical', '4. Post-Scan Canonical Fusion'], ['baseline-canonical', 'M8.7.1.6 Baseline Canonical'], ['baseline-flat-triangles', 'M8.7.1.6 Flat Triangle Control'], ['confidence', '5. Confidence Filtered Canonical'], ['hybrid', '6. Canonical Hybrid Mesh + Surfels'], ['base-color', '7. Base Real RGB Canonical'], ['high-res', '8. High-Res Color Refined'], ['final', '9. Final M8.7.1.6 Reality'], ['textured', '10. Textured Canonical Reality'], ['provisional-expiry', 'Provisional Outcomes Map (diagnostic)'], ['canonical-triangulated', 'Triangulation Only (diagnostic)'], ['layers', 'Depth Layers — 10 cm range bands'], ['discontinuities', 'Depth Discontinuities'], ['new', 'New Geometry — first observed time'], ['views', 'Multi-View Observation Count'], ['reveal', 'Recess / Occlusion Reveal'], ['trajectory', 'Scan Trajectory']]
-export default function RealityQualityPreview({ source, replayMode = false }: { source: FinalizedDenseRealityReconstruction; replayMode?: boolean }) {
+export default function RealityQualityPreview({ source, replayMode = false, replayDescription }: { source: FinalizedDenseRealityReconstruction; replayMode?: boolean; replayDescription?: string }) {
   const host = useRef<HTMLDivElement>(null), worker = useRef<Worker | null>(null), requestId = useRef(0)
   const [mode, setMode] = useState('final'), [busy, setBusy] = useState(true), [error, setError] = useState('')
   const [showExperiments, setShowExperiments] = useState(false)
@@ -125,14 +125,14 @@ export default function RealityQualityPreview({ source, replayMode = false }: { 
   const texture = result?.prepared.textureStats
   const lowestTextureRegions = texture?.spatialRegionCoverage.slice().sort((a, b) => a.percentage - b.percentage || b.totalTriangles - a.totalTriangles).slice(0, 6) ?? []
   const availableModes = replayMode
-    ? modes.filter(([value]) => ['retained', 'canonical', 'baseline-canonical', 'baseline-flat-triangles', 'confidence', 'hybrid', 'base-color', 'high-res', 'final', 'textured'].includes(value))
+    ? modes.filter(([value]) => ['canonical', 'baseline-canonical', 'baseline-flat-triangles', 'confidence', 'hybrid', 'base-color', 'high-res', 'final', 'textured'].includes(value) || (value === 'retained' && Boolean(source.consolidatedMeasurementMap)))
     : modes
   const lowQuality = Boolean(filter && (filter.repeatability.stableSampleRatio < .3 || filter.floatingComponentsRejected > Math.max(4,filter.connectedComponentCount*.35)) || measurement && measurement.accepted < Math.max(3,measurement.ticksConsidered*.35))
   return <section aria-label="Captured room model" style={{ marginBlock: 24 }}>
     <h2>Your captured room</h2>
     <p>Drag to look around; pinch to zoom. Check the model from several sides. Missing measurements and reconstruction errors can both leave gaps.</p>
     <p>Walls remain measured surfaces. Object sides and recesses keep their recorded depth. Hidden surfaces and exact dimensions are not verified by this preview.</p>
-    {replayMode && <p>This preview was rebuilt locally from the saved measurements. Live scan coverage history is not included in the capture file.</p>}
+    {replayMode && <p>{replayDescription ?? 'This preview was rebuilt locally from the saved measurements. Live scan coverage history is not included in the capture file.'}</p>}
     {lowQuality && <p role="alert">This capture has limited reliable geometry. Missing or distorted surfaces may remain in the preview.</p>}
     {!replayMode && <ScanCaptureDownload key={source.scanId} source={source} />}
     <details><summary>Compare reconstruction stages</summary>

@@ -19,7 +19,7 @@ export default function ScannerLoadedReplayView({
         Scan <em>loaded.</em>
       </h1>
       <p className="scanner-description">
-        This room was rebuilt in your browser from the selected file. The capture stays on this device.
+        This room was loaded in your browser from the selected file. The scan stays on this device.
       </p>
 
       <div className="scanner-build-info" aria-label="Loaded scan details">
@@ -28,24 +28,24 @@ export default function ScannerLoadedReplayView({
       </div>
 
       {reconstruction.surfels.length > 0 ? (
-        <RealityQualityPreview source={reconstruction} replayMode />
+        <RealityQualityPreview source={reconstruction} replayMode replayDescription={review.previewDescription} />
       ) : (
         <div className="scanner-complete-empty">
-          <strong>No measured room geometry could be reconstructed from this capture.</strong>
-          <span>The saved file was valid, but its depth measurements did not produce a viewable model.</span>
+          <strong>This saved scan does not contain viewable room geometry.</strong>
+          <span>The file was valid, but it did not include a room model to display.</span>
         </div>
       )}
 
       <div className="scanner-complete-card scanner-loaded-replay-stats">
-        <div className="scanner-complete-summary">
+        {review.frameCount !== null ? <div className="scanner-complete-summary">
           <span>Saved frames</span>
-          <strong>{review.frameCount}</strong>
-        </div>
+          <strong>{review.frameCount.toLocaleString()}</strong>
+        </div> : null}
         <div className="scanner-complete-stats">
-          <div>
-            <span>Retained measurements</span>
+          {review.sampleCount !== null ? <div>
+            <span>{review.sampleLabel}</span>
             <strong>{review.sampleCount.toLocaleString()}</strong>
-          </div>
+          </div> : null}
           <div>
             <span>Reconstructed surfels</span>
             <strong>{reconstruction.surfels.length.toLocaleString()}</strong>
