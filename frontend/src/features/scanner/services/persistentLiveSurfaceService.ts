@@ -214,6 +214,7 @@ export class PersistentLiveSurfaceService {
     timestamp: number,
     coverageService: SpatialCoverageService,
     debugVisible = false,
+    renderSurfaceVisible = true,
   ): PersistentLiveSurfaceFrameResult {
     const processingStartedAt = getPerformanceTimestamp()
     const sampleCount = frame.columns * frame.rows
@@ -288,6 +289,7 @@ export class PersistentLiveSurfaceService {
         // frame. It fills the brief gap before a new surfel is available and
         // is deliberately subsampled to keep first-contact work mobile-safe.
         if (
+          renderSurfaceVisible &&
           hasNormal &&
           index % 2 === 0 &&
           Math.floor(index / frame.columns) % 2 === 0
@@ -397,8 +399,21 @@ export class PersistentLiveSurfaceService {
       Math.max(1, (timestamp - this.firstUpdateAt) / 1000)
 
     const renderPreparationStartedAt = getPerformanceTimestamp()
-    const persistentSurfaceMesh = this.buildMesh(debugVisible)
-    const candidateSurfaceMesh = this.buildCandidateMesh()
+    const persistentSurfaceMesh = renderSurfaceVisible
+      ? this.buildMesh(debugVisible)
+      : this.buildEmptyMesh()
+    const candidateSurfaceMesh = renderSurfaceVisible
+      ? this.buildCandidateMesh()
+      : this.buildEmptyCandidateMesh()
+    const renderPreparationDurationMs = Math.max(
+      0,
+      getPerformanceTimestamp() - renderPreparationStartedAt,
+    )
+    this.diagnostics = {
+      ...this.diagnostics,
+      renderPreparationDurationMs,
+      renderSurfaceVisible,
+    }
     return {
       persistentSurfaceMesh,
       candidateSurfaceMesh,
@@ -409,10 +424,7 @@ export class PersistentLiveSurfaceService {
       performance: {
         normalFilteringDurationMs,
         fusionDurationMs,
-        renderPreparationDurationMs: Math.max(
-          0,
-          getPerformanceTimestamp() - renderPreparationStartedAt,
-        ),
+        renderPreparationDurationMs,
       },
     }
   }
@@ -514,7 +526,21 @@ export class PersistentLiveSurfaceService {
   }
 
   public rebuildForDebugVisibility(visible: boolean): DenseCoverageMesh {
-    return this.buildMesh(visible)
+    return this.rebuildForVisibility(true, visible)
+  }
+
+  /** Rebuilds only when a coverage/debug surface is actually visible. */
+  public rebuildForVisibility(
+    visible: boolean,
+    debugVisible = false,
+  ): DenseCoverageMesh {
+    const mesh = visible ? this.buildMesh(debugVisible) : this.buildEmptyMesh()
+    this.diagnostics.renderSurfaceVisible = visible
+    return mesh
+  }
+
+  public rebuildCandidateForVisibility(visible: boolean): DenseCoverageMesh {
+    return visible ? this.buildCandidateMesh() : this.buildEmptyCandidateMesh()
   }
 
   public reset(): void {
@@ -589,6 +615,10 @@ export class PersistentLiveSurfaceService {
       updateCount: 0,
       updateRateHz: 0,
       processingDurationMs: 0,
+      renderPreparationDurationMs: 0,
+      renderSurfaceVisible: false,
+      renderMeshBuildSkippedCount: 0,
+      candidateMeshBuildSkippedCount: 0,
       footprintRadiusMeters: LIVE_SURFACE_CONFIG.footprintRadiusMeters,
       maxFusionDistanceMeters: LIVE_SURFACE_CONFIG.maxFusionDistanceMeters,
       maxPointToPlaneMeters: LIVE_SURFACE_CONFIG.maxPointToPlaneMeters,
@@ -1032,12 +1062,34 @@ export class PersistentLiveSurfaceService {
     }
   }
 
+  private buildEmptyMesh(): DenseCoverageMesh {
+    this.meshRevision += 1
+    this.diagnostics.renderedSurfelCount = 0
+    this.diagnostics.renderMeshBuildSkippedCount += 1
+    return {
+      revision: this.meshRevision,
+      vertexData: this.vertexData.subarray(0, 0),
+      vertexCount: 0,
+    }
+  }
+
   private buildCandidateMesh(): DenseCoverageMesh {
     this.candidateMeshRevision += 1
     return {
       revision: this.candidateMeshRevision,
       vertexData: this.candidateVertexData.subarray(0, this.candidateVertexOffset),
       vertexCount: this.candidateVertexOffset / FLOATS_PER_VERTEX,
+    }
+  }
+
+  private buildEmptyCandidateMesh(): DenseCoverageMesh {
+    this.candidateMeshRevision += 1
+    this.diagnostics.candidateVisualSurfelCount = 0
+    this.diagnostics.candidateMeshBuildSkippedCount += 1
+    return {
+      revision: this.candidateMeshRevision,
+      vertexData: this.candidateVertexData.subarray(0, 0),
+      vertexCount: 0,
     }
   }
 

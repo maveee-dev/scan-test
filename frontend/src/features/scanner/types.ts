@@ -378,6 +378,13 @@ export interface PersistentLiveSurfaceDebug {
   updateCount: number
   updateRateHz: number
   processingDurationMs: number
+  /** Time spent preparing the optional persistent/candidate render meshes. */
+  renderPreparationDurationMs: number
+  /** False in the normal text-guidance mode; true for coverage/debug geometry. */
+  renderSurfaceVisible: boolean
+  /** Number of updates where mesh packing was intentionally skipped. */
+  renderMeshBuildSkippedCount: number
+  candidateMeshBuildSkippedCount: number
   footprintRadiusMeters: number
   maxFusionDistanceMeters: number
   maxPointToPlaneMeters: number

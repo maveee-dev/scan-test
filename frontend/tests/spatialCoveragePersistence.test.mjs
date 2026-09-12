@@ -17,6 +17,7 @@ function moduleUrl(url) {
 const load = (name) => import(moduleUrl(new URL(`../src/features/scanner/services/${name}.ts`, import.meta.url)))
 const { SpatialCoverageService } = await load('spatialCoverageService')
 const { DenseSurfaceMaskService } = await load('denseSurfaceMaskService')
+const { PersistentLiveSurfaceService } = await load('persistentLiveSurfaceService')
 const { COVERAGE_VISUAL_OPACITY, DENSE_VISUAL_STABILIZATION_CONFIG } = await load('spatialCoverageVisualConfig')
 
 function planeFrame(validValue = 1) {
@@ -69,6 +70,19 @@ test('blue dense mesh expiry is presentation-only and captured cells keep a fain
   assert.equal(coverage.getFinalizationCells().length, storedCount)
   assert.ok(COVERAGE_VISUAL_OPACITY.captured > 0)
   assert.ok(COVERAGE_VISUAL_OPACITY.captured < COVERAGE_VISUAL_OPACITY.partial)
+})
+
+test('normal guidance skips optional coverage mesh packing while debug rebuild restores measured mesh', () => {
+  const coverage = new SpatialCoverageService(), live = new PersistentLiveSurfaceService(), frame = planeFrame()
+  const hidden = live.processFrame(frame, { x: 0, y: 0, z: 0 }, 0, coverage, false, false)
+  assert.equal(hidden.persistentSurfaceMesh.vertexCount, 0)
+  assert.equal(hidden.candidateSurfaceMesh.vertexCount, 0)
+  assert.equal(live.getDiagnostics().renderSurfaceVisible, false)
+  assert.equal(live.getDiagnostics().renderMeshBuildSkippedCount, 1)
+  const visible = live.processFrame(frame, { x: 0.04, y: 0, z: 0 }, 140, coverage, false, true)
+  assert.ok(visible.persistentSurfaceMesh.vertexCount > 0)
+  assert.equal(live.getDiagnostics().renderSurfaceVisible, true)
+  assert.equal(live.getDiagnostics().renderMeshBuildSkippedCount, 1)
 })
 
 test('finalized coverage copy survives the explicit session reset boundary', () => {

@@ -80,6 +80,7 @@ const quaternionDot = (a: ScanTrajectoryPoint['orientation'], b: ScanTrajectoryP
 export class RealityMeasurementStabilityService {
   private lastAccepted: ScanTrajectoryPoint | null = null
   private lastSeen: ScanTrajectoryPoint | null = null
+  private trackingGapSinceLastPacket = false
   private quarantine = false
   private recoveryFrames = 0
   private hardInvalid = false
@@ -125,6 +126,7 @@ export class RealityMeasurementStabilityService {
   public evaluate(packet: RealityMeasurementPacket, consistency: RealityFrameConsistency): RealityFrameAcceptance {
     const started = performance.now(); this.diagnostics.ticksConsidered++
     const previous = this.lastSeen, accepted = this.lastAccepted
+    const trackingGap = this.trackingGapSinceLastPacket
     const dt = previous ? Math.max(.001,(packet.timestamp-previous.timestamp)/1000) : 1
     const translation = previous ? Math.hypot(packet.pose.position.x-previous.position.x,packet.pose.position.y-previous.position.y,packet.pose.position.z-previous.position.z) : 0
     const rotation = previous ? 2*Math.acos(Math.min(1,quaternionDot(packet.pose.orientation,previous.orientation)))*180/Math.PI : 0
@@ -144,7 +146,14 @@ export class RealityMeasurementStabilityService {
     // remain usable, while an abrupt 75°+ turn is still treated as a reset-like
     // discontinuity.
     const validityConfig = REALITY_SPATIAL_VALIDITY_CONFIG
-    const suspiciousJump = previous !== null && dt < validityConfig.suspiciousJumpMaxIntervalSeconds && ((translation > validityConfig.suspiciousTranslationMeters && velocity > validityConfig.suspiciousTranslationVelocityMetersPerSecond) || (rotation > validityConfig.suspiciousRotationDegrees && angularVelocity > validityConfig.suspiciousAngularVelocityDegreesPerSecond))
+    // A missing tracking pose makes the elapsed interval unreliable. When a
+    // pose returns after that gap, use the same displacement/rotation bounds
+    // without a velocity requirement so a relocalized origin cannot slip
+    // through merely because the gap exceeded the normal jump window.
+    const suspiciousPostTrackingGap = previous !== null && trackingGap &&
+      (translation > validityConfig.suspiciousTranslationMeters || rotation > validityConfig.suspiciousRotationDegrees)
+    if (suspiciousPostTrackingGap) this.trackingGapSinceLastPacket = false
+    const suspiciousJump = suspiciousPostTrackingGap || (previous !== null && dt < validityConfig.suspiciousJumpMaxIntervalSeconds && ((translation > validityConfig.suspiciousTranslationMeters && velocity > validityConfig.suspiciousTranslationVelocityMetersPerSecond) || (rotation > validityConfig.suspiciousRotationDegrees && angularVelocity > validityConfig.suspiciousAngularVelocityDegreesPerSecond)))
     const unreliableMotion = previous !== null && dt < validityConfig.motionMaxIntervalSeconds && ((translation > validityConfig.motionTranslationMeters && velocity > validityConfig.motionTranslationVelocityMetersPerSecond) || (rotation > validityConfig.motionRotationDegrees && angularVelocity > validityConfig.motionAngularVelocityDegreesPerSecond))
     const depthFailure = packet.valid < MIN_VALID_SAMPLES ? 'sample-count'
       : packet.validRatio < MIN_VALID_RATIO ? 'valid-ratio'
@@ -178,7 +187,7 @@ export class RealityMeasurementStabilityService {
     }
     if (reason==='none' && consistency.establishedSamples >= 32 && consistency.duplicateRatio > .58 && consistency.consistentRatio < .12) reason='consistency'
     const acceptedFrame=reason==='none'
-    if (acceptedFrame) { this.lastAccepted=packet.pose; this.diagnostics.accepted++ }
+    if (acceptedFrame) { this.lastAccepted=packet.pose; this.trackingGapSinceLastPacket=false; this.diagnostics.accepted++ }
     else if(reason==='motion')this.diagnostics.motionRejected++
     else if(reason==='tracking')this.diagnostics.trackingRejected++
     else if(reason==='depth'){
@@ -240,14 +249,14 @@ export class RealityMeasurementStabilityService {
   public recordBackpressureSkipped(): void { this.diagnostics.backpressureSkipped++ }
   public recordDepthMissing(): void { this.diagnostics.ticksConsidered++;this.diagnostics.depthRejected++;this.diagnostics.depthRejectedMissing++;this.diagnostics.badDepthFrames++;this.diagnostics.guidance='scan-again' }
   public recordFusion(created: number, matched: number): void { this.diagnostics.fusedSuccessfully++;this.diagnostics.producedNewSamples+=created;this.diagnostics.matchedExistingSamples+=matched }
-  public recordTrackingMissing(): void { this.diagnostics.ticksConsidered++;this.diagnostics.trackingRejected++;this.diagnostics.guidance='tracking-unstable' }
+  public recordTrackingMissing(): void { this.trackingGapSinceLastPacket=true;this.diagnostics.ticksConsidered++;this.diagnostics.trackingRejected++;this.diagnostics.guidance='tracking-unstable' }
   public getDiagnostics(): RealityMeasurementDiagnostics { const translations=[...this.translations].sort((a,b)=>a-b),rotations=[...this.rotations].sort((a,b)=>a-b),considered=Math.max(1,this.diagnostics.ticksConsidered);return { ...this.diagnostics,
     translationP50Meters:percentile(translations,.5),translationP90Meters:percentile(translations,.9),translationP95Meters:percentile(translations,.95),
     rotationP50Degrees:percentile(rotations,.5),rotationP90Degrees:percentile(rotations,.9),rotationP95Degrees:percentile(rotations,.95),
     acceptedPercentage:this.diagnostics.accepted/considered*100,fusedPercentage:this.diagnostics.fusedSuccessfully/considered*100,
     usefulPercentage:(this.diagnostics.producedNewSamples+this.diagnostics.matchedExistingSamples)>0?this.diagnostics.fusedSuccessfully/considered*100:0 } }
   public createRawSnapshot(): RawRealityMeasurement[] { return this.raw.map((s)=>({ ...s, position:{...s.position}, normal:{...s.normal} })) }
-  public reset(): void { this.lastAccepted=null;this.lastSeen=null;this.quarantine=false;this.recoveryFrames=0;this.hardInvalid=false;this.referenceSpaceResetCount=0;this.poseEpochCount=1;this.acceptedPoseEpochs.clear();this.scanSpatialValidityReason='none';this.raw=[];this.translations=[];this.rotations=[];this.diagnostics=this.createDiagnostics() }
+  public reset(): void { this.lastAccepted=null;this.lastSeen=null;this.trackingGapSinceLastPacket=false;this.quarantine=false;this.recoveryFrames=0;this.hardInvalid=false;this.referenceSpaceResetCount=0;this.poseEpochCount=1;this.acceptedPoseEpochs.clear();this.scanSpatialValidityReason='none';this.raw=[];this.translations=[];this.rotations=[];this.diagnostics=this.createDiagnostics() }
   private createDiagnostics(): RealityMeasurementDiagnostics { return { candidateTicks:0,cadenceSkipped:0,backpressureSkipped:0,ticksConsidered:0,accepted:0,fusedSuccessfully:0,producedNewSamples:0,matchedExistingSamples:0,skippedTogether:0,motionRejected:0,trackingRejected:0,depthRejected:0,depthRejectedMissing:0,depthRejectedValidRatio:0,depthRejectedSampleCount:0,depthRejectedOutliers:0,depthRejectedDiscontinuity:0,depthRejectedRange:0,poseDiscontinuityRejected:0,consistencyRejected:0,badDepthFrames:0,largestTranslationMeters:0,largestRotationDegrees:0,largestVelocityMetersPerSecond:0,translationP50Meters:0,translationP90Meters:0,translationP95Meters:0,rotationP50Degrees:0,rotationP90Degrees:0,rotationP95Degrees:0,largestAngularVelocityDegreesPerSecond:0,relocalizationLikeEvents:0,stableRecoveryFrames:0,referenceSpaceResetCount:0,poseEpochCount:1,acceptedPoseEpochCount:0,quarantineActive:false,scanSpatialValidity:'healthy',scanSpatialValidityReason:'none',validRatio:0,outlierRatio:0,medianDepthMeters:0,p95DepthMeters:0,guidance:'more-coverage',validationMs:0,acceptedPercentage:0,fusedPercentage:0,usefulPercentage:0 } }
   private captureRaw(packet: RealityMeasurementPacket, accepted: boolean, reason: RealityMeasurementRejectionReason): void {
     const stride=Math.max(1,Math.ceil(packet.valid/256)), frame=packet.denseFrame

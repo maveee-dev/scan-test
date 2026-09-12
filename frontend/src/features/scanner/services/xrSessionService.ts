@@ -383,6 +383,9 @@ export class XRSessionService {
 
   private rawCurrentDepthVisible = false
 
+  /** Dense coverage geometry is a diagnostic view; normal scanning is text-led. */
+  private coverageOverlayVisible = false
+
   private persistentSurfelDebugVisible = false
 
   private rawCameraDebugVisible = false
@@ -430,7 +433,18 @@ export class XRSessionService {
   }
 
   public setCoverageOverlayVisible(visible: boolean): void {
+    this.coverageOverlayVisible = visible
     this.spatialCoverageRenderService.setCoverageOverlayVisible(visible)
+    const renderSurfaceVisible = visible || this.persistentSurfelDebugVisible
+    this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
+      this.persistentLiveSurfaceService.rebuildForVisibility(
+        renderSurfaceVisible,
+        this.persistentSurfelDebugVisible,
+      ),
+    )
+    this.spatialCoverageRenderService.updateCandidateSurfaceMesh(
+      this.persistentLiveSurfaceService.rebuildCandidateForVisibility(visible),
+    )
   }
 
   public getScanHealth(): ScanSpatialHealth {
@@ -441,7 +455,10 @@ export class XRSessionService {
     this.persistentSurfelDebugVisible = visible
     this.spatialCoverageRenderService.setPersistentSurfelDebugVisible(visible)
     this.spatialCoverageRenderService.updatePersistentSurfaceMesh(
-      this.persistentLiveSurfaceService.rebuildForDebugVisibility(visible),
+      this.persistentLiveSurfaceService.rebuildForVisibility(
+        this.coverageOverlayVisible || visible,
+        visible,
+      ),
     )
   }
 
@@ -1218,8 +1235,13 @@ export class XRSessionService {
       time,
       this.spatialCoverageService,
       this.persistentSurfelDebugVisible,
+      this.coverageOverlayVisible || this.persistentSurfelDebugVisible,
     )
     this.measurementQueue.recordStage('persistent-surface', getPerformanceTimestamp() - persistentStartedAt)
+    this.performanceTracker.recordStage(
+      'persistentRenderPreparation',
+      persistentSurfaceResult.performance.renderPreparationDurationMs,
+    )
 
     if (registration) {
       this.realitySurfelColorFusionService.process(
@@ -1346,6 +1368,7 @@ export class XRSessionService {
     this.viewerDirection = null
     this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
+    this.coverageOverlayVisible = false
     this.persistentSurfelDebugVisible = false
     this.rawCameraDebugVisible = false
     this.rgbDepthDebugVisible = false
@@ -1444,6 +1467,7 @@ export class XRSessionService {
     this.viewerDirection = null
     this.latestSpatialObservations = []
     this.rawCurrentDepthVisible = false
+    this.coverageOverlayVisible = false
     this.persistentSurfelDebugVisible = false
     this.rawCameraDebugVisible = false
     this.rgbDepthDebugVisible = false

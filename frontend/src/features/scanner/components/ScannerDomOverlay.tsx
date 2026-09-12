@@ -500,7 +500,7 @@ function ScannerDomOverlay({
           </div>
         </div>
 
-        <p className="xr-scanner-hud-guidance">{formatScanGuidance(
+        <p className="xr-scanner-hud-guidance" aria-live="polite">{formatScanGuidance(
           measurement?.guidance ?? null,
           coverage.guidance,
           measurement?.scanSpatialValidity ?? null,
@@ -609,6 +609,9 @@ function ScannerDomOverlay({
         </div>
 
         <div className="xr-scanner-debug-content">
+          <p className="xr-dom-overlay-coverage-guidance">
+            Normal scan guidance is text-led; coverage geometry and percentages are diagnostic-only.
+          </p>
           <div className="xr-dom-overlay-session">
             <span className="xr-dom-overlay-dot" aria-hidden="true" />
             <span>{isStarting ? 'XR session starting' : 'Scanning session active'}</span>
@@ -1409,6 +1412,14 @@ function ScannerDomOverlay({
               <div>
                 <span>Live reconstruction</span>
                 <strong>{coverage.liveSurface.processingDurationMs.toFixed(1)} ms / {coverage.liveSurface.updateRateHz.toFixed(1)} Hz</strong>
+              </div>
+              <div>
+                <span>Surface render prep</span>
+                <strong>{coverage.liveSurface.renderPreparationDurationMs.toFixed(1)} ms / {coverage.liveSurface.renderSurfaceVisible ? 'visible' : 'skipped'}</strong>
+              </div>
+              <div>
+                <span>Render mesh skips</span>
+                <strong>{coverage.liveSurface.renderMeshBuildSkippedCount} persistent / {coverage.liveSurface.candidateMeshBuildSkippedCount} candidate</strong>
               </div>
               <div>
                 <span>Live footprint / fusion distance</span>
