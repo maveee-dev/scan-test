@@ -385,6 +385,12 @@ export function projectWorldPointToKeyframePixel(point: SpatialPoint, frame: Rea
   return project(point, frame, projection) && mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, target)
 }
 
+/** Continuous pixel-centre coordinates for texture projection, not RGB lookup. */
+export function projectWorldPointToKeyframeSubpixel(point: SpatialPoint, frame: RealityRgbKeyframe, target: { x: number; y: number }): boolean {
+  const projection = { u: 0, v: 0 }
+  return project(point, frame, projection) && mapCameraUvToCopyPixelInto(frame.mapping, projection.u, projection.v, target, false)
+}
+
 function rgb(frame: RealityRgbKeyframe, x: number, y: number): [number, number, number] {
   const offset = (y * frame.width + x) * 3
   return [frame.rgb[offset] / 255, frame.rgb[offset + 1] / 255, frame.rgb[offset + 2] / 255]

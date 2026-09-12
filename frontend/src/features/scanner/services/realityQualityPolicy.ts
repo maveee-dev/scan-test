@@ -13,6 +13,7 @@ export interface RealityQualityTelemetry {
 
 export type AppearanceCaptureDecisionReason =
   | 'stable-opportunity'
+  | 'reserved-appearance-opportunity'
   | 'queue-pressure'
   | 'xr-timing-pressure'
   | 'processing-pressure'
@@ -81,12 +82,18 @@ export class RealityQualityPolicy {
 
   /**
    * Gives the XR scheduler a non-mutating, attributable timing decision. The
-   * limits are intentionally modestly wider than M8.7.1.2: an empty queue is
-   * still the hard backpressure gate, while the cheaper bounded live path can
-   * use stable ~40 ms frames without starving all appearance opportunities.
+   * empty measurement queue is a hard gate. Normal opportunities use the
+   * existing timing limits; a four-second reserve prevents moderate sustained
+   * frame pressure from starving every later camera view.
    */
-  public appearanceCaptureDecision(queueDepth: number): AppearanceCaptureDecision {
+  public appearanceCaptureDecision(queueDepth: number, elapsedSinceCaptureMs = 0): AppearanceCaptureDecision {
     if (queueDepth > 0) return { allowed: false, reason: 'queue-pressure' }
+    // A moderately slow but empty pipeline must not starve every later view.
+    // Reserve at most one full-resolution photo every four seconds; motion,
+    // duplicate-view and camera availability checks still run before readback.
+    if (elapsedSinceCaptureMs >= 4000 && (this.telemetry.xrFrameIntervalMs ?? 0) < 80 && this.telemetry.processingMs < 65) {
+      return { allowed: true, reason: 'reserved-appearance-opportunity' }
+    }
     if ((this.telemetry.xrFrameIntervalMs ?? 0) >= 48) return { allowed: false, reason: 'xr-timing-pressure' }
     if (this.telemetry.processingMs >= 42) return { allowed: false, reason: 'processing-pressure' }
     return { allowed: true, reason: 'stable-opportunity' }

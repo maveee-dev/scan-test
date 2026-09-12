@@ -18,7 +18,7 @@ export default function ScanCaptureDownload({ source }: { source: FinalizedDense
       const blob = encodeScanReplay({
         format: 'spatial-scan-replay', version: 1, scanId: source.scanId,
         referenceSpaceType: source.referenceSpaceType,
-        build: `${BUILD_INFO.scannerMilestone}/${BUILD_INFO.commit}/texture-visibility-v1`,
+        build: `${BUILD_INFO.scannerMilestone}/${BUILD_INFO.commit}/capture-persistence-v2`,
         measurements: source.retainedMeasurements, appearance: source.appearanceKeyframes ?? null,
         diagnostics: { depthSource: source.depthSource, measurement: source.measurementDiagnostics, canonical: source.canonicalFusionDiagnostics },
       })

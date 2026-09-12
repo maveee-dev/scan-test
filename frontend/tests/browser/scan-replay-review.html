@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local scan comparison</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #111b24; color: white; font: 16px system-ui; }
+    header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+    header p { flex: 1; margin: 0; }
+    button { padding: 10px; font: inherit; }
+    main { display: flex; }
+    section { width: 50%; min-width: 0; text-align: center; }
+    h2 { font-size: 20px; margin: 8px; }
+    canvas { display: block; touch-action: none; }
+    #status { margin: 8px 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <p>Local capture comparison. Drag either view to rotate both.</p>
+    <button id="front">Front</button><button id="side">Side</button>
+  </header>
+  <main>
+    <section><h2>Before</h2><div id="before"></div></section>
+    <section><h2>After</h2><div id="after"></div></section>
+  </main>
+  <p id="status">Loading local render artifacts…</p>
+  <script type="module">
+    import * as THREE from 'three'
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+    import { restoreRealitySurface } from '../../src/features/scanner/services/realitySurfaceRenderingService.ts'
+
+    // Numeric review files written by scripts/write-prepared-surface.mjs.
+    function decode(buffer) {
+      const length = new DataView(buffer).getUint32(0, true)
+      let offset = 4 + length
+      return JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)), (_key, value) => {
+        if (!value || typeof value !== 'object' || !('bufferId' in value)) return value
+        const types = { Float32Array, Uint32Array, Uint16Array, Uint8Array, Int32Array }
+        const ArrayType = types[value.kind]
+        if (!ArrayType) throw Error('Invalid numeric array')
+        const bytes = value.length * ArrayType.BYTES_PER_ELEMENT
+        if (offset + bytes > buffer.byteLength) throw Error('Truncated render artifact')
+        const array = new ArrayType(buffer.slice(offset, offset + bytes))
+        offset += bytes
+        return array
+      })
+    }
+
+    const views = []
+    let syncing = false
+    const height = () => Math.max(240, innerHeight - 160)
+    function draw(view) { view.renderer.render(view.scene, view.camera) }
+    function dispose() {
+      for (const view of views) {
+        view.controls.dispose()
+        view.resources.geometries.forEach(geometry => geometry.dispose())
+        view.resources.materials.forEach(material => { material.map?.dispose(); material.dispose() })
+        view.renderer.dispose()
+        view.renderer.forceContextLoss()
+      }
+      views.length = 0
+    }
+
+    try {
+      for (const name of ['before', 'after']) {
+        const response = await fetch(`/replay-output/${name}.surface`)
+        if (!response.ok) throw Error(`Missing replay-output/${name}.surface; generate it with the replay CLI.`)
+        const data = decode(await response.arrayBuffer()), resources = restoreRealitySurface(data)
+        const scene = new THREE.Scene()
+        scene.background = new THREE.Color('#111b24')
+        scene.add(resources.group)
+        const renderer = new THREE.WebGLRenderer({ antialias: true })
+        renderer.outputColorSpace = THREE.SRGBColorSpace
+        renderer.setPixelRatio(1)
+        const container = document.querySelector('#' + name), width = container.clientWidth
+        renderer.setSize(width, height())
+        container.append(renderer.domElement)
+        const camera = new THREE.PerspectiveCamera(44, width / height(), .04, 30)
+        const controls = new OrbitControls(camera, renderer.domElement)
+        camera.position.set(.05, 1, 4.5)
+        controls.target.set(.05, 1, -1.4)
+        controls.update()
+        const view = { name, data, resources, scene, renderer, camera, controls, container }
+        views.push(view)
+        draw(view)
+        controls.addEventListener('change', () => {
+          if (syncing) return
+          syncing = true
+          for (const other of views) {
+            if (other !== view) {
+              other.camera.position.copy(camera.position)
+              other.camera.quaternion.copy(camera.quaternion)
+              other.controls.target.copy(controls.target)
+              other.controls.update()
+            }
+            draw(other)
+          }
+          syncing = false
+        })
+      }
+      document.querySelector('#status').textContent = views.map(view =>
+        `${view.name}: ${view.data.stats.renderedSurfelCount} samples, ${view.data.stats.renderedTriangleCount} triangles; ${view.data.textureStats?.texturedTriangleCount} textured.`
+      ).join(' | ')
+    } catch (error) {
+      dispose()
+      document.querySelector('#status').textContent = error.message
+    }
+
+    function pose(side) {
+      syncing = true
+      for (const view of views) {
+        view.camera.position.set(side ? 4.6 : .05, 1, side ? .3 : 4.5)
+        view.controls.target.set(.05, 1, -1.4)
+        view.controls.update()
+        draw(view)
+      }
+      syncing = false
+    }
+    document.querySelector('#front').onclick = () => pose(false)
+    document.querySelector('#side').onclick = () => pose(true)
+    addEventListener('resize', () => {
+      for (const view of views) {
+        const width = view.container.clientWidth
+        view.renderer.setSize(width, height())
+        view.camera.aspect = width / height()
+        view.camera.updateProjectionMatrix()
+        draw(view)
+      }
+    })
+    addEventListener('pagehide', dispose, { once: true })
+  </script>
+</body>
+</html>

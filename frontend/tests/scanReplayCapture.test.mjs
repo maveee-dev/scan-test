@@ -156,9 +156,15 @@ test('replay CLI reconstructs the exported capture through confidence, refinemen
     assert.ok(report.replayCanonicalCount > 0)
     assert.ok(report.finalCount > 0)
     assert.ok(report.texture)
+    const surfaceBytes = readFileSync(join(output, 'prepared.surface'))
+    const metadataLength = surfaceBytes.readUInt32LE(0)
+    const prepared = JSON.parse(surfaceBytes.subarray(4, 4 + metadataLength).toString('utf8'))
+    assert.equal(prepared.stats.renderedSurfelCount, report.finalCount)
+    assert.equal(prepared.textureStats.texturedTriangleCount, report.texture.texturedTriangleCount)
+    assert.ok(surfaceBytes.byteLength > 4 + metadataLength)
     assert.match(readFileSync(join(output, 'canonical.ply'), 'utf8'), /element vertex [1-9]/)
   } finally {
-    for (const file of [input, join(output, 'report.json'), join(output, 'canonical.ply')]) if (existsSync(file)) unlinkSync(file)
+    for (const file of [input, join(output, 'report.json'), join(output, 'canonical.ply'), join(output, 'prepared.surface')]) if (existsSync(file)) unlinkSync(file)
     if (existsSync(output)) rmdirSync(output)
     rmdirSync(directory)
   }

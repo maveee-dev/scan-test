@@ -1,6 +1,7 @@
 import { readFileSync, statSync, mkdirSync, writeFileSync } from 'node:fs'
 import { resolve, join } from 'node:path'
 import { loadScannerModule } from './load-scanner-module.mjs'
+import { writePreparedSurface } from './write-prepared-surface.mjs'
 
 try {
   const [file, destination] = process.argv.slice(2)
@@ -17,9 +18,10 @@ try {
   const canonical = new CanonicalRealityFusionService().reconstruct(capture.measurements)
   const filtered = filterRealityConfidence(canonical.surfels)
   const refined = refineRealityDisplay(filtered.surfels, capture.appearance?.keyframes ?? [])
-  const resources = createRealitySurfaceRenderResources({ surfels: refined.combined }, 'dense')
+  const display = refined.combined.map(s => ({ ...s, colorRgb: s.colorRgb ?? { r: .34, g: .39, b: .43 } }))
+  const resources = createRealitySurfaceRenderResources({ surfels: display }, 'dense')
   try {
-    appendRealityTextureBatches(resources, refined.combined, refined.textureBindingCandidates, capture.appearance?.keyframes ?? [])
+    appendRealityTextureBatches(resources, display, refined.textureBindingCandidates, capture.appearance?.keyframes ?? [])
     const prepared = packRealitySurface(resources)
     const output = resolve(destination ?? join('replay-output', capture.scanId.replace(/[^a-z0-9_-]/gi, '-').slice(0, 80) || 'scan'))
     mkdirSync(output, { recursive: true })
@@ -33,8 +35,10 @@ try {
       replayCanonicalCount: canonical.surfels.length, finalCount: refined.combined.length,
       canonical: canonical.diagnostics, confidence: filtered.stats, refinement: refined.stats,
       texture: prepared.textureStats,
+      render: prepared.stats,
     }
     writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2))
+    writePreparedSurface(join(output, 'prepared.surface'), prepared)
     const header = ['ply', 'format ascii 1.0', 'comment Measured canonical samples, metres; no inferred geometry',
       `element vertex ${canonical.surfels.length}`, 'property float x', 'property float y', 'property float z',
       'property uchar red', 'property uchar green', 'property uchar blue', 'end_header']

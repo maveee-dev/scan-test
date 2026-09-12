@@ -254,6 +254,7 @@ export function mapCameraUvToCopyPixelInto(
   cameraU: number,
   cameraV: number,
   target: RawCameraPixelCoordinate,
+  snapToPixel = true,
 ): boolean {
   if (
     !Number.isFinite(cameraU) ||
@@ -292,6 +293,13 @@ export function mapCameraUvToCopyPixelInto(
   const outputU = (textureU - crop.x) / crop.width
   const outputVFromBottom = (textureV - crop.y) / crop.height
   const outputVFromTop = 1 - outputVFromBottom
+  if (!snapToPixel) {
+    // Pixel centres: adding .5 and dividing by the image dimensions recovers
+    // the exact continuous UV, including half-pixel motion and crop edges.
+    target.x = outputU * mapping.copyWidth - .5
+    target.y = outputVFromTop * mapping.copyHeight - .5
+    return true
+  }
   target.x = Math.min(
       mapping.copyWidth - 1,
       Math.max(0, Math.floor(outputU * mapping.copyWidth)),

@@ -1062,9 +1062,9 @@ export class XRSessionService {
             // distance (29.93 m on the controlled 26 s run).
             this.qualityPolicy.observePose(physicalPose)
             this.rawCameraCopyPhase = (this.rawCameraCopyPhase + 1) % 2
-            const appearanceDecision = this.qualityPolicy.appearanceCaptureDecision(this.measurementQueue.getDiagnostics().queueDepth)
-            // High-resolution appearance is optional and yields first under
-            // pressure. The M8.6 mask keyframe cadence remains unchanged.
+            const appearanceDecision = this.qualityPolicy.appearanceCaptureDecision(this.measurementQueue.getDiagnostics().queueDepth, this.appearanceKeyframeService.elapsedSinceCapture(time))
+            // Appearance yields to queued work and severe overload, with a
+            // reserved opportunity during moderate sustained frame pressure.
             if (this.realityCaptureEnabled && this.rawCameraCopyPhase === 1 && appearanceDecision.allowed) {
               const appearanceStartedAt=getPerformanceTimestamp()
               const appearanceCapture = this.appearanceKeyframeService.considerCapture(frame, primaryView, time, packet.pose.position, this.viewerDirection,

@@ -642,12 +642,16 @@ export class CanonicalRealityFusionService {
         }
         if (reusableIndex < 0 && surfels.length >= CANONICAL_REALITY_CONFIG.maxSurfels) {
           while (recyclableCursor < recyclableProvisionals.length) {
-            const queued = recyclableProvisionals[recyclableCursor++]
+            const queued = recyclableProvisionals[recyclableCursor]
             const candidate = surfels[queued.index]
-            if (candidate && candidate.firstOriginalFrameSequence === queued.createdAtSequence && candidate.provisional && !candidate.removed &&
-                candidate.observationCount === 1 && frame.timestamp - candidate.lastTimestamp >= 1200) {
+            if (candidate && candidate.firstOriginalFrameSequence === queued.createdAtSequence && candidate.provisional && !candidate.removed && candidate.observationCount === 1) {
+              // This queue is ordered by creation time. Keep a still-young entry
+              // queued so it can be reclaimed when its observation window ends.
+              if (frame.timestamp - candidate.lastTimestamp < 1200) break
+              recyclableCursor++
               recycleWeakProvisional(queued.index); reusableIndex = queued.index; break
             }
+            recyclableCursor++
           }
           if (reusableIndex < 0) {
             layerCapacityRejected += 1; globalCapacityRejected += 1

@@ -18,6 +18,7 @@ const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
 const { APPEARANCE_KEYFRAME_CAPACITY } = await load('appearanceCaptureConfig')
 const { getScanCaptureGuidance } = await load('scanCaptureGuidance')
 const { estimateMeasuredDepthNormals } = await load('measuredDepthNormalService')
+const { projectWorldPointToKeyframePixel, projectWorldPointToKeyframeSubpixel } = await load('visibleWallMaskProvider')
 const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMeasuredCellFootprintAlpha, packRealitySurface, restoreRealitySurface } = await load('realitySurfaceRenderingService')
 const { getFullFrameCopyDimensions } = await load('xrRawCameraService')
 const { XRDepthService } = await load('xrDepthService')
@@ -299,6 +300,49 @@ test('asymmetric camera image keeps top and bottom on the correct measured verti
   restored.geometries.forEach(g=>g.dispose());restored.materials.forEach(m=>{m.map?.dispose();m.dispose()})
   resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
 })
+
+test('texture projection preserves fractional pixel motion while RGB lookup remains discrete', () => {
+  const frame=keyframe(128),point={x:.003,y:.007,z:-2},before={x:0,y:0},after={x:0,y:0},lookup={x:0,y:0}
+  assert.ok(projectWorldPointToKeyframeSubpixel(point,frame,before))
+  assert.ok(projectWorldPointToKeyframeSubpixel({...point,x:point.x+.001},frame,after))
+  assert.ok(projectWorldPointToKeyframePixel(point,frame,lookup))
+  assert.ok(Math.abs(after.x-before.x-.032)<1e-8,'one millimetre must not snap to the same texel')
+  assert.equal(lookup.x,Math.floor(before.x+.5))
+  assert.equal(lookup.y,Math.floor(before.y+.5))
+})
+
+test('texture coordinates follow the emitted refined positions instead of the original binding positions', () => {
+  const frame=keyframe(128),raw=plane(10),refined=refineRealityDisplay(raw,[frame])
+  const moved=refined.combined.map(s=>({...s,position:{...s.position,x:s.position.x+.003}}))
+  const resources=createRealitySurfaceRenderResources({surfels:moved},'dense')
+  try {
+    appendRealityTextureBatches(resources,moved,refined.textureBindingCandidates,[frame])
+    const prepared=packRealitySurface(resources),layers=prepared.layers.filter(l=>l.kind==='textured')
+    assert.ok(layers.length>0)
+    for(const layer of layers){
+      const geometry=prepared.geometries[layer.geometry],positions=geometry.attributes.find(a=>a.name==='position').array,uvs=geometry.attributes.find(a=>a.name==='uv').array
+      for(let i=0;i<positions.length/3;i++){
+        const pixel={x:0,y:0};assert.ok(projectWorldPointToKeyframeSubpixel({x:positions[i*3],y:positions[i*3+1],z:positions[i*3+2]},frame,pixel))
+        assert.ok(Math.abs(uvs[i*2]-(pixel.x+.5)/frame.width)<1e-6)
+        assert.ok(Math.abs(uvs[i*2+1]-(pixel.y+.5)/frame.height)<1e-6)
+      }
+    }
+  } finally {resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())}
+})
+
+test('moderate sustained frame pressure reserves occasional photos without bypassing queue or severe overload gates', () => {
+  const policy=new RealityQualityPolicy()
+  for(let i=1;i<=30;i++)policy.recordFrame(i*55)
+  policy.recordTick(20,3600,3600)
+  assert.equal(policy.appearanceCaptureDecision(0,3999).allowed,false)
+  assert.deepEqual(policy.appearanceCaptureDecision(0,4000),{allowed:true,reason:'reserved-appearance-opportunity'})
+  assert.equal(policy.appearanceCaptureDecision(0,0).allowed,false,'a successful capture restarts the reserved interval')
+  assert.deepEqual(policy.appearanceCaptureDecision(1,60000),{allowed:false,reason:'queue-pressure'})
+  policy.recordTick(65,3600,3600)
+  assert.equal(policy.appearanceCaptureDecision(0,60000).allowed,false)
+  const severelySlow=new RealityQualityPolicy();for(let i=1;i<=30;i++)severelySlow.recordFrame(i*100)
+  assert.equal(severelySlow.appearanceCaptureDecision(0,60000).allowed,false)
+})
 test('occluded back layer rejects foreground keyframe color and texture ownership', () => {const front=[sample(0,0,0,-1)],back=[sample(1,0,0,-2)];const r=refineRealityDisplay([...front,...back],[keyframe()]);assert.equal(r.appearance[1].colorRgb.r,.5);assert.equal(r.textureBindings[1],null);assert.ok(r.stats.visibilityRejects>0)})
 test('textured stage is bounded real-keyframe triangles with base RGB fallback',()=>{
   const worker=readFileSync(new URL('../src/features/scanner/services/realityQuality.worker.ts',import.meta.url),'utf8')
@@ -411,10 +455,14 @@ test('appearance candidates have mutually attributable bounded scheduling outcom
   service.recordCandidateOutcome('pressure-skipped')
   service.considerCapture({},view,2000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:2,rotationDegreesPerSecond:0})
   service.considerCapture({},view,4000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,{isAvailable:()=>false,copyKeyframe:()=>null})
+  assert.equal(service.elapsedSinceCapture(4000),Infinity,'rejected candidates must not postpone the reserved photo')
   service.considerCapture({},view,6000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:0,rotationDegreesPerSecond:0})
+  assert.equal(service.elapsedSinceCapture(6000),0)
   service.considerCapture({},view,8000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,available,{translationMetersPerSecond:0,rotationDegreesPerSecond:0})
+  assert.equal(service.elapsedSinceCapture(10000),4000,'duplicate views must not restart the reserved interval')
   const d=service.getDiagnostics(),sum=Object.values(d.candidateOutcomes).reduce((total,value)=>total+value,0)
   assert.equal(sum,d.candidateCount);assert.equal(d.candidateOutcomes.pressureSkipped,1);assert.equal(d.candidateOutcomes.motionSkipped,1);assert.equal(d.candidateOutcomes.cameraUnavailable,1);assert.equal(d.candidateOutcomes.captured,1);assert.equal(d.candidateOutcomes.duplicateViewSkipped,1)
+  service.reset();assert.equal(service.elapsedSinceCapture(12000),Infinity)
 })
 
 test('Finish reports actual worker stages and retains physical-style timing fields',()=>{
@@ -900,6 +948,20 @@ test('global provisional capacity recycles stale one-frame noise so a later wall
   const result=canonical(frames)
   assert.ok(result.diagnostics.weakProvisionalsRecycled>0);assert.ok(result.surfels.some(s=>Math.abs(s.position.y-2)<.001))
   assert.ok(result.diagnostics.provisionalCreated>CANONICAL_REALITY_CONFIG.maxSurfels)
+})
+
+test('full-pool pressure keeps young provisional entries eligible for later recycling',()=>{
+  const frames=[]
+  for(let f=0;f<40;f++){
+    const input=retainedFrame(Array.from({length:1600},(_,i)=>sample(i,(f*1600+i)*.09,0,-2)),f+1)
+    input.timestamp=f*10;frames.push(input)
+  }
+  const wall=[sample(90000,0,2,-2)]
+  for(let f=0;f<3;f++){const input=retainedFrame(wall,100+f);input.timestamp=3000+f*300;frames.push(input)}
+  const result=canonical(frames)
+  assert.ok(result.diagnostics.globalCapacityRejected>0,'the initial burst fills the bounded pool')
+  assert.ok(result.diagnostics.weakProvisionalsRecycled>0,'young entries must remain queued until they age')
+  assert.ok(result.surfels.some(s=>Math.abs(s.position.y-2)<.001),'a later measured wall must still be admitted and confirmed')
 })
 
 test('sparse weak multi-view parallel sheet is rejected without topology evidence',()=>{

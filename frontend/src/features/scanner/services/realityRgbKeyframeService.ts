@@ -203,6 +203,8 @@ export class RealityRgbKeyframeService {
 
   public getDiagnostics(): RealityRgbKeyframeDiagnostics { return { ...this.diagnostics, candidateOutcomes: { ...this.diagnostics.candidateOutcomes } } }
 
+  public elapsedSinceCapture(timestamp: number): number { return timestamp - this.lastTimestamp }
+
   public createSnapshot(scanId: string, cameraAvailable: boolean): FinalizedRealityRgbKeyframes {
     const status = !cameraAvailable ? 'unavailable' : this.keyframes.length > 0 ? 'available' : 'empty'
     return {

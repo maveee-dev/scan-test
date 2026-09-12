@@ -1,5 +1,5 @@
 import type { FinalizedRealitySurfel, RealityRgbKeyframe, RealityTextureBinding, SpatialPoint } from '../types'
-import { projectWorldPointToKeyframePixel } from './visibleWallMaskProvider'
+import { projectWorldPointToKeyframePixel, projectWorldPointToKeyframeSubpixel } from './visibleWallMaskProvider'
 import { APPEARANCE_KEYFRAME_CAPACITY } from './appearanceCaptureConfig'
 
 export interface RealityRefinementStats {
@@ -146,7 +146,7 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
       const projectedTexelsPerMeter = Math.abs(frame.projectionMatrix[5]) * frame.height / (2 * Math.max(.001, d))
       // Keep subpixel reprojection for texture detail; rounded pixels are only
       // used for visibility and the fallback vertex-color lookup.
-      projectWorldPointToKeyframePixel(s.position, frame, pixel)
+      projectWorldPointToKeyframeSubpixel(s.position, frame, pixel)
       const binding = { keyframeId: frame.id, u: (pixel.x + .5) / frame.width, v: (pixel.y + .5) / frame.height, score,
         incidence, distanceMeters: d, projectedTexelsPerMeter }
       const candidates = textureBindingCandidates[i]

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { findRealityNeighbors } from './realityNeighborSearchService'
+import { projectWorldPointToKeyframeSubpixel } from './visibleWallMaskProvider'
 import type {
   FinalizedRealityReconstruction,
   FinalizedRealitySurfel,
@@ -1210,8 +1211,16 @@ export function appendRealityTextureBatches(
       return score(right) - score(left) || left - right
     })[0]
     const bucket = buckets.get(keyframeId) ?? { positions: [], uvs: [] }
+    const frame = frameById.get(keyframeId)!
+    // Refinement can move a measured vertex by a few millimetres. Its original
+    // visibility binding chooses the image; project the position we actually draw.
+    const projected = vertices.map(vertex => {
+      const pixel = { x: 0, y: 0 }
+      return projectWorldPointToKeyframeSubpixel(vertex!.surfel.position, frame, pixel) ? pixel : null
+    })
+    if (projected.some(pixel => pixel === null)) { noCommonViewTriangleCount++; continue }
     let selectedRank = 0
-    for (const vertex of vertices) {
+    for (const [vertexIndex, vertex] of vertices.entries()) {
       const point = vertex!.surfel.position, uv = vertex!.bindings.find((binding) => binding.keyframeId === keyframeId)!
       const rank = vertex!.bindings.findIndex((binding) => binding.keyframeId === keyframeId)
       selectedRank = Math.max(selectedRank, rank)
@@ -1220,7 +1229,8 @@ export function appendRealityTextureBatches(
       if (Number.isFinite(uv.distanceMeters)) distances.push(uv.distanceMeters)
       // RGB rows and bindings both start at the top. DataTexture uploads with
       // flipY=false, so v must address that same row (no second vertical flip).
-      bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, uv.v)
+      const pixel = projected[vertexIndex]!
+      bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push((pixel.x + .5) / frame.width, (pixel.y + .5) / frame.height)
     }
     if (selectedRank === 0) commonPrimaryTriangleCount += 1
     else if (selectedRank === 1) commonSecondTriangleCount += 1
