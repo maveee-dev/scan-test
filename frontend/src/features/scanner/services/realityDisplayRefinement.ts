@@ -1,5 +1,6 @@
 import type { FinalizedRealitySurfel, RealityRgbKeyframe, RealityTextureBinding, SpatialPoint } from '../types'
 import { projectWorldPointToKeyframePixel } from './visibleWallMaskProvider'
+import { APPEARANCE_KEYFRAME_CAPACITY } from './appearanceCaptureConfig'
 
 export interface RealityRefinementStats {
   geometryMs: number; colorMs: number; movedSamples: number; refinedColors: number; visibilityRejects: number
@@ -13,7 +14,7 @@ export interface RealityDisplayRefinement {
   geometry: FinalizedRealitySurfel[]; appearance: FinalizedRealitySurfel[]; combined: FinalizedRealitySurfel[]
   /** One unambiguous, measured-depth-visible keyframe per surfel, or null. */
   textureBindings: readonly (RealityTextureBinding | null)[]
-  /** Every safe candidate from the bounded (maximum eight) real-camera set. */
+  /** Every safe candidate from the bounded real-camera set. */
   textureBindingCandidates: readonly (readonly RealityTextureBinding[])[]
   stats: RealityRefinementStats
 }
@@ -101,7 +102,7 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
   const textureBindingCandidates: RealityTextureBinding[][] = Array.from({ length: source.length }, () => [])
   const conflict = new Uint8Array(source.length)
   // One frame at a time: bounded temporary visibility raster, never N*frames.
-  for (const frame of frames.slice(0, 8)) {
+  for (const frame of frames.slice(0, APPEARANCE_KEYFRAME_CAPACITY)) {
     const capturedImageQuality = imageSelectionFactor(frame)
     const pixels = frame.width * frame.height, depth = new Float32Array(pixels); depth.fill(Infinity)
     const projected = new Int32Array(source.length); projected.fill(-1)
@@ -143,7 +144,10 @@ export function refineRealityDisplay(source: readonly FinalizedRealitySurfel[], 
         if (Math.hypot(prior.r - frame.rgb[k] / 255, prior.g - frame.rgb[k + 1] / 255, prior.b - frame.rgb[k + 2] / 255) > .45) conflict[i] = 1
       } else if (score > bestScore[i] / .85) conflict[i] = 0
       const projectedTexelsPerMeter = Math.abs(frame.projectionMatrix[5]) * frame.height / (2 * Math.max(.001, d))
-      const binding = { keyframeId: frame.id, u: (x + .5) / frame.width, v: (y + .5) / frame.height, score,
+      // Keep subpixel reprojection for texture detail; rounded pixels are only
+      // used for visibility and the fallback vertex-color lookup.
+      projectWorldPointToKeyframePixel(s.position, frame, pixel)
+      const binding = { keyframeId: frame.id, u: (pixel.x + .5) / frame.width, v: (pixel.y + .5) / frame.height, score,
         incidence, distanceMeters: d, projectedTexelsPerMeter }
       const candidates = textureBindingCandidates[i]
       const existing = candidates.findIndex((candidate) => candidate.keyframeId === binding.keyframeId)

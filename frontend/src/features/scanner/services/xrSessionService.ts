@@ -825,6 +825,8 @@ export class XRSessionService {
         this.realityCaptureEnabled,
       )
       this.spatialCoverageRenderService.initialize(this.presentationService.getRenderTarget())
+      // Coverage is part of normal scanning, including when no DOM overlay is granted.
+      this.setCoverageOverlayVisible(true)
       this.emitDiagnostics()
 
       const referenceSpaceResult = await this.requestReferenceSpace(session)

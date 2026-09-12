@@ -1943,6 +1943,7 @@
   border: 1px solid rgba(212, 239, 105, 0.32);
   border-radius: 12px;
   color: var(--ink);
+  font-family: var(--sans);
   background: rgba(17, 20, 18, 0.68);
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.22);
   backdrop-filter: blur(12px);
@@ -2014,6 +2015,8 @@
   gap: 6px;
   margin-top: 9px;
 }
+
+.xr-scanner-hud-status[hidden] { display: none; }
 
 .xr-scanner-hud-status-item {
   min-width: 0;
@@ -2113,13 +2116,34 @@
 
 .xr-scanner-hud-guidance {
   margin: 9px 2px 0;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 8px;
-  line-height: 1.35;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
   letter-spacing: 0.03em;
   text-align: center;
 }
+
+.scan-coverage-guide { margin-top: 10px; text-align: left; }
+.scan-coverage-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scan-coverage-heading strong { font-size: 14px; }
+.scan-coverage-heading button, .scan-finish-review button {
+  min-height: 44px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.3);
+  border-radius: 8px; color: #f5f7f4; background: #26322b; font-size: 12px; cursor: pointer;
+}
+.scan-coverage-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; padding: 0; list-style: none; }
+.scan-coverage-legend li { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.scan-coverage-legend i { width: 10px; height: 10px; border-radius: 50%; }
+.scan-coverage-legend .is-observed { background: #ff9e2e; }
+.scan-coverage-legend .is-partial { background: #33b8ff; }
+.scan-coverage-legend .is-captured { background: #33e67a; }
+.scan-coverage-meter { display: grid; gap: 5px; font-size: 12px; }
+.scan-coverage-meter progress { width: 100%; height: 6px; accent-color: #33e67a; }
+.scan-coverage-guide p { margin: 7px 0 0; color: #cbd4cd; font-size: 11px; line-height: 1.4; }
+.scan-finish-review { margin-top: 10px; padding: 10px; border: 1px solid #ff9e2e; border-radius: 8px; font-size: 12px; line-height: 1.45; }
+.scan-finish-review ul { padding-left: 18px; }
+.scan-finish-review p { margin: 8px 0; }
+.xr-scanner-hud { max-height: calc(100dvh - 24px); overflow-y: auto; }
 
 .xr-scanner-debug {
   position: absolute;

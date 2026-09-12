@@ -199,7 +199,7 @@ function ScannerPage({
         ref={overlayRootRef}
         className={`xr-dom-overlay ${isDomOverlayActive ? 'is-visible' : ''}`}
       >
-        <ScannerDomOverlay
+        {isActive && <ScannerDomOverlay
           liveMap={liveMap}
           onCancelScan={onCancelScan}
           onDebugGeometryToggle={onDebugGeometryToggle}
@@ -211,7 +211,7 @@ function ScannerPage({
           onFinishScan={onFinishScan}
           pointPreviewCanvasRef={pointPreviewCanvasRef}
           sessionState={sessionState}
-        />
+        />}
       </div>
       <div className="scanner-content">
         <header className="scanner-header">
@@ -324,11 +324,13 @@ function ScannerPage({
             </div>
 
             {canStartScan && !isActive ? (
-              <p className="dom-overlay-instructions">
+              <div className="dom-overlay-instructions">
+                <p>Start with a slow sweep of the walls, floor and ceiling. Move sideways for overlapping views, then walk around furniture and into recesses to record their depth.</p>
+                <p>Orange marks new observations, blue needs another angle, and green is reinforced. Revisit unmarked areas before finishing.</p>
                 {isDomOverlayUnavailable
                   ? 'DOM overlay was unavailable. Use the Android system Back gesture to exit immersive AR.'
                   : 'Controls will appear inside XR when DOM overlay is granted. If unavailable, use the Android system Back gesture to exit.'}
-              </p>
+              </div>
             ) : null}
 
             {isActive && sessionState.debug.depth.status === 'unavailable' ? (

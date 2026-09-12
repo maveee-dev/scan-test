@@ -14,6 +14,9 @@ const { DenseRealityReconstructionService, DENSE_REALITY_CONFIG, DENSE_REALITY_M
 const { refineRealityDisplay } = await load('realityDisplayRefinement')
 const { InspectionPose, LiveRealityMap, getLiveMapCadenceMs } = await load('liveRealityMap')
 const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
+const { APPEARANCE_KEYFRAME_CAPACITY } = await load('appearanceCaptureConfig')
+const { getScanCaptureGuidance } = await load('scanCaptureGuidance')
+const { estimateMeasuredDepthNormals } = await load('measuredDepthNormalService')
 const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMeasuredCellFootprintAlpha, packRealitySurface } = await load('realitySurfaceRenderingService')
 const { getFullFrameCopyDimensions } = await load('xrRawCameraService')
 const { XRDepthService } = await load('xrDepthService')
@@ -67,6 +70,83 @@ function retainedFrame(surfels, sequence, cameraX=sequence*.04, phase=sequence%4
 function retainedSnapshot(frames){return {frames,diagnostics:{framesConsidered:frames.length,framesRetained:frames.length,duplicateFramesRejected:0,temporalCompactions:0,samplesRetained:frames.reduce((n,f)=>n+f.denseFrame.validPointCount,0),memoryBytes:frames.reduce((n,f)=>n+f.denseFrame.points.byteLength+f.normals.byteLength+f.denseFrame.valid.byteLength+f.normalValid.byteLength+f.srgbColors.byteLength+f.colorSourceIndices.byteLength,0),viewpointBinCount:frames.length,earliestTimestamp:frames[0]?.timestamp??null,latestTimestamp:frames.at(-1)?.timestamp??null}}
 }
 const canonical = (frames) => new CanonicalRealityFusionService().reconstruct(retainedSnapshot(frames))
+
+test('normal estimation preserves measured borders and neighbors of a missing depth pixel', () => {
+  const frame=measurementInput(1).spatial
+  frame.valid[210]=0
+  const before=new Float32Array(frame.points)
+  const result=estimateMeasuredDepthNormals(frame)
+  assert.equal(result.normalValid[210],0)
+  assert.equal(result.normalValid.reduce((sum,v)=>sum+v,0),399)
+  assert.deepEqual(frame.points,before)
+  assert.ok([...result.normals].every(Number.isFinite))
+})
+
+test('normal estimation keeps an object depth edge sharp without bridging onto its background', () => {
+  const frame=measurementInput(1).spatial
+  for(let i=0;i<400;i++) if(i%20>=10){frame.points[i*3+2]=-2.2;frame.distancesMeters[i]=2.2}
+  const result=estimateMeasuredDepthNormals(frame)
+  for(let row=0;row<20;row++) for(const column of [9,10]){
+    const i=row*20+column
+    assert.equal(result.normalValid[i],1)
+    assert.ok(Math.abs(result.normals[i*3+2])>.999, 'edge normal must stay on its own measured plane')
+  }
+  frame.points[0]=NaN;frame.points[210*3]=NaN
+  const invalid=estimateMeasuredDepthNormals(frame)
+  assert.ok([...invalid.normals].every(Number.isFinite))
+  assert.equal(invalid.normalValid[210],0)
+})
+
+test('base-resolution measured wall retains spatial detail without inventing points', () => {
+  const wall = Array.from({length:3600}, (_,i) => sample(i,(i%80)*.025,Math.floor(i/80)*.025,-2))
+  const result = canonical([1,2,3,4].map(i=>retainedFrame(wall,i,i*.12)))
+  assert.ok(result.surfels.length >= 3500, `only ${result.surfels.length}/3600 measured wall samples retained`)
+  assert.equal(result.diagnostics.consolidatedObservations, 14400)
+  assert.ok(result.surfels.every(s=>Math.abs(s.position.z+2)<.00001))
+  assert.ok(result.diagnostics.workerTimeMs < 10000)
+})
+
+test('higher-resolution replay changes its bounded subset instead of permanently omitting cells', () => {
+  const wall = plane(80)
+  const frames = Array.from({length:12},(_,i)=>retainedFrame(wall,i+1,(i%4)*.1,i%4))
+  const result = canonical(frames)
+  assert.ok(result.surfels.length >= wall.length*.85, `${result.surfels.length}/${wall.length} retained`)
+  assert.ok(result.diagnostics.consolidatedObservations <= frames.length*RETAINED_REALITY_CONFIG.maxConsolidatedSamplesPerFrame)
+  assert.ok(result.surfels.every(s=>Math.abs(s.position.z+2)<.00001))
+})
+
+test('later room views remain available for appearance after the first eight', () => {
+  const frames=Array.from({length:12},(_,i)=>({...keyframe(),id:i+1,qualityScore:i===11?1:.1,rgb:new Uint8Array(64*64*3).fill(i===11?210:20)}))
+  const result=refineRealityDisplay(plane(8),frames)
+  assert.equal(result.textureBindings[30].keyframeId,12)
+  assert.equal(result.appearance[30].colorRgb.r,210/255)
+})
+
+function guidanceDebug(overrides={}) {
+  return { trackingStatus:'active', depth:{status:'active'},
+    measurement:{scanSpatialValidity:'healthy',accepted:100,guidance:'more-coverage'},
+    coverage:{totalUniqueCells:100,capturedCells:25,currentValidSamples:400,currentViewCoverage:25,capacityReached:false},
+    realityColor:{captureStatus:'active'},denseReality:{capacityUtilizationPercentage:10},...overrides }
+}
+test('capture guidance reports observed coverage and never declares a room complete', () => {
+  const partial=getScanCaptureGuidance(guidanceDebug())
+  assert.equal(partial.reinforcedPercentage,25);assert.equal(partial.needsAnotherPass,75)
+  assert.ok(partial.warnings.some(w=>w.includes('75')));assert.match(partial.message,/another angle/)
+  const reinforced=getScanCaptureGuidance(guidanceDebug({coverage:{totalUniqueCells:10,capturedCells:10,currentValidSamples:400,currentViewCoverage:100}}))
+  assert.equal(reinforced.reinforcedPercentage,100)
+  assert.doesNotMatch(reinforced.message,/ready to finish|room complete/i)
+  assert.match(reinforced.message,/unmarked|object/)
+})
+test('capture guidance handles missing depth, tracking loss, rapid motion and empty scans', () => {
+  assert.match(getScanCaptureGuidance(guidanceDebug({depth:{status:'unavailable'}})).message,/No usable depth/)
+  const invalid=getScanCaptureGuidance(guidanceDebug({measurement:{scanSpatialValidity:'invalid',accepted:100}}))
+  assert.equal(invalid.canBuild,false);assert.match(invalid.message,/Restart/)
+  assert.match(getScanCaptureGuidance(guidanceDebug({trackingStatus:'waiting'})).message,/tracking can recover/)
+  assert.match(getScanCaptureGuidance(guidanceDebug({measurement:{scanSpatialValidity:'healthy',accepted:24,guidance:'move-slower'}})).message,/Slow down/)
+  const empty=getScanCaptureGuidance(guidanceDebug({coverage:{totalUniqueCells:0,capturedCells:0,currentValidSamples:0,currentViewCoverage:null}}))
+  assert.equal(empty.reinforcedPercentage,null);assert.equal(empty.canBuild,false)
+})
+
 
 test('temporal phases deterministic, four distinct subgrids reach every-second RGB tick', () => {
   const a = new RealityQualityPolicy(), b = new RealityQualityPolicy(), phases = []
@@ -258,10 +338,10 @@ test('appearance retains every safe ranked candidate from the bounded keyframe s
 test('appearance keyframe cap, long edge, duplicate rejection and session reset',()=>{
   const service=new RealityRgbKeyframeService(true);let sequence=0,longEdge=0;const f=keyframe(8),view={transform:{matrix:identity(),inverse:{matrix:identity()}},projectionMatrix:perspective()}
   const raw={copyKeyframe:(_f,_v,_t,edge)=>{longEdge=edge;return {sequence:++sequence,mapping:f.mapping,pixels:new Uint8Array(8*8*4).fill(128)}}}
-  for(let i=0;i<15;i++){view.transform.matrix[12]=i*.3;service.considerCapture({},view,i*2000,{x:i*.3,y:0,z:0},{x:0,y:0,z:-1},3600,raw)}
-  let r=service.createSnapshot('a',true);assert.equal(r.keyframes.length,8);assert.equal(longEdge,960);assert.ok(r.diagnostics.totalBytes<9.6*1024*1024);const before=sequence
+  for(let i=0;i<APPEARANCE_KEYFRAME_CAPACITY+6;i++){view.transform.matrix[12]=i*.3;service.considerCapture({},view,i*2000,{x:i*.3,y:0,z:0},{x:0,y:0,z:-1},3600,raw)}
+  let r=service.createSnapshot('a',true);assert.equal(r.keyframes.length,APPEARANCE_KEYFRAME_CAPACITY);assert.equal(longEdge,960);assert.ok(r.diagnostics.totalBytes<19.1*1024*1024);const before=sequence
   assert.deepEqual(getFullFrameCopyDimensions(1080,2400,960,432*960),[432,960])
-  service.considerCapture({},view,30001,{x:4.2,y:0,z:0},{x:0,y:0,z:-1},3600,raw);assert.equal(sequence,before);service.reset();assert.equal(service.createSnapshot('b',true).keyframes.length,0)
+  service.considerCapture({},view,60001,{x:(APPEARANCE_KEYFRAME_CAPACITY+5)*.3,y:0,z:0},{x:0,y:0,z:-1},3600,raw);assert.equal(sequence,before);service.reset();assert.equal(service.createSnapshot('b',true).keyframes.length,0)
 })
 test('joystick moves only virtual pose and follow mode cannot be driven',()=>{const physical=pose(2),before=JSON.stringify(physical),v=new InspectionPose();v.updateScanner(physical);v.move(1,1,.05);assert.equal(v.position.x,2);v.follow=false;v.move(1,1,.05);assert.notEqual(v.position.x,2);assert.equal(JSON.stringify(physical),before)})
 test('free look ignores subsequent scanner poses; follow returns to current XR pose',()=>{const v=new InspectionPose();v.updateScanner(pose(1));v.follow=false;v.updateScanner(pose(5));assert.equal(v.position.x,1);v.look(50,20);assert.notEqual(v.yaw,0);v.follow=true;v.updateScanner(pose(5));assert.equal(v.position.x,5)})
@@ -287,7 +367,7 @@ test('XR frame pressure prevents depth-tier upgrade despite cheap processing tic
 test('fast motion defers appearance copy without stopping physical geometry capture',()=>{
   const service=new RealityRgbKeyframeService(true);let copies=0
   service.considerCapture({}, {},2000,{x:0,y:0,z:0},{x:0,y:0,z:-1},3600,{copyKeyframe:()=>{copies++;return null}},{translationMetersPerSecond:2,rotationDegreesPerSecond:80})
-  assert.equal(copies,0);assert.equal(service.createSnapshot('empty',true).diagnostics.capacity,8)
+  assert.equal(copies,0);assert.equal(service.createSnapshot('empty',true).diagnostics.capacity,APPEARANCE_KEYFRAME_CAPACITY)
 })
 
 test('appearance candidates have mutually attributable bounded scheduling outcomes',()=>{
@@ -587,14 +667,15 @@ test('React diagnostics cadence backs off under scanner pressure',()=>{
   const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
   assert.match(session,/scannerUnderPressure\?DEBUG_SAMPLE_INTERVAL_MS\*3:DEBUG_SAMPLE_INTERVAL_MS/)
 })
-test('normal scan HUD uses plain guidance while coverage percentages stay diagnostic-only',()=>{
+test('normal scan HUD enables coverage independently of diagnostic geometry',()=>{
   const overlay=readFileSync(new URL('../src/features/scanner/components/ScannerDomOverlay.tsx',import.meta.url),'utf8')
   const renderer=readFileSync(new URL('../src/features/scanner/services/spatialCoverageRenderService.ts',import.meta.url),'utf8')
   const session=readFileSync(new URL('../src/features/scanner/services/xrSessionService.ts',import.meta.url),'utf8')
   const liveSurface=readFileSync(new URL('../src/features/scanner/services/persistentLiveSurfaceService.ts',import.meta.url),'utf8')
-  assert.match(overlay,/function formatScanGuidance\(/)
-  assert.match(overlay,/Enough good data — ready to finish/)
-  assert.match(overlay,/Move to another area/)
+  assert.match(overlay,/getScanCaptureGuidance\(sessionState.debug\)/)
+  assert.doesNotMatch(overlay,/Enough good data — ready to finish/)
+  assert.match(overlay,/isCoverageOverlayVisible, setIsCoverageOverlayVisible\] = useState\(true\)/)
+  assert.match(session,/this\.setCoverageOverlayVisible\(true\)/)
   assert.match(overlay,/Show Coverage Overlay/)
   assert.doesNotMatch(overlay,/span>Coverage completeness<\/span>/)
   assert.doesNotMatch(overlay,/span>Coverage persistence<\/span>/)

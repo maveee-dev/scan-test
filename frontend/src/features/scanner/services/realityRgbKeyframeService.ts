@@ -6,15 +6,16 @@ import type {
   ViewerPosition,
 } from '../types'
 import { XRRawCameraService } from './xrRawCameraService'
+import { APPEARANCE_KEYFRAME_CAPACITY } from './appearanceCaptureConfig'
 
 const MAX_KEYFRAMES = 12
 const MIN_CAPTURE_INTERVAL_MS = 850
 const MIN_TRANSLATION_METERS = 0.18
 const MIN_ROTATION_DEGREES = 14
-const APPEARANCE_CAPACITY = 8
+const APPEARANCE_CAPACITY = APPEARANCE_KEYFRAME_CAPACITY
 const APPEARANCE_MIN_CAPTURE_INTERVAL_MS = 1500
-const APPEARANCE_MAX_TRANSLATION_SPEED = 1.2
-const APPEARANCE_MAX_ROTATION_SPEED = 55
+const APPEARANCE_MAX_TRANSLATION_SPEED = 0.45
+const APPEARANCE_MAX_ROTATION_SPEED = 25
 
 export type RealityRgbKeyframeCandidateOutcome =
   | 'captured'

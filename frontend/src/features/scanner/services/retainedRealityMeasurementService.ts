@@ -7,7 +7,9 @@ export const RETAINED_REALITY_CONFIG = Object.freeze({
   minimumTimeSpacingMs: 140,
   minimumTranslationMeters: 0.025,
   minimumRotationDegrees: 2,
-  maxConsolidatedSamplesPerFrame: 1600,
+  // Preserve a complete base 80 x 45 depth frame during post-scan replay.
+  // This does not increase live XR work or the 96-frame retention limit.
+  maxConsolidatedSamplesPerFrame: 3600,
   consolidationCellMeters: 0.018,
 })
 

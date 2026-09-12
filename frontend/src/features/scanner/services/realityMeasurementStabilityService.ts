@@ -1,5 +1,6 @@
 import type { DenseDepthFrameObservation, DenseSpatialPointFrame, ScannerReferenceSpaceType, SpatialPoint } from '../types'
 import type { ScanTrajectoryPoint } from './realityQualityPolicy'
+import { estimateMeasuredDepthNormals } from './measuredDepthNormalService'
 
 export type RealityMeasurementRejectionReason = 'none' | 'tracking' | 'motion' | 'pose-discontinuity' | 'reference-space-reset' | 'depth' | 'consistency'
 export type ScanQualityGuidance = 'good' | 'move-slower' | 'tracking-unstable' | 'scan-again' | 'move-around-object' | 'more-coverage'
@@ -104,7 +105,7 @@ export class RealityMeasurementStabilityService {
     const denseFrame: DenseSpatialPointFrame = Object.freeze({ columns: input.spatial.columns, rows: input.spatial.rows, valid,
       normalizedX, normalizedY, distancesMeters, points, attemptedSampleCount: input.spatial.attemptedSampleCount,
       validPointCount: input.spatial.validPointCount, rejectedPointCount: input.spatial.rejectedPointCount })
-    const { normals, normalValid } = estimateGridNormals(denseFrame)
+    const { normals, normalValid } = estimateMeasuredDepthNormals(denseFrame)
     const depthValues: number[] = []
     for (let i=0;i<valid.length;i++) if (valid[i] && Number.isFinite(distancesMeters[i]) && distancesMeters[i] > 0) depthValues.push(distancesMeters[i])
     depthValues.sort((a,b)=>a-b)
@@ -273,7 +274,3 @@ function inspectDepthGrid(frame: DenseSpatialPointFrame): { discontinuityRatio:n
   }
   return {discontinuityRatio:jumps/Math.max(1,pairs),isolatedOutlierRatio:outliers/Math.max(1,valid)}
 }
-
-function estimateGridNormals(frame:DenseSpatialPointFrame):{normals:Float32Array;normalValid:Uint8Array}{const normals=new Float32Array(frame.valid.length*3),normalValid=new Uint8Array(frame.valid.length)
-  for(let y=1;y<frame.rows-1;y++)for(let x=1;x<frame.columns-1;x++){const i=y*frame.columns+x,l=i-1,r=i+1,u=i-frame.columns,d=i+frame.columns;if(!frame.valid[l]||!frame.valid[r]||!frame.valid[u]||!frame.valid[d])continue;const p=frame.points,lr={x:p[r*3]-p[l*3],y:p[r*3+1]-p[l*3+1],z:p[r*3+2]-p[l*3+2]},ud={x:p[d*3]-p[u*3],y:p[d*3+1]-p[u*3+1],z:p[d*3+2]-p[u*3+2]},n={x:lr.y*ud.z-lr.z*ud.y,y:lr.z*ud.x-lr.x*ud.z,z:lr.x*ud.y-lr.y*ud.x},length=Math.hypot(n.x,n.y,n.z);if(length<1e-7)continue;const o=i*3;normals[o]=n.x/length;normals[o+1]=n.y/length;normals[o+2]=n.z/length;normalValid[i]=1}
-  return{normals,normalValid}}

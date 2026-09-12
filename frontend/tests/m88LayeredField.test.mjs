@@ -228,7 +228,7 @@ function semanticHash(result) {
   })).digest('hex').slice(0, 16)
 }
 
-test('M8.8 numeric adjacency preserves HEAD semantic hashes across physical fixtures', () => {
+test('M8.8 numeric adjacency preserves semantic hashes with the current reconstruction baseline', () => {
   const cases = {
     clean: Array.from({ length: 5 }, (_unused, frame) => retainedFrame(plane(10), frame + 1)),
     sparse: Array.from({ length: 3 }, (_unused, frame) => {
@@ -261,9 +261,11 @@ test('M8.8 numeric adjacency preserves HEAD semantic hashes across physical fixt
   }
   // The original seven values were captured from exact b6483f2 before the
   // numeric-index change; the six additional cases are semantic locks added
-  // for this redesign and must remain stable thereafter.
+  // for this redesign. Sparse/noisy hashes include baseline hole counts and
+  // were updated for the 18 mm canonical correspondence gate; candidate
+  // ownership and the other eleven fixture hashes remain unchanged.
   const expected = {
-    clean: '2f1e8fcb01cb8fab', sparse: '67494cba7b0c76ce', noisy: '61e66d8d059378f9',
+    clean: '2f1e8fcb01cb8fab', sparse: 'fcc0b95a1ad406c8', noisy: 'ed81f030aeb675e8',
     close: '882b5d3660cd4e22', recess: '9a7425b172e21d4a', falseForward: '9f9ccf4bc819b025', gap: 'e802e49f79cc4d0b',
     empty: '8f3e7639b1aadd0a', single: '6febc2aa814e8a11', saturation: '7cfcf4f610946585', orthogonal: 'a20a65729c3a4497', offsetComponents: 'd409aa6ebddc02b8', colorFallback: '0c1a94a43c58ee15',
   }

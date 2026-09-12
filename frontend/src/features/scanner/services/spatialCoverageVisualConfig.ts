@@ -9,11 +9,10 @@ export const DENSE_MASK_ROWS = 45
 
 export const COVERAGE_VISUAL_OPACITY = {
   candidate: 0.45,
-  observed: 0.3,
-  partial: 0.14,
-  // Completed cells remain faintly visible so users can distinguish durable
-  // measured coverage from the short-lived current-frame mask.
-  captured: 0.055,
+  observed: 0.42,
+  partial: 0.32,
+  // Keep a readable, persistent cue over the camera image on bright surfaces.
+  captured: 0.24,
 } as const
 
 /** Continuous live-mask confidence; persistent states remain discrete. */
@@ -35,9 +34,9 @@ export const COVERAGE_VISUAL_CONFIDENCE_CONFIG = {
 } as const
 
 export const COVERAGE_VISUAL_COLORS: Record<CoverageCellState, readonly [number, number, number]> = {
-  observed: [0.22, 0.62, 0.86],
-  partial: [0.38, 0.78, 0.94],
-  captured: [0.56, 0.9, 1],
+  observed: [1, 0.62, 0.18],
+  partial: [0.2, 0.72, 1],
+  captured: [0.2, 0.9, 0.48],
 }
 
 /** Short-lived presentation-only stabilization; never enters persistent scan data. */

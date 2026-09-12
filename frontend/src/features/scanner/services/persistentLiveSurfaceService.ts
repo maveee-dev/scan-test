@@ -1036,9 +1036,7 @@ export class PersistentLiveSurfaceService {
         continue
       }
 
-      const color = debugVisible && state === 'captured'
-        ? COVERAGE_VISUAL_COLORS.captured
-        : COVERAGE_VISUAL_COLORS[state === 'captured' ? 'partial' : state]
+      const color = COVERAGE_VISUAL_COLORS[state]
       this.writeSurfelQuad(surfel, color, opacity, offset)
       offset += VERTICES_PER_SURFEL * FLOATS_PER_VERTEX
       renderedSurfelCount += 1

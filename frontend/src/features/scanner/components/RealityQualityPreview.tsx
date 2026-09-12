@@ -12,6 +12,7 @@ const modes = [['raw-accepted', '1. Raw Accepted Measurement Audit'], ['live', '
 export default function RealityQualityPreview({ source }: { source: FinalizedDenseRealityReconstruction }) {
   const host = useRef<HTMLDivElement>(null), worker = useRef<Worker | null>(null), requestId = useRef(0)
   const [mode, setMode] = useState('final'), [busy, setBusy] = useState(true), [error, setError] = useState('')
+  const [showExperiments, setShowExperiments] = useState(false)
   const [result, setResult] = useState<{ prepared: PreparedRealitySurface; stats: RealityRefinementStats; filterStats: RealityConfidenceFilterStats } | null>(null)
   const [screenSpaceAudit, setScreenSpaceAudit] = useState<RealityScreenSpaceCoverageDiagnostics | null>(null)
   const [renderInfo, setRenderInfo] = useState({ width: 0, height: 0, dpr: 1, fps: 0, drawCalls: 0, restoreSetupMs: null as number | null, firstRenderCallMs: null as number | null, rollingRenderCallMs: null as number | null })
@@ -123,10 +124,12 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
   const texture = result?.prepared.textureStats
   const lowestTextureRegions = texture?.spatialRegionCoverage.slice().sort((a, b) => a.percentage - b.percentage || b.totalTriangles - a.totalTriangles).slice(0, 6) ?? []
   const lowQuality = Boolean(filter && (filter.repeatability.stableSampleRatio < .3 || filter.floatingComponentsRejected > Math.max(4,filter.connectedComponentCount*.35)) || measurement && measurement.accepted < Math.max(3,measurement.ticksConsidered*.35))
-  return <section aria-label="M8.7.1.6 production Reality quality" style={{ marginBlock: 24 }}>
-    <h2>M8.7.1.6 Production Reality Preview</h2>
-    <p>Drag to orbit; pinch to zoom. Live fusion is a lightweight guide; Final is rebuilt from retained accepted measurements in a dedicated worker. No M7 surface or invented hole geometry is used.</p>
+  return <section aria-label="Captured room model" style={{ marginBlock: 24 }}>
+    <h2>Your captured room</h2>
+    <p>Drag to look around; pinch to zoom. Check the model from several sides. Gaps are areas without enough usable measurements; rescan them from overlapping angles.</p>
+    <p>Walls remain measured surfaces. Object sides and recesses keep their recorded depth. Hidden surfaces and exact dimensions are not verified by this preview.</p>
     {lowQuality && <p role="alert">Scan quality is low. For a cleaner model, continue scanning longer or rescan while moving slowly and viewing surfaces from another angle.</p>}
+    <details><summary>Compare reconstruction stages</summary>
     <label>Quality comparison <select value={mode} onChange={(e) => select(e.target.value)}>{modes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     {mode === 'layers' && <p>Range bands from the first recorded scanner position, not inferred planar layers.</p>}
     {mode === 'reveal' && <p>First-observed time: green/blue is earlier, magenta is later. This shows when geometry was revealed; it does not label a recess semantically.</p>}
@@ -143,13 +146,17 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
     {mode === 'base-color' && <p>Real registered RGB retained with accepted reconstruction measurements; no high-resolution keyframe refinement.</p>}
     {mode === 'high-res' && <p>Optional visibility-aware high-resolution RGB refinement applied over the real registered RGB baseline.</p>}
     {mode === 'textured' && <p>Each existing triangle chooses the best real keyframe shared by all three vertices’ bounded visibility-approved view sets. Every other triangle and splat keeps base per-surfel RGB.</p>}
+    </details>
     {busy && <p role="status">Preparing measured display geometry in worker…</p>}{error && <p role="alert">{error}</p>}
     <div ref={host} style={{ height: 440, maxHeight: '65vh', width: '100%', touchAction: 'none', borderRadius: 12, overflow: 'hidden' }} />
-    {source.m812SynchronizedRgbd?.status === 'available' && <M813ViewDependentVisualRealityPreview
+    {source.m812SynchronizedRgbd?.status === 'available' && <details onToggle={(event) => setShowExperiments(event.currentTarget.open)}>
+      <summary>Experimental comparisons</summary>
+    {showExperiments && <M813ViewDependentVisualRealityPreview
       snapshot={source.m812SynchronizedRgbd}
       baselineSurfels={source.canonicalSurfels ?? source.surfels}
     />}
-    {source.m812SynchronizedRgbd?.status === 'available' && <M812SynchronizedRgbdProofPreview snapshot={source.m812SynchronizedRgbd} />}
+    {showExperiments && <M812SynchronizedRgbdProofPreview snapshot={source.m812SynchronizedRgbd} />}
+    </details>}
     <details><summary>Frame acceptance, stability, components and repeatability</summary>
       <p>Measurement funnel: candidate ticks {measurement?.candidateTicks ?? 0}; cadence skipped {measurement?.cadenceSkipped ?? 0}; stationary skipped {measurement?.skippedTogether ?? 0}; backpressure skipped {measurement?.backpressureSkipped ?? 0}; considered {measurement?.ticksConsidered ?? 0}; accepted {measurement?.accepted ?? 0}; fused {measurement?.fusedSuccessfully ?? 0}. Acceptance {measurement?.acceptedPercentage.toFixed(1) ?? 0}%; fused {measurement?.fusedPercentage.toFixed(1) ?? 0}%.</p>
       <p>Rejected: motion {measurement?.motionRejected ?? 0}; tracking {measurement?.trackingRejected ?? 0}; depth {measurement?.depthRejected ?? 0}; pose discontinuity {measurement?.poseDiscontinuityRejected ?? 0}; world consistency {measurement?.consistencyRejected ?? 0}. Depth reasons: missing {measurement?.depthRejectedMissing ?? 0}; valid ratio {measurement?.depthRejectedValidRatio ?? 0}; sample count {measurement?.depthRejectedSampleCount ?? 0}; outliers {measurement?.depthRejectedOutliers ?? 0}; discontinuity {measurement?.depthRejectedDiscontinuity ?? 0}; range {measurement?.depthRejectedRange ?? 0}.</p>

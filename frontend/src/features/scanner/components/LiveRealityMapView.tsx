@@ -75,7 +75,7 @@ export default function LiveRealityMapView({ bridge }: { bridge: LiveRealityMap 
     }
   }, [bridge, open])
   return <div style={{ pointerEvents: 'auto' }}>
-    <button type="button" onClick={() => { setOpen(!open); setError('') }}>{open ? 'AR Scan View' : 'Live 3D Map'}</button>
+    <button type="button" className="xr-scanner-hud-debug" onClick={() => { setOpen(!open); setError('') }}>{open ? 'AR Scan View' : 'Live 3D Map'}</button>
     {open && <div style={{ position: 'fixed', inset: '110px 12px 125px', zIndex: 5, background: '#101b23', color: 'white', borderRadius: 12, padding: 8 }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
         <button onClick={() => setFollow(!follow)}>{follow ? 'Follow Scanner' : 'Free Look'}</button>

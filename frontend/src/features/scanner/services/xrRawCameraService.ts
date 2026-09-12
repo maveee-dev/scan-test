@@ -18,7 +18,7 @@ const MAX_COPY_DIMENSION = 160
 const MAX_COPY_PIXELS = 160 * 90
 const KEYFRAME_MAX_COPY_DIMENSION = 320
 const KEYFRAME_MAX_COPY_PIXELS = 320 * 180
-// Eight 432x960 RGB portrait appearance frames use about 9.49 MiB, excluding
+// Sixteen 432x960 RGB portrait appearance frames use about 18.99 MiB, excluding
 // the tiny pose matrices.  This is intentionally separate from live RGB-D.
 const APPEARANCE_KEYFRAME_MAX_COPY_PIXELS = 432 * 960
 const READBACK_SAMPLE_CAPACITY = 32

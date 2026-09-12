@@ -14,14 +14,16 @@ export const CANONICAL_REALITY_CONFIG = Object.freeze({
   cellSizeMeters: 0.025,
   maxSurfels: 60000,
   maxLayersPerCell: 4,
-  matchTangentDistanceMeters: 0.046,
+  // Correspondences stay inside one measured cell instead of smearing nearby
+  // samples across almost two cells on a flat wall or a detailed object.
+  matchTangentDistanceMeters: 0.018,
   matchPlaneResidualMeters: 0.022,
   minimumNormalDot: Math.cos(43 * Math.PI / 180),
   maximumUpdateMeters: 0.003,
   falseParallelMinimumMeters: 0.028,
   falseParallelMaximumMeters: 0.105,
 })
-/** Exact Euclidean envelope of the unchanged tangent and plane match gates. */
+/** Euclidean envelope of the tangent and plane match gates. */
 const MATCH_BUCKET_WIDTH_METERS = Math.hypot(CANONICAL_REALITY_CONFIG.matchTangentDistanceMeters, CANONICAL_REALITY_CONFIG.matchPlaneResidualMeters)
 
 /**
@@ -336,7 +338,10 @@ function consolidateFrame(frame: RetainedRealityMeasurementFrame): ConsolidatedO
   const observations = [...representatives.values()]
   if (observations.length <= RETAINED_REALITY_CONFIG.maxConsolidatedSamplesPerFrame) return observations
   const stride = observations.length / RETAINED_REALITY_CONFIG.maxConsolidatedSamplesPerFrame
-  return Array.from({ length: RETAINED_REALITY_CONFIG.maxConsolidatedSamplesPerFrame }, (_unused, index) => observations[Math.floor(index * stride)])
+  // Rotate the stratified subset across the four actual sampling phases.
+  // Repeated higher-resolution frames must not discard the same cells forever.
+  const phaseOffset = (((frame.samplingPhase % 4) + 4) % 4 + .5) / 4
+  return Array.from({ length: RETAINED_REALITY_CONFIG.maxConsolidatedSamplesPerFrame }, (_unused, index) => observations[Math.floor((index + phaseOffset) * stride)])
 }
 
 function calculateBounds(surfels: readonly FinalizedRealitySurfel[]): SpatialBounds | null {
