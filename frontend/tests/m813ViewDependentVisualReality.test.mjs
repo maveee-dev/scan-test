@@ -16,6 +16,7 @@ function moduleUrl(url) {
 }
 const serviceUrl = new URL('../src/features/scanner/services/m813ViewDependentVisualRealityService.ts', import.meta.url)
 const {
+  buildM813MeasuredVertexColors,
   buildM813ViewDependentVisualReality,
   selectM813ViewDependentKeyframes,
   M813_VIEW_DEPENDENT_CONFIG,
@@ -85,7 +86,7 @@ test('M8.13 retains only source-owned measured vertices and leaves missing depth
   for (const sourceIndex of result.keyframes[0].sourceSampleIndices) assert.equal(source.depth.valid[sourceIndex], 1)
 })
 
-test('M8.13 follows the M8.7.1.6 DataTexture row convention and reports live build progress', () => {
+test('M8.13 follows the established source-image row convention and reports live build progress', () => {
   const source = capture(1)
   source.rgbKeyframe.rgb.fill(64)
   const progress = []
@@ -94,10 +95,12 @@ test('M8.13 follows the M8.7.1.6 DataTexture row convention and reports live bui
   const topVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index < source.depth.columns)
   const bottomVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index >= source.depth.columns * (source.depth.rows - 1))
   assert.ok(topVertex >= 0 && bottomVertex >= 0)
-  assert.ok(geometry.sourceGridUvs[topVertex * 2 + 1] > 0.5, 'top-left RGB row follows the established DataTexture v convention')
-  assert.ok(geometry.sourceGridUvs[bottomVertex * 2 + 1] < 0.5, 'bottom RGB row follows the established DataTexture v convention')
+  assert.ok(geometry.sourceGridUvs[topVertex * 2 + 1] > 0.5, 'top-left RGB row maps to the upper UV half')
+  assert.ok(geometry.sourceGridUvs[bottomVertex * 2 + 1] < 0.5, 'bottom RGB row maps to the lower UV half')
   assert.equal(geometry.diagnostics.meanSourceRgbLuma, 64)
   assert.equal(geometry.diagnostics.meanMappedRgbLuma, 64)
+  assert.equal(geometry.vertexColors.length, geometry.sourceSampleIndices.length * 3)
+  assert.equal(geometry.vertexColors[0], 13, 'sRGB 64 is encoded as linear-light RGB for Three.js vertex colors')
   assert.equal(result.diagnostics.meanSourceRgbLuma, 64)
   assert.equal(result.diagnostics.meanMappedRgbLuma, 64)
   assert.deepEqual(progress, [
@@ -108,6 +111,29 @@ test('M8.13 follows the M8.7.1.6 DataTexture row convention and reports live bui
     { stage: 'ownership', completedKeyframes: 0, totalKeyframes: 1 },
     { stage: 'ownership', completedKeyframes: 1, totalKeyframes: 1 },
   ])
+})
+
+test('M8.13 resolves each measured vertex to its projected source RGB in linear light', () => {
+  const source = capture(2)
+  const result = buildM813ViewDependentVisualReality(snapshot([source]), view())
+  const geometry = result.keyframes[0]
+  const colors = buildM813MeasuredVertexColors(source.rgbKeyframe.rgb, source.rgbKeyframe.width, source.rgbKeyframe.height, geometry.sourceGridUvs)
+  const toLinearByte = (value) => {
+    const srgb = value / 255
+    const linear = srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
+    return Math.round(linear * 255)
+  }
+
+  assert.deepEqual(colors, geometry.vertexColors)
+  for (let vertex = 0; vertex < geometry.sourceSampleIndices.length; vertex += 1) {
+    const x = Math.min(source.rgbKeyframe.width - 1, Math.max(0, Math.floor(geometry.sourceGridUvs[vertex * 2] * source.rgbKeyframe.width)))
+    const textureRow = Math.min(source.rgbKeyframe.height - 1, Math.max(0, Math.floor(geometry.sourceGridUvs[vertex * 2 + 1] * source.rgbKeyframe.height)))
+    const y = source.rgbKeyframe.height - 1 - textureRow
+    const sourceOffset = (y * source.rgbKeyframe.width + x) * 3
+    for (let channel = 0; channel < 3; channel += 1) {
+      assert.equal(colors[vertex * 3 + channel], toLinearByte(source.rgbKeyframe.rgb[sourceOffset + channel]))
+    }
+  }
 })
 
 test('RGB UVs are projected from world geometry rather than copied from the depth grid', () => {
@@ -153,6 +179,13 @@ test('production Finish worker no longer eagerly builds closed or experimental r
   assert.doesNotMatch(worker, /buildM810DepthKeyframePatchAtlas|buildM813ViewDependentVisualReality/)
   assert.doesNotMatch(session, /canonicalReality\?\.m810/)
   assert.match(session, /closedExperimentalWorkSkipped/)
+})
+
+test('M8.13 renders its mapped source colors through normalized vertex attributes', () => {
+  const preview = readFileSync(new URL('../src/features/scanner/components/M813ViewDependentVisualRealityPreview.tsx', import.meta.url), 'utf8')
+  assert.match(preview, /new THREE\.BufferAttribute\(keyframe\.vertexColors, 3, true\)/)
+  assert.match(preview, /vertexColors: true/)
+  assert.doesNotMatch(preview, /new THREE\.DataTexture/)
 })
 
 test('same synthetic scan produces an automated M8.7.1.6 versus M8.13 screen audit', () => {

@@ -35,7 +35,7 @@ self.onmessage = (event: MessageEvent<{ id: number; snapshot: M812SynchronizedRg
     })
     const transfers = new Set<ArrayBuffer>()
     for (const keyframe of result.keyframes) {
-      for (const array of [keyframe.rgb, keyframe.positions, keyframe.sourceGridUvs, keyframe.sourceSampleIndices, keyframe.indices]) {
+      for (const array of [keyframe.rgb, keyframe.positions, keyframe.sourceGridUvs, keyframe.vertexColors, keyframe.sourceSampleIndices, keyframe.indices]) {
         if (array.buffer instanceof ArrayBuffer) transfers.add(array.buffer)
       }
     }

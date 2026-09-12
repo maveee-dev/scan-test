@@ -90,6 +90,8 @@ export interface M813ViewDependentKeyframeGeometry {
   readonly positions: Float32Array
   /** Normalized top-left UVs copied directly from the synchronized source grid. */
   readonly sourceGridUvs: Float32Array
+  /** Source RGB at each measured vertex, decoded to linear light and quantized to 8 bits. */
+  readonly vertexColors: Uint8Array
   /** Alias for consumers that use the shorter UV terminology. */
   readonly uvs: Float32Array
   /** Row-major synchronized depth source indices, three per output vertex. */
@@ -203,6 +205,41 @@ function meanMappedRgbLuminance(rgb: Uint8Array, width: number, height: number, 
     total += 0.2126 * rgb[offset] + 0.7152 * rgb[offset + 1] + 0.0722 * rgb[offset + 2]
   }
   return total / vertexCount
+}
+
+function srgbByteToLinearByte(value: number): number {
+  const srgb = value / 255
+  const linear = srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
+  return Math.round(linear * 255)
+}
+
+/**
+ * Resolve the source-owned RGB at each measured vertex before it reaches the GPU.
+ * This avoids relying on mobile DataTexture sampling while retaining each vertex's
+ * sampled projected RGB. Three.js color attributes contain linear-light values.
+ */
+export function buildM813MeasuredVertexColors(
+  rgb: Uint8Array,
+  width: number,
+  height: number,
+  uvs: Float32Array,
+): Uint8Array {
+  const vertexCount = Math.floor(uvs.length / 2)
+  const colors = new Uint8Array(vertexCount * 3)
+  if (width <= 0 || height <= 0 || rgb.length < width * height * 3) return colors
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const x = Math.min(width - 1, Math.max(0, Math.floor(uvs[vertex * 2] * width)))
+    const textureRow = Math.min(height - 1, Math.max(0, Math.floor(uvs[vertex * 2 + 1] * height)))
+    // The keyframe bytes are top-left-first and M8.13's established UVs are bottom-left.
+    const y = height - 1 - textureRow
+    const sourceOffset = (y * width + x) * 3
+    const colorOffset = vertex * 3
+    colors[colorOffset] = srgbByteToLinearByte(rgb[sourceOffset])
+    colors[colorOffset + 1] = srgbByteToLinearByte(rgb[sourceOffset + 1])
+    colors[colorOffset + 2] = srgbByteToLinearByte(rgb[sourceOffset + 2])
+  }
+  return colors
 }
 
 const readPoint = (capture: M812SynchronizedRgbdKeyframe, index: number): Point3 | null => {
@@ -399,7 +436,8 @@ function buildKeyframeGeometry(capture: M812SynchronizedRgbdKeyframe): M813ViewD
   const sourceGridUvs = new Float32Array(state.uvs)
   const sourceSampleIndices = new Int32Array(state.sourceSampleIndices)
   const indices = new Uint32Array(state.indices)
-  const packedBytes = positions.byteLength + sourceGridUvs.byteLength + sourceSampleIndices.byteLength + indices.byteLength
+  const vertexColors = buildM813MeasuredVertexColors(capture.rgbKeyframe.rgb, capture.rgbKeyframe.width, capture.rgbKeyframe.height, sourceGridUvs)
+  const packedBytes = positions.byteLength + sourceGridUvs.byteLength + vertexColors.byteLength + sourceSampleIndices.byteLength + indices.byteLength
   const rgbLuma = meanRgbLuminance(capture.rgbKeyframe.rgb)
   const mappedRgbLuma = meanMappedRgbLuminance(capture.rgbKeyframe.rgb, capture.rgbKeyframe.width, capture.rgbKeyframe.height, sourceGridUvs)
   const diagnostics: M813KeyframeGeometryDiagnostics = Object.freeze({
@@ -428,6 +466,7 @@ function buildKeyframeGeometry(capture: M812SynchronizedRgbdKeyframe): M813ViewD
     validDepthFraction: validDepthFraction(capture),
     positions,
     sourceGridUvs,
+    vertexColors,
     uvs: sourceGridUvs,
     sourceSampleIndices,
     indices,

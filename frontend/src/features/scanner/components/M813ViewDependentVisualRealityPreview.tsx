@@ -119,15 +119,11 @@ export default function M813ViewDependentVisualRealityPreview({
     for (const [order, keyframe] of result.keyframes.entries()) {
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(keyframe.positions, 3))
-      geometry.setAttribute('uv', new THREE.BufferAttribute(keyframe.sourceGridUvs, 2))
+      geometry.setAttribute('color', new THREE.BufferAttribute(keyframe.vertexColors, 3, true))
       geometry.setIndex(new THREE.BufferAttribute(keyframe.indices, 1))
       geometry.computeBoundingBox()
       if (geometry.boundingBox) bounds.union(geometry.boundingBox)
-      const texture = new THREE.DataTexture(keyframe.rgb, keyframe.width, keyframe.height, THREE.RGBFormat, THREE.UnsignedByteType)
-      texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false
-      texture.wrapS = THREE.ClampToEdgeWrapping; texture.wrapT = THREE.ClampToEdgeWrapping
-      texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter; texture.generateMipmaps = false; texture.needsUpdate = true
-      const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, depthTest: true, depthWrite: true, toneMapped: false,
+      const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true, side: THREE.DoubleSide, depthTest: true, depthWrite: true, toneMapped: false,
         polygonOffset: true, polygonOffsetFactor: -order * 0.02, polygonOffsetUnits: -order * 0.02 })
       const mesh = new THREE.Mesh(geometry, material); mesh.renderOrder = order; scene.add(mesh); meshes.set(keyframe.keyframeId, mesh)
     }
@@ -179,7 +175,7 @@ export default function M813ViewDependentVisualRealityPreview({
     raf = requestAnimationFrame(render)
     return () => {
       cancelAnimationFrame(raf); window.clearTimeout(auditTimer); controls.removeEventListener('change', queueAudit); controls.dispose(); observer.disconnect()
-      for (const mesh of meshes.values()) { mesh.geometry.dispose(); (mesh.material as THREE.MeshBasicMaterial).map?.dispose(); (mesh.material as THREE.Material).dispose() }
+      for (const mesh of meshes.values()) { mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose() }
       renderer.dispose(); renderer.domElement.remove()
     }
   }, [baselineSurfels, result])
@@ -195,7 +191,7 @@ export default function M813ViewDependentVisualRealityPreview({
   }).join(', ')
   return <section style={{ marginBlock: 20 }} aria-label="M8.13 experimental same-scan comparison">
     <h3>M8.13 View-Dependent Visual Reality (experimental)</h3>
-    <p>M8.7.1.6 Final Reality remains the production result above. This optional same-scan renderer uses only bounded, synchronized measured RGB-D keyframes; it never fills gaps or merges geometry between keyframes.</p>
+    <p>M8.7.1.6 Final Reality remains the production result above. This optional same-scan renderer colors measured vertices from their synchronized RGB pixels; it never fills gaps or merges geometry between keyframes.</p>
     <p>Available input: {snapshot.keyframes.length}/{snapshot.capacity} synchronized keyframes, {(memory.rawPackedLowerBoundBytes / 1048576).toFixed(2)} MiB packed lower bound. Nothing is built on the Finish critical path.</p>
     <button type="button" className="scan-button scan-button-secondary" onClick={build} disabled={status === 'working'}>
       {status === 'working' ? 'Building M8.13 measured views…' : result ? 'Rebuild M8.13 comparison' : 'Build M8.13 same-scan comparison'}
