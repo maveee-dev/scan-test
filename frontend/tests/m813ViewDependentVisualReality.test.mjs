@@ -85,6 +85,31 @@ test('M8.13 retains only source-owned measured vertices and leaves missing depth
   for (const sourceIndex of result.keyframes[0].sourceSampleIndices) assert.equal(source.depth.valid[sourceIndex], 1)
 })
 
+test('M8.13 maps top-left RGB rows to DataTexture coordinates and reports live build progress', () => {
+  const source = capture(1)
+  source.rgbKeyframe.rgb.fill(64)
+  const progress = []
+  const result = buildM813ViewDependentVisualReality(snapshot([source]), view(), { onProgress: (update) => progress.push(update) })
+  const geometry = result.keyframes[0]
+  const topVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index < source.depth.columns)
+  const bottomVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index >= source.depth.columns * (source.depth.rows - 1))
+  assert.ok(topVertex >= 0 && bottomVertex >= 0)
+  assert.ok(geometry.sourceGridUvs[topVertex * 2 + 1] < 0.5, 'top-left RGB row must map to DataTexture v=0')
+  assert.ok(geometry.sourceGridUvs[bottomVertex * 2 + 1] > 0.5, 'bottom RGB row must map to DataTexture v=1')
+  assert.equal(geometry.diagnostics.meanSourceRgbLuma, 64)
+  assert.equal(geometry.diagnostics.meanMappedRgbLuma, 64)
+  assert.equal(result.diagnostics.meanSourceRgbLuma, 64)
+  assert.equal(result.diagnostics.meanMappedRgbLuma, 64)
+  assert.deepEqual(progress, [
+    { stage: 'ranking', completedKeyframes: 0, totalKeyframes: 1 },
+    { stage: 'ranking', completedKeyframes: 1, totalKeyframes: 1 },
+    { stage: 'geometry', completedKeyframes: 0, totalKeyframes: 1 },
+    { stage: 'geometry', completedKeyframes: 1, totalKeyframes: 1 },
+    { stage: 'ownership', completedKeyframes: 0, totalKeyframes: 1 },
+    { stage: 'ownership', completedKeyframes: 1, totalKeyframes: 1 },
+  ])
+})
+
 test('RGB UVs are projected from world geometry rather than copied from the depth grid', () => {
   const source = capture(2, { gridUvOverride: 0.5 })
   const result = buildM813ViewDependentVisualReality(snapshot([source]), view())

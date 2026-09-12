@@ -19,6 +19,15 @@ export interface M813VirtualView {
 export interface M813ViewDependentVisualRealityOptions {
   readonly maxActiveKeyframes?: number
   readonly minActiveKeyframes?: number
+  readonly onProgress?: (progress: M813ViewDependentVisualRealityProgress) => void
+}
+
+export type M813ViewDependentVisualRealityBuildStage = 'ranking' | 'geometry' | 'ownership'
+
+export interface M813ViewDependentVisualRealityProgress {
+  readonly stage: M813ViewDependentVisualRealityBuildStage
+  readonly completedKeyframes: number
+  readonly totalKeyframes: number
 }
 
 export const M813_VIEW_DEPENDENT_CONFIG = Object.freeze({
@@ -60,6 +69,10 @@ export interface M813KeyframeGeometryDiagnostics {
   readonly rejectedDepthDiscontinuityQuads: number
   readonly rejectedEdgeTooLongQuads: number
   readonly rejectedDegenerateQuads: number
+  /** Mean source-image luma in the retained 8-bit RGB keyframe (0–255). */
+  readonly meanSourceRgbLuma: number
+  /** Mean source-image luma at retained measured vertices (0–255). */
+  readonly meanMappedRgbLuma: number
   readonly packedBytes: number
 }
 
@@ -102,6 +115,10 @@ export interface M813ViewDependentVisualRealityDiagnostics {
   readonly sourceOwnershipViolations: number
   readonly inventedVertexCount: number
   readonly packedArrayBytes: number
+  /** Pixel-weighted mean luma across the source RGB images (0–255). */
+  readonly meanSourceRgbLuma: number
+  /** Vertex-weighted mean luma at the RGB pixels sampled by measured geometry (0–255). */
+  readonly meanMappedRgbLuma: number
   readonly buildTimeMs: number
   readonly sourceOwnedRgb: boolean
   readonly noCrossKeyframeGeometryMerge: true
@@ -162,6 +179,29 @@ const cross = (a: Point3, b: Point3): Point3 => ({
 const isFinitePoint = (point: Point3): boolean =>
   Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z)
 
+function meanRgbLuminance(rgb: Uint8Array): number {
+  const pixelCount = Math.floor(rgb.length / 3)
+  if (pixelCount === 0) return 0
+  let total = 0
+  for (let offset = 0; offset + 2 < rgb.length; offset += 3) {
+    total += 0.2126 * rgb[offset] + 0.7152 * rgb[offset + 1] + 0.0722 * rgb[offset + 2]
+  }
+  return total / pixelCount
+}
+
+function meanMappedRgbLuminance(rgb: Uint8Array, width: number, height: number, uvs: Float32Array): number {
+  const vertexCount = Math.floor(uvs.length / 2)
+  if (vertexCount === 0 || width <= 0 || height <= 0) return 0
+  let total = 0
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const x = Math.min(width - 1, Math.max(0, Math.floor(uvs[vertex * 2] * width)))
+    const y = Math.min(height - 1, Math.max(0, Math.floor(uvs[vertex * 2 + 1] * height)))
+    const offset = (y * width + x) * 3
+    total += 0.2126 * rgb[offset] + 0.7152 * rgb[offset + 1] + 0.0722 * rgb[offset + 2]
+  }
+  return total / vertexCount
+}
+
 const readPoint = (capture: M812SynchronizedRgbdKeyframe, index: number): Point3 | null => {
   const depth = capture.depth
   const offset = index * 3
@@ -189,7 +229,10 @@ const readUv = (capture: M812SynchronizedRgbdKeyframe, index: number): readonly 
   ) || !mapCameraUvToCopyPixelInto(capture.rgbKeyframe.mapping, projected.u, projected.v, pixel)) return null
   return [
     (pixel.x + 0.5) / capture.rgbKeyframe.width,
-    1 - (pixel.y + 0.5) / capture.rgbKeyframe.height,
+    // RGB keyframes are copied into top-left row order. The renderer uses a
+    // DataTexture with flipY=false, where the first array row is sampled at
+    // v=0, so preserve this top-left row coordinate instead of inverting it.
+    (pixel.y + 0.5) / capture.rgbKeyframe.height,
   ]
 }
 
@@ -356,6 +399,8 @@ function buildKeyframeGeometry(capture: M812SynchronizedRgbdKeyframe): M813ViewD
   const sourceSampleIndices = new Int32Array(state.sourceSampleIndices)
   const indices = new Uint32Array(state.indices)
   const packedBytes = positions.byteLength + sourceGridUvs.byteLength + sourceSampleIndices.byteLength + indices.byteLength
+  const rgbLuma = meanRgbLuminance(capture.rgbKeyframe.rgb)
+  const mappedRgbLuma = meanMappedRgbLuminance(capture.rgbKeyframe.rgb, capture.rgbKeyframe.width, capture.rgbKeyframe.height, sourceGridUvs)
   const diagnostics: M813KeyframeGeometryDiagnostics = Object.freeze({
     keyframeId: capture.rgbKeyframe.id,
     frameSequence: capture.frameSequence,
@@ -366,6 +411,8 @@ function buildKeyframeGeometry(capture: M812SynchronizedRgbdKeyframe): M813ViewD
     rejectedDepthDiscontinuityQuads: state.rejectedDepthDiscontinuityQuads,
     rejectedEdgeTooLongQuads: state.rejectedEdgeTooLongQuads,
     rejectedDegenerateQuads: state.rejectedDegenerateQuads,
+    meanSourceRgbLuma: rgbLuma,
+    meanMappedRgbLuma: mappedRgbLuma,
     packedBytes,
   })
   return Object.freeze({
@@ -406,6 +453,8 @@ function emptyResult(startedAt: number, snapshot: M812SynchronizedRgbdSnapshot):
       rejectedDepthDiscontinuityQuads: 0,
       rejectedEdgeTooLongQuads: 0,
       rejectedDegenerateQuads: 0,
+      meanSourceRgbLuma: 0,
+      meanMappedRgbLuma: 0,
       sourceOwnershipViolations: 0,
       inventedVertexCount: 0,
       packedArrayBytes: 0,
@@ -429,19 +478,32 @@ export function buildM813ViewDependentVisualReality(
   if (!snapshot || snapshot.status !== 'available' || snapshot.keyframes.length === 0) return emptyResult(startedAt, snapshot)
 
   const captures = sortCaptures(snapshot)
+  const reportProgress = (stage: M813ViewDependentVisualRealityBuildStage, completedKeyframes: number): void => {
+    options.onProgress?.({ stage, completedKeyframes, totalKeyframes: captures.length })
+  }
   const maxActive = Math.max(1, Math.min(
     M813_VIEW_DEPENDENT_CONFIG.maximumActiveKeyframes,
     Math.floor(options.maxActiveKeyframes ?? M813_VIEW_DEPENDENT_CONFIG.maximumActiveKeyframes),
   ))
   const minActive = Math.max(1, Math.min(maxActive, Math.floor(options.minActiveKeyframes ?? M813_VIEW_DEPENDENT_CONFIG.minimumActiveKeyframes)))
-  const ranked = captures.map((capture) => rankKeyframe(capture, view)).sort((left, right) =>
+  reportProgress('ranking', 0)
+  const ranked = captures.map((capture, index) => {
+    const entry = rankKeyframe(capture, view)
+    reportProgress('ranking', index + 1)
+    return entry
+  }).sort((left, right) =>
     right.score - left.score || right.qualityScore - left.qualityScore || left.capture.frameSequence - right.capture.frameSequence || left.capture.rgbKeyframe.id - right.capture.rgbKeyframe.id,
   )
   const activeCount = Math.min(ranked.length, Math.max(minActive, Math.min(maxActive, ranked.length)))
   const active = ranked.slice(0, activeCount)
   // Build every bounded source-owned keyframe once. The renderer then changes
   // only which 2–4 existing layers are visible as the virtual camera moves.
-  const geometries = captures.map((capture) => buildKeyframeGeometry(capture))
+  const geometries: M813ViewDependentKeyframeGeometry[] = []
+  reportProgress('geometry', 0)
+  for (const [index, capture] of captures.entries()) {
+    geometries.push(buildKeyframeGeometry(capture))
+    reportProgress('geometry', index + 1)
+  }
 
   let candidateQuadCount = 0
   let retainedTriangleCount = 0
@@ -452,8 +514,13 @@ export function buildM813ViewDependentVisualReality(
   let rejectedDegenerateQuads = 0
   let sourceOwnershipViolations = 0
   let packedArrayBytes = 0
+  let sourceRgbLumaTotal = 0
+  let sourceRgbPixelCount = 0
+  let mappedRgbLumaTotal = 0
+  let mappedRgbVertexCount = 0
   const keyframeDiagnostics: M813KeyframeGeometryDiagnostics[] = []
-  for (const geometry of geometries) {
+  reportProgress('ownership', 0)
+  for (const [geometryIndex, geometry] of geometries.entries()) {
     candidateQuadCount += geometry.diagnostics.candidateQuadCount
     retainedTriangleCount += geometry.diagnostics.retainedTriangleCount
     retainedVertexCount += geometry.diagnostics.retainedVertexCount
@@ -462,6 +529,12 @@ export function buildM813ViewDependentVisualReality(
     rejectedEdgeTooLongQuads += geometry.diagnostics.rejectedEdgeTooLongQuads
     rejectedDegenerateQuads += geometry.diagnostics.rejectedDegenerateQuads
     packedArrayBytes += geometry.diagnostics.packedBytes
+    const sourcePixels = Math.floor(geometry.rgb.length / 3)
+    sourceRgbLumaTotal += geometry.diagnostics.meanSourceRgbLuma * sourcePixels
+    sourceRgbPixelCount += sourcePixels
+    const mappedVertices = geometry.sourceSampleIndices.length
+    mappedRgbLumaTotal += geometry.diagnostics.meanMappedRgbLuma * mappedVertices
+    mappedRgbVertexCount += mappedVertices
     keyframeDiagnostics.push(geometry.diagnostics)
     const capture = captures.find((entry) => entry.rgbKeyframe.id === geometry.keyframeId)!
     for (let vertex = 0; vertex < geometry.sourceSampleIndices.length; vertex += 1) {
@@ -476,6 +549,7 @@ export function buildM813ViewDependentVisualReality(
         !Number.isFinite(geometry.sourceGridUvs[uvIndex]) ||
         !Number.isFinite(geometry.sourceGridUvs[uvIndex + 1])) sourceOwnershipViolations += 1
     }
+    reportProgress('ownership', geometryIndex + 1)
   }
   const viewRanking = ranked.map((entry) => Object.freeze({
     keyframeId: entry.capture.rgbKeyframe.id,
@@ -505,6 +579,8 @@ export function buildM813ViewDependentVisualReality(
     sourceOwnershipViolations,
     inventedVertexCount: sourceOwnershipViolations,
     packedArrayBytes,
+    meanSourceRgbLuma: sourceRgbPixelCount > 0 ? sourceRgbLumaTotal / sourceRgbPixelCount : 0,
+    meanMappedRgbLuma: mappedRgbVertexCount > 0 ? mappedRgbLumaTotal / mappedRgbVertexCount : 0,
     buildTimeMs: Math.max(0, now() - startedAt),
     sourceOwnedRgb: geometries.every((geometry) => geometry.rgb.byteLength === geometry.width * geometry.height * 3),
     noCrossKeyframeGeometryMerge: true,

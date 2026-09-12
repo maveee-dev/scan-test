@@ -185,10 +185,32 @@ Implementation files:
 
 Final integration gate:
 
-- `npm run test:reality`: 247/247 tests passed;
+- `npm run test:reality`: 261/261 tests passed after the screenshot follow-up;
 - `npm run build`: passed, including the separately emitted lazy M8.13 worker
   chunk (the pre-existing large application-chunk warning remains);
 - `npm run lint`: passed;
 - `git diff --check`: passed.
 
 No production-success claim is made from synthetic tests.
+
+## H. Screenshot follow-up: dark texture mapping and build progress
+
+The M8.13 screenshot showed the measured geometry rendering nearly black and no
+visible build progress. The RGB keyframe copy is stored top-left-first, while
+the preview uses a `DataTexture` with `flipY=false`. M8.13 had inverted the
+projected top-left pixel row when writing UV `v`, so the texture sampled the
+opposite row from the synchronized camera image. UVs now preserve the copied
+row coordinate. The optional preview also reports mean source RGB luma from
+those same retained buffers and mean luma at the pixels sampled by measured
+vertices. That distinguishes a dark source image from a mismatch between the
+source image and projected geometry without capturing new data.
+
+The worker previously emitted only its final result or an error. It now reports
+measured per-keyframe progress for ranking, geometry construction, and source
+ownership checks; the UI exposes these updates through an accessible live
+status and progress element. Progress reflects completed work rather than time.
+
+These changes remain inside the opt-in M8.13 experiment and consume the existing
+M8.12 snapshot. They do not alter M8.7.1.6 production, M7/customization, scan
+capture cadence, or the Finish critical path. The source-luma diagnostic and
+projection-row regression are covered by the M8.13 test suite.

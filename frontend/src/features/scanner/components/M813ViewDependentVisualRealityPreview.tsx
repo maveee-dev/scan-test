@@ -10,6 +10,7 @@ import {
 import {
   M813_VIEW_DEPENDENT_CONFIG,
   selectM813ViewDependentKeyframes,
+  type M813ViewDependentVisualRealityProgress,
   type M813ViewDependentVisualRealityResult,
 } from '../services/m813ViewDependentVisualRealityService'
 import type { M813WorkerResult } from '../services/m813ViewDependentVisualReality.worker'
@@ -51,6 +52,7 @@ export default function M813ViewDependentVisualRealityPreview({
   const host = useRef<HTMLDivElement>(null)
   const activeWorker = useRef<Worker | null>(null)
   const [status, setStatus] = useState<'idle' | 'working' | 'complete' | 'error'>('idle')
+  const [progress, setProgress] = useState<M813ViewDependentVisualRealityProgress | null>(null)
   const [error, setError] = useState('')
   const [result, setResult] = useState<M813ViewDependentVisualRealityResult | null>(null)
   const [browser, setBrowser] = useState<BrowserDiagnostics>(emptyBrowserDiagnostics)
@@ -60,7 +62,7 @@ export default function M813ViewDependentVisualRealityPreview({
 
   const build = (): void => {
     activeWorker.current?.terminate()
-    setStatus('working'); setError(''); setResult(null); setAudits(null); setBrowser(emptyBrowserDiagnostics)
+    setStatus('working'); setProgress(null); setError(''); setResult(null); setAudits(null); setBrowser(emptyBrowserDiagnostics)
     const worker = new Worker(new URL('../services/m813ViewDependentVisualReality.worker.ts', import.meta.url), { type: 'module' })
     activeWorker.current = worker
     const input = cloneM812SynchronizedRgbdSnapshot(snapshot, M813_VIEW_DEPENDENT_CONFIG.maximumInputKeyframes)
@@ -75,10 +77,15 @@ export default function M813ViewDependentVisualRealityPreview({
     const postMessageMs = Math.max(0, clockNow() - postStartedAt)
     worker.onmessage = (event: MessageEvent<M813WorkerResult>) => {
       if (event.data.id !== 1) return
+      if (event.data.type === 'progress') {
+        setProgress(event.data.progress)
+        return
+      }
       activeWorker.current = null
       worker.terminate()
-      if (event.data.error || !event.data.result) {
-        setStatus('error'); setError(event.data.error ?? 'M8.13 returned no result.')
+      setProgress(null)
+      if (event.data.type === 'error') {
+        setStatus('error'); setError(event.data.error)
         return
       }
       setBrowser({ ...emptyBrowserDiagnostics, postMessageMs, workerRoundTripMs: Math.max(0, epochNow() - postedAt) })
@@ -88,7 +95,7 @@ export default function M813ViewDependentVisualRealityPreview({
     worker.onerror = () => {
       activeWorker.current = null
       worker.terminate()
-      setStatus('error'); setError('M8.13 worker failed.')
+      setProgress(null); setStatus('error'); setError('M8.13 worker failed.')
     }
   }
 
@@ -186,11 +193,17 @@ export default function M813ViewDependentVisualRealityPreview({
     <button type="button" className="scan-button scan-button-secondary" onClick={build} disabled={status === 'working'}>
       {status === 'working' ? 'Building M8.13 measured views…' : result ? 'Rebuild M8.13 comparison' : 'Build M8.13 same-scan comparison'}
     </button>
+    {status === 'working' && <div role="status" aria-live="polite" style={{ marginBlock: 8 }}>
+      {progress ? <>
+        <p>{progress.stage === 'ranking' ? 'Ranking retained RGB-D views' : progress.stage === 'geometry' ? 'Building measured keyframe geometry' : 'Checking source ownership'} — keyframe {progress.completedKeyframes} of {progress.totalKeyframes}.</p>
+        <progress value={progress.completedKeyframes} max={Math.max(1, progress.totalKeyframes)} aria-label={`${progress.stage} keyframe progress`} />
+      </> : <p>Preparing the retained synchronized scan for the worker…</p>}
+    </div>}
     {error && <p role="alert">{error}</p>}
     {result && <>
       <div ref={host} style={{ width: '100%', minHeight: 420, aspectRatio: '1 / 1', marginBlock: 12, borderRadius: 12, overflow: 'hidden', background: '#111b24' }} />
       <p>Active view layers {browser.activeKeyframeIds.join(', ') || 'none'} ({browser.drawCalls} draw calls, {browser.fps} FPS). Drag to orbit and verify that selection changes without rebuilding geometry.</p>
-      <p>Bounded input/built/active {diagnostic?.boundedInputKeyframeCount}/{result.keyframes.length}/{diagnostic?.activeKeyframeCount}; measured triangles/vertices {diagnostic?.retainedTriangleCount}/{diagnostic?.retainedVertexCount}; rejected quads invalid/depth-edge/long-edge/degenerate {diagnostic?.rejectedInvalidDepthQuads}/{diagnostic?.rejectedDepthDiscontinuityQuads}/{diagnostic?.rejectedEdgeTooLongQuads}/{diagnostic?.rejectedDegenerateQuads}. Ownership violations/invented vertices {diagnostic?.sourceOwnershipViolations}/{diagnostic?.inventedVertexCount}.</p>
+      <p>Bounded input/built/active {diagnostic?.boundedInputKeyframeCount}/{result.keyframes.length}/{diagnostic?.activeKeyframeCount}; measured triangles/vertices {diagnostic?.retainedTriangleCount}/{diagnostic?.retainedVertexCount}; rejected quads invalid/depth-edge/long-edge/degenerate {diagnostic?.rejectedInvalidDepthQuads}/{diagnostic?.rejectedDepthDiscontinuityQuads}/{diagnostic?.rejectedEdgeTooLongQuads}/{diagnostic?.rejectedDegenerateQuads}. Ownership violations/invented vertices {diagnostic?.sourceOwnershipViolations}/{diagnostic?.inventedVertexCount}; source/mapped RGB mean luma {diagnostic?.meanSourceRgbLuma.toFixed(1) ?? 'N/A'}/{diagnostic?.meanMappedRgbLuma.toFixed(1) ?? 'N/A'} / 255.</p>
       <p>Build/worker round-trip/postMessage/GPU setup/first-paint proxy {diagnostic?.buildTimeMs.toFixed(1)} / {browser.workerRoundTripMs?.toFixed(1) ?? 'N/A'} / {browser.postMessageMs?.toFixed(1) ?? 'N/A'} / {browser.gpuSetupMs?.toFixed(1) ?? 'N/A'} / {browser.firstPaintMs?.toFixed(1) ?? 'N/A'} ms; packed geometry {(diagnostic?.packedArrayBytes ?? 0) / 1048576 >= 0.01 ? ((diagnostic?.packedArrayBytes ?? 0) / 1048576).toFixed(2) : '<0.01'} MiB.</p>
       {audits && <p>Same virtual camera screen audit — M8.7.1.6 vs M8.13 useful pixels {audits.baseline.usefulPixelCount}/{audits.experimental.usefulPixelCount}; viewport-hole proxy {(audits.baseline.holeFraction * 100).toFixed(1)}%/{(audits.experimental.holeFraction * 100).toFixed(1)}%; visible primitives {audits.baseline.visiblePrimitiveCount}/{audits.experimental.visiblePrimitiveCount}. This is a deterministic viewport diagnostic, not proof of physical room completeness.</p>}
     </>}
