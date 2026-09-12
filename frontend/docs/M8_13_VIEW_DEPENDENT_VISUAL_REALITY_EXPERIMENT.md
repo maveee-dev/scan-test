@@ -195,15 +195,19 @@ No production-success claim is made from synthetic tests.
 
 ## H. Screenshot follow-up: dark texture mapping and build progress
 
-The M8.13 screenshot showed the measured geometry rendering nearly black and no
-visible build progress. The RGB keyframe copy is stored top-left-first, while
-the preview uses a `DataTexture` with `flipY=false`. M8.13 had inverted the
-projected top-left pixel row when writing UV `v`, so the texture sampled the
-opposite row from the synchronized camera image. UVs now preserve the copied
-row coordinate. The optional preview also reports mean source RGB luma from
-those same retained buffers and mean luma at the pixels sampled by measured
-vertices. That distinguishes a dark source image from a mismatch between the
-source image and projected geometry without capturing new data.
+The same-scan screenshots show the M8.7.1.6 result in color while the M8.13
+preview is nearly black, with no visible build progress. A code comparison
+found that both preview paths use `DataTexture` with `flipY=false` and invert
+the projected top-left image row when writing UV `v`. The earlier M8.13 change
+that removed this inversion was not justified by the screenshots and has been
+reverted; a regression test now asserts the established M8.7.1.6 convention.
+
+The optional M8.13 preview reports mean source RGB luma and mean luma at the
+pixels sampled by measured vertices, both globally and for each currently
+active keyframe. These readings use the retained scan buffers and can show
+whether the active source frames are dark or whether the difference appears
+after texture sampling/rendering. They support diagnosis without capturing new
+data; the screenshots alone do not establish the cause of the dark preview.
 
 The worker previously emitted only its final result or an error. It now reports
 measured per-keyframe progress for ranking, geometry construction, and source
@@ -212,5 +216,6 @@ status and progress element. Progress reflects completed work rather than time.
 
 These changes remain inside the opt-in M8.13 experiment and consume the existing
 M8.12 snapshot. They do not alter M8.7.1.6 production, M7/customization, scan
-capture cadence, or the Finish critical path. The source-luma diagnostic and
-projection-row regression are covered by the M8.13 test suite.
+capture cadence, or the Finish critical path. The source-luma diagnostic, active
+keyframe luma display, progress reporting, and projection-row convention are
+covered by the M8.13 test suite.

@@ -186,6 +186,13 @@ export default function M813ViewDependentVisualRealityPreview({
 
   const diagnostic = result?.diagnostics
   const memory = snapshot.diagnostics.memory
+  const activeKeyframeIds = browser.activeKeyframeIds.length > 0
+    ? browser.activeKeyframeIds
+    : diagnostic?.selectedKeyframeIds ?? []
+  const activeKeyframeLuma = activeKeyframeIds.map((keyframeId) => {
+    const keyframeDiagnostic = diagnostic?.keyframeDiagnostics.find((entry) => entry.keyframeId === keyframeId)
+    return `${keyframeId}: ${keyframeDiagnostic ? `${keyframeDiagnostic.meanSourceRgbLuma.toFixed(1)}/${keyframeDiagnostic.meanMappedRgbLuma.toFixed(1)}` : 'N/A'}`
+  }).join(', ')
   return <section style={{ marginBlock: 20 }} aria-label="M8.13 experimental same-scan comparison">
     <h3>M8.13 View-Dependent Visual Reality (experimental)</h3>
     <p>M8.7.1.6 Final Reality remains the production result above. This optional same-scan renderer uses only bounded, synchronized measured RGB-D keyframes; it never fills gaps or merges geometry between keyframes.</p>
@@ -203,6 +210,7 @@ export default function M813ViewDependentVisualRealityPreview({
     {result && <>
       <div ref={host} style={{ width: '100%', minHeight: 420, aspectRatio: '1 / 1', marginBlock: 12, borderRadius: 12, overflow: 'hidden', background: '#111b24' }} />
       <p>Active view layers {browser.activeKeyframeIds.join(', ') || 'none'} ({browser.drawCalls} draw calls, {browser.fps} FPS). Drag to orbit and verify that selection changes without rebuilding geometry.</p>
+      <p>Active keyframe source/mapped RGB luma (0–255): {activeKeyframeLuma || 'Waiting for active view selection'}.</p>
       <p>Bounded input/built/active {diagnostic?.boundedInputKeyframeCount}/{result.keyframes.length}/{diagnostic?.activeKeyframeCount}; measured triangles/vertices {diagnostic?.retainedTriangleCount}/{diagnostic?.retainedVertexCount}; rejected quads invalid/depth-edge/long-edge/degenerate {diagnostic?.rejectedInvalidDepthQuads}/{diagnostic?.rejectedDepthDiscontinuityQuads}/{diagnostic?.rejectedEdgeTooLongQuads}/{diagnostic?.rejectedDegenerateQuads}. Ownership violations/invented vertices {diagnostic?.sourceOwnershipViolations}/{diagnostic?.inventedVertexCount}; source/mapped RGB mean luma {diagnostic?.meanSourceRgbLuma.toFixed(1) ?? 'N/A'}/{diagnostic?.meanMappedRgbLuma.toFixed(1) ?? 'N/A'} / 255.</p>
       <p>Build/worker round-trip/postMessage/GPU setup/first-paint proxy {diagnostic?.buildTimeMs.toFixed(1)} / {browser.workerRoundTripMs?.toFixed(1) ?? 'N/A'} / {browser.postMessageMs?.toFixed(1) ?? 'N/A'} / {browser.gpuSetupMs?.toFixed(1) ?? 'N/A'} / {browser.firstPaintMs?.toFixed(1) ?? 'N/A'} ms; packed geometry {(diagnostic?.packedArrayBytes ?? 0) / 1048576 >= 0.01 ? ((diagnostic?.packedArrayBytes ?? 0) / 1048576).toFixed(2) : '<0.01'} MiB.</p>
       {audits && <p>Same virtual camera screen audit — M8.7.1.6 vs M8.13 useful pixels {audits.baseline.usefulPixelCount}/{audits.experimental.usefulPixelCount}; viewport-hole proxy {(audits.baseline.holeFraction * 100).toFixed(1)}%/{(audits.experimental.holeFraction * 100).toFixed(1)}%; visible primitives {audits.baseline.visiblePrimitiveCount}/{audits.experimental.visiblePrimitiveCount}. This is a deterministic viewport diagnostic, not proof of physical room completeness.</p>}

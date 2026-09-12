@@ -195,7 +195,10 @@ function meanMappedRgbLuminance(rgb: Uint8Array, width: number, height: number, 
   let total = 0
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const x = Math.min(width - 1, Math.max(0, Math.floor(uvs[vertex * 2] * width)))
-    const y = Math.min(height - 1, Math.max(0, Math.floor(uvs[vertex * 2 + 1] * height)))
+    // DataTexture uses the same bottom-left UV convention as M8.7.1.6 while
+    // its RGB byte array remains top-left-first, so invert v to read its row.
+    const textureRow = Math.min(height - 1, Math.max(0, Math.floor(uvs[vertex * 2 + 1] * height)))
+    const y = height - 1 - textureRow
     const offset = (y * width + x) * 3
     total += 0.2126 * rgb[offset] + 0.7152 * rgb[offset + 1] + 0.0722 * rgb[offset + 2]
   }
@@ -229,10 +232,8 @@ const readUv = (capture: M812SynchronizedRgbdKeyframe, index: number): readonly 
   ) || !mapCameraUvToCopyPixelInto(capture.rgbKeyframe.mapping, projected.u, projected.v, pixel)) return null
   return [
     (pixel.x + 0.5) / capture.rgbKeyframe.width,
-    // RGB keyframes are copied into top-left row order. The renderer uses a
-    // DataTexture with flipY=false, where the first array row is sampled at
-    // v=0, so preserve this top-left row coordinate instead of inverting it.
-    (pixel.y + 0.5) / capture.rgbKeyframe.height,
+    // Match the proven M8.7.1.6 DataTexture convention for top-left RGB rows.
+    1 - (pixel.y + 0.5) / capture.rgbKeyframe.height,
   ]
 }
 

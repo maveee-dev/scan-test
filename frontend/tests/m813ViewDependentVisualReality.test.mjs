@@ -85,7 +85,7 @@ test('M8.13 retains only source-owned measured vertices and leaves missing depth
   for (const sourceIndex of result.keyframes[0].sourceSampleIndices) assert.equal(source.depth.valid[sourceIndex], 1)
 })
 
-test('M8.13 maps top-left RGB rows to DataTexture coordinates and reports live build progress', () => {
+test('M8.13 follows the M8.7.1.6 DataTexture row convention and reports live build progress', () => {
   const source = capture(1)
   source.rgbKeyframe.rgb.fill(64)
   const progress = []
@@ -94,8 +94,8 @@ test('M8.13 maps top-left RGB rows to DataTexture coordinates and reports live b
   const topVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index < source.depth.columns)
   const bottomVertex = Array.from(geometry.sourceSampleIndices).findIndex((index) => index >= source.depth.columns * (source.depth.rows - 1))
   assert.ok(topVertex >= 0 && bottomVertex >= 0)
-  assert.ok(geometry.sourceGridUvs[topVertex * 2 + 1] < 0.5, 'top-left RGB row must map to DataTexture v=0')
-  assert.ok(geometry.sourceGridUvs[bottomVertex * 2 + 1] > 0.5, 'bottom RGB row must map to DataTexture v=1')
+  assert.ok(geometry.sourceGridUvs[topVertex * 2 + 1] > 0.5, 'top-left RGB row follows the established DataTexture v convention')
+  assert.ok(geometry.sourceGridUvs[bottomVertex * 2 + 1] < 0.5, 'bottom RGB row follows the established DataTexture v convention')
   assert.equal(geometry.diagnostics.meanSourceRgbLuma, 64)
   assert.equal(geometry.diagnostics.meanMappedRgbLuma, 64)
   assert.equal(result.diagnostics.meanSourceRgbLuma, 64)
