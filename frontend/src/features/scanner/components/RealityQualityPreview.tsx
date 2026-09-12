@@ -7,6 +7,7 @@ import type { RealityRefinementStats } from '../services/realityDisplayRefinemen
 import type { RealityConfidenceFilterStats } from '../services/realityConfidenceFiltering'
 import M812SynchronizedRgbdProofPreview from './M812SynchronizedRgbdProofPreview'
 import M813ViewDependentVisualRealityPreview from './M813ViewDependentVisualRealityPreview'
+import ScanCaptureDownload from './ScanCaptureDownload'
 
 const modes = [['raw-accepted', '1. Raw Accepted Measurement Audit'], ['live', '2. Live Lightweight Fusion'], ['retained', '3. Per-Frame Consolidated Measurements'], ['canonical', '4. Post-Scan Canonical Fusion'], ['baseline-canonical', 'M8.7.1.6 Baseline Canonical'], ['baseline-flat-triangles', 'M8.7.1.6 Flat Triangle Control'], ['confidence', '5. Confidence Filtered Canonical'], ['hybrid', '6. Canonical Hybrid Mesh + Surfels'], ['base-color', '7. Base Real RGB Canonical'], ['high-res', '8. High-Res Color Refined'], ['final', '9. Final M8.7.1.6 Reality'], ['textured', '10. Textured Canonical Reality'], ['provisional-expiry', 'Provisional Outcomes Map (diagnostic)'], ['canonical-triangulated', 'Triangulation Only (diagnostic)'], ['layers', 'Depth Layers — 10 cm range bands'], ['discontinuities', 'Depth Discontinuities'], ['new', 'New Geometry — first observed time'], ['views', 'Multi-View Observation Count'], ['reveal', 'Recess / Occlusion Reveal'], ['trajectory', 'Scan Trajectory']]
 export default function RealityQualityPreview({ source }: { source: FinalizedDenseRealityReconstruction }) {
@@ -53,7 +54,7 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
     // preview worker ownership of an explicit bounded packed copy.
     const workerExpiryMap = expiryMap && Object.freeze({ ...expiryMap, positions: expiryMap.positions.slice(), reasonCodes: expiryMap.reasonCodes.slice() })
     const workerConsolidatedMap = consolidatedMap && Object.freeze({ ...consolidatedMap, positions: consolidatedMap.positions.slice() })
-    const { m810DepthKeyframePatchAtlas: _m810Atlas, m812SynchronizedRgbd: _m812Snapshot, ...sourceForWorker } = source
+    const { m810DepthKeyframePatchAtlas: _m810Atlas, m812SynchronizedRgbd: _m812Snapshot, retainedMeasurements: _replayInput, ...sourceForWorker } = source
     // The quality worker does not consume the large experimental RGB-D snapshot.
     // It remains on the main thread for an explicit lazy M8.13 build.
     const workerSource = workerExpiryMap || workerConsolidatedMap ? Object.freeze({ ...sourceForWorker,
@@ -126,9 +127,10 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
   const lowQuality = Boolean(filter && (filter.repeatability.stableSampleRatio < .3 || filter.floatingComponentsRejected > Math.max(4,filter.connectedComponentCount*.35)) || measurement && measurement.accepted < Math.max(3,measurement.ticksConsidered*.35))
   return <section aria-label="Captured room model" style={{ marginBlock: 24 }}>
     <h2>Your captured room</h2>
-    <p>Drag to look around; pinch to zoom. Check the model from several sides. Gaps are areas without enough usable measurements; rescan them from overlapping angles.</p>
+    <p>Drag to look around; pinch to zoom. Check the model from several sides. Missing measurements and reconstruction errors can both leave gaps.</p>
     <p>Walls remain measured surfaces. Object sides and recesses keep their recorded depth. Hidden surfaces and exact dimensions are not verified by this preview.</p>
-    {lowQuality && <p role="alert">Scan quality is low. For a cleaner model, continue scanning longer or rescan while moving slowly and viewing surfaces from another angle.</p>}
+    {lowQuality && <p role="alert">This capture has limited reliable geometry. Download the scan capture to help diagnose missing or distorted surfaces.</p>}
+    <ScanCaptureDownload key={source.scanId} source={source} />
     <details><summary>Compare reconstruction stages</summary>
     <label>Quality comparison <select value={mode} onChange={(e) => select(e.target.value)}>{modes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
     {mode === 'layers' && <p>Range bands from the first recorded scanner position, not inferred planar layers.</p>}
@@ -138,8 +140,8 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
     {mode === 'live' && <p>Bounded, decimated live fusion used only for guidance and map inspection. It is not the source of Final Reality.</p>}
     {mode === 'retained' && <p>Bounded, one-actual-measurement-per-cell samples from the per-frame-consolidated input used by deterministic canonical replay.</p>}
     {mode === 'canonical' && <p>Deterministic post-scan replay after per-frame consolidation, robust surfel updates and provisional-layer resolution.</p>}
-    {mode === 'baseline-canonical' && <p>M8.7.1.6 Baseline Canonical: the unchanged production reconstruction arm from this retained capture.</p>}
-    {mode === 'baseline-flat-triangles' && <p>M8.7.1.6 flat triangle control: unchanged canonical spread geometry, one camera and one diagnostic flat color.</p>}
+    {mode === 'baseline-canonical' && <p>Current production canonical geometry from this retained capture, before appearance refinement.</p>}
+    {mode === 'baseline-flat-triangles' && <p>Flat triangle control: current canonical geometry with one diagnostic color.</p>}
     {mode === 'provisional-expiry' && <p>Measured canonical outcomes. Green: promoted; orange: temporal support; magenta: multi-view; cyan: replaced; red: duplicate parallel layer; gray: isolated/noisy; yellow: capacity/layer policy; white: other. This bounded map does not fill geometry.</p>}
     {mode === 'confidence' && <p>Final safety filtering over canonical—not live—geometry. Supported recesses and protrusions remain measured.</p>}
     {mode === 'hybrid' && <p>Every oriented canonical measured disc remains as a depth-biased coverage underlay beneath the safe measured triangle skin.</p>}
@@ -158,6 +160,7 @@ export default function RealityQualityPreview({ source }: { source: FinalizedDen
     {showExperiments && <M812SynchronizedRgbdProofPreview snapshot={source.m812SynchronizedRgbd} />}
     </details>}
     <details><summary>Frame acceptance, stability, components and repeatability</summary>
+    {canonical?.visibility && <p>Measured visibility: checked {canonical.visibility.checkedFrames} calibrated views; removed {canonical.visibility.removedSamples} samples contradicted by clear-space measurements. Preserved nearer-object occlusions in {canonical.visibility.occludedComparisons} comparisons.</p>}
       <p>Measurement funnel: candidate ticks {measurement?.candidateTicks ?? 0}; cadence skipped {measurement?.cadenceSkipped ?? 0}; stationary skipped {measurement?.skippedTogether ?? 0}; backpressure skipped {measurement?.backpressureSkipped ?? 0}; considered {measurement?.ticksConsidered ?? 0}; accepted {measurement?.accepted ?? 0}; fused {measurement?.fusedSuccessfully ?? 0}. Acceptance {measurement?.acceptedPercentage.toFixed(1) ?? 0}%; fused {measurement?.fusedPercentage.toFixed(1) ?? 0}%.</p>
       <p>Rejected: motion {measurement?.motionRejected ?? 0}; tracking {measurement?.trackingRejected ?? 0}; depth {measurement?.depthRejected ?? 0}; pose discontinuity {measurement?.poseDiscontinuityRejected ?? 0}; world consistency {measurement?.consistencyRejected ?? 0}. Depth reasons: missing {measurement?.depthRejectedMissing ?? 0}; valid ratio {measurement?.depthRejectedValidRatio ?? 0}; sample count {measurement?.depthRejectedSampleCount ?? 0}; outliers {measurement?.depthRejectedOutliers ?? 0}; discontinuity {measurement?.depthRejectedDiscontinuity ?? 0}; range {measurement?.depthRejectedRange ?? 0}.</p>
       <p>Spatial validity: {measurement?.scanSpatialValidity ?? 'unknown'} ({measurement?.scanSpatialValidityReason ?? 'none'}); reference-space resets {measurement?.referenceSpaceResetCount ?? 0}; pose epochs observed/accepted {measurement?.poseEpochCount ?? 0}/{measurement?.acceptedPoseEpochCount ?? 0}. Finish gate requires one healthy epoch.</p>

@@ -82,5 +82,8 @@ temp/
 
 # Misc
 
-*.local
+# Local room captures and diagnostic replay output
+*.scan
+replay-output/
 
+*.local

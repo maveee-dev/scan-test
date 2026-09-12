@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import { CanonicalRealityFusionService } from './canonicalRealityFusionService'
-import type { RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
+import { retainedMeasurementTransferBuffers, type RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
 import { createRetainedRealityMeasurementSnapshotSignature } from './layeredMeasuredSurfaceFieldService'
 import type { PostScanCanonicalFusionResult, PostScanWorkerStageTiming } from './postScanCanonicalFusionService'
 
@@ -23,12 +23,14 @@ self.onmessage = (event: MessageEvent<{ id: number; snapshot: RetainedRealityMea
     const result: PostScanCanonicalFusionResult = Object.freeze({
       ...baseline,
       baseline,
+      retainedMeasurements: event.data.snapshot,
       inputSnapshotSignature: signature,
       baselineInputSnapshotSignature: signature,
     })
     const workerResultPostEpochMs = epochMs()
     const transport = Object.freeze({ workerReceiveEpochMs, workerStartEpochMs, workerResultPostEpochMs, workerStageEpochs: Object.freeze(workerStageEpochs) })
     const transferList = [
+      ...retainedMeasurementTransferBuffers(event.data.snapshot),
       result.baseline.consolidatedMeasurementMap.positions.buffer,
       result.baseline.diagnostics.provisionalExpiryMap.positions.buffer,
       result.baseline.diagnostics.provisionalExpiryMap.reasonCodes.buffer,

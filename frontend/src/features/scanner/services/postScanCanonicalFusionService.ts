@@ -1,20 +1,9 @@
 import { CanonicalRealityFusionService, type CanonicalRealityFusionResult, type CanonicalReconstructionStage } from './canonicalRealityFusionService'
 import { createRetainedRealityMeasurementSnapshotSignature } from './layeredMeasuredSurfaceFieldService'
-import type { RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
+import { retainedMeasurementTransferBuffers, type RetainedRealityMeasurementSnapshot } from './retainedRealityMeasurementService'
 
 function transferBuffers(snapshot: RetainedRealityMeasurementSnapshot): ArrayBuffer[] {
-  const buffers = snapshot.frames.flatMap((frame) => [
-    frame.denseFrame.valid.buffer,
-    frame.denseFrame.normalizedX.buffer,
-    frame.denseFrame.normalizedY.buffer,
-    frame.denseFrame.distancesMeters.buffer,
-    frame.denseFrame.points.buffer,
-    frame.normals.buffer,
-    frame.normalValid.buffer,
-    frame.colorSourceIndices.buffer,
-    frame.srgbColors.buffer,
-  ] as ArrayBuffer[])
-  return [...new Set(buffers)]
+  return retainedMeasurementTransferBuffers(snapshot)
 }
 
 export interface PostScanWorkerStageTiming {
@@ -36,7 +25,8 @@ export interface PostScanCanonicalFusionTransportDiagnostics {
 }
 
 export interface PostScanCanonicalFusionResult extends CanonicalRealityFusionResult {
-  /** The unchanged M8.7.1.6 arm; spread fields remain backward-compatible. */
+  readonly retainedMeasurements?: RetainedRealityMeasurementSnapshot
+  /** Production canonical output; spread fields remain backward-compatible. */
   readonly baseline: CanonicalRealityFusionResult
   readonly inputSnapshotSignature: string
   readonly baselineInputSnapshotSignature: string
@@ -64,6 +54,7 @@ export function reconstructCanonicalReality(
     return Promise.resolve(Object.freeze({
       ...baseline,
       baseline,
+      retainedMeasurements: snapshot,
       inputSnapshotSignature,
       baselineInputSnapshotSignature: inputSnapshotSignature,
       transportDiagnostics: Object.freeze({

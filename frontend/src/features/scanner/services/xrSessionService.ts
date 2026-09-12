@@ -675,6 +675,7 @@ export class XRSessionService {
         measurementDiagnostics: Object.freeze(this.measurementStabilityService.getDiagnostics()),
         measurementQueueDiagnostics: Object.freeze(this.measurementQueue.getDiagnostics()),
         retainedMeasurementDiagnostics: retainedMeasurements.diagnostics,
+        retainedMeasurements: canonicalReality?.retainedMeasurements,
         canonicalFusionDiagnostics: canonicalReality?.diagnostics,
         provisionalExpiryMap: canonicalReality?.diagnostics.provisionalExpiryMap,
         consolidatedMeasurementMap: canonicalReality?.consolidatedMeasurementMap,

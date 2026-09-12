@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scan replay browser regression</title>
+<style>body{font:16px system-ui;margin:24px;max-width:700px;background:#111b24;color:#fff}canvas{max-width:100%}button{padding:14px;font:inherit}pre{white-space:pre-wrap}</style></head>
+<body><h1>Scan replay browser regression</h1><p>Synthetic fixture. Expected image: red above blue.</p><div id="image"></div><pre id="status">Running…</pre><div id="download"></div>
+<script type="module">
+import * as THREE from 'three'
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import ScanCaptureDownload from '../../src/features/scanner/components/ScanCaptureDownload.tsx'
+import { reconstructCanonicalReality } from '../../src/features/scanner/services/postScanCanonicalFusionService.ts'
+import { refineRealityDisplay } from '../../src/features/scanner/services/realityDisplayRefinement.ts'
+import { createRealitySurfaceRenderResources, appendRealityTextureBatches, packRealitySurface, restoreRealitySurface } from '../../src/features/scanner/services/realitySurfaceRenderingService.ts'
+import { encodeScanReplay, decodeScanReplay } from '../../src/features/scanner/services/scanReplayCaptureService.ts'
+const identity = () => new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1])
+const projection = () => new Float32Array([1,0,0,0,0,1,0,0,0,0,-1,-1,0,0,-.1,0])
+const resources = []
+let renderer, target, root
+try {
+  const surfels = Array.from({length: 18 * 18}, (_,i) => ({ id:i, position:{x:(i%18-8.5)*.025,y:(Math.floor(i/18)-8.5)*.025,z:-2},normal:{x:0,y:0,z:1},radius:.0125,colorRgb:{r:.5,g:.5,b:.5},colorSpace:'srgb',geometryConfidence:.9,colorConfidence:.9,colorObservationCount:5,geometryObservationCount:5,viewObservationCount:3,trackingQuality:1,stabilityClass:'high'}))
+  const rgb = new Uint8Array(128*128*3)
+  for(let i=0;i<128*128;i++) rgb.set(i<128*64 ? [240,20,10] : [10,20,240],i*3)
+  const keyframe = {id:1,timestamp:1,width:128,height:128,rgb,cameraTransform:identity(),inverseCameraTransform:identity(),projectionMatrix:projection(),qualityScore:1,mapping:{sourceCameraWidth:128,sourceCameraHeight:128,copyWidth:128,copyHeight:128,sourceUvRect:{x:0,y:0,width:1,height:1},orientation:'upright'}}
+  const refined = refineRealityDisplay(surfels,[keyframe])
+  const built = createRealitySurfaceRenderResources({surfels:refined.combined},'dense'); resources.push(built)
+  appendRealityTextureBatches(built,refined.combined,refined.textureBindingCandidates,[keyframe])
+  const prepared = packRealitySurface(built), restored = restoreRealitySurface(prepared); resources.push(restored)
+  renderer = new THREE.WebGLRenderer({antialias:false}); renderer.setSize(256,256); renderer.outputColorSpace=THREE.SRGBColorSpace
+  document.querySelector('#image').append(renderer.domElement)
+  const scene = new THREE.Scene(); scene.add(restored.group)
+  const camera = new THREE.OrthographicCamera(-.25,.25,.25,-.25,.1,10)
+  renderer.render(scene,camera)
+  target = new THREE.WebGLRenderTarget(256,256)
+  renderer.setRenderTarget(target); renderer.render(scene,camera)
+  const pixels = new Uint8Array(256*256*4); renderer.readRenderTargetPixels(target,0,0,256,256,pixels); renderer.setRenderTarget(null)
+  const top = Array.from(pixels.slice((180*256+128)*4,(180*256+128)*4+3))
+  const bottom = Array.from(pixels.slice((76*256+128)*4,(76*256+128)*4+3))
+  if (!(top[0]>top[2]*3 && bottom[2]>bottom[0]*3)) throw new Error(`Texture orientation failed: top ${top}, bottom ${bottom}`)
+  const frames = [0,1,2].map(sequence => {
+    const count=256,normalizedX=new Float32Array(count),normalizedY=new Float32Array(count),points=new Float32Array(count*3),normals=new Float32Array(count*3),cameraX=(sequence-1)*.08
+    for(let i=0;i<count;i++) {const u=.44+(i%16+.5)*.12/16,v=.44+(Math.floor(i/16)+.5)*.12/16;normalizedX[i]=u;normalizedY[i]=v;points.set([(2*u-1)*2+cameraX,(1-2*v)*2,-2],i*3);normals[i*3+2]=1}
+    const inverseViewTransform=identity();inverseViewTransform[12]=-cameraX
+    return {sequence,timestamp:sequence*300,samplingPhase:sequence%4,trackingEpoch:0,trackingQuality:1,cameraPosition:{x:cameraX,y:0,z:0},cameraOrientation:{x:0,y:0,z:0,w:1},projectionMatrix:projection(),inverseViewTransform,denseFrame:{columns:16,rows:16,valid:new Uint8Array(count).fill(1),normalizedX,normalizedY,points,distancesMeters:new Float32Array(count).fill(2),attemptedSampleCount:count,validPointCount:count,rejectedPointCount:0},normals,normalValid:new Uint8Array(count).fill(1),colorSourceIndices:Int32Array.from({length:count},(_,i)=>i),srgbColors:new Uint8Array(count*3).fill(180),coverageProxyKeys:[],viewpointProxyKey:'test'}
+  })
+  const snapshot={frames,diagnostics:{framesRetained:3,samplesRetained:768}}
+  const result=await reconstructCanonicalReality(snapshot)
+  if(frames[0].denseFrame.points.byteLength!==0 || result.retainedMeasurements?.frames[0].denseFrame.points.length!==768 || !result.surfels.length) throw new Error('Worker capture ownership failed')
+  const source={scanId:'browser-synthetic',referenceSpaceType:'local-floor',retainedMeasurements:result.retainedMeasurements,appearanceKeyframes:{scanId:'browser-synthetic',status:'available',keyframes:[keyframe],diagnostics:{}},canonicalFusionDiagnostics:result.diagnostics}
+  const blob=encodeScanReplay({format:'spatial-scan-replay',version:1,scanId:source.scanId,referenceSpaceType:source.referenceSpaceType,build:'browser-test',measurements:source.retainedMeasurements,appearance:source.appearanceKeyframes,diagnostics:{canonical:result.diagnostics}})
+  const replay=decodeScanReplay(await blob.arrayBuffer())
+  if(replay.measurements.frames.length!==3 || replay.appearance.keyframes[0].rgb[0]!==240) throw new Error('Capture round trip failed')
+  root=createRoot(document.querySelector('#download'));root.render(React.createElement(ScanCaptureDownload,{source}))
+  document.querySelector('#status').textContent=`PASS — WebGL texture top ${top}, bottom ${bottom}.\nPASS — real worker returned ${result.surfels.length} measured samples and all 3 depth frames.\nPASS — binary export/replay ${blob.size} bytes.`
+} catch(error) {document.querySelector('#status').textContent=`FAIL — ${error.message}`; console.error(error)}
+window.addEventListener('pagehide',()=>{root?.unmount();for(const r of resources){r.geometries.forEach(g=>g.dispose());r.materials.forEach(m=>{m.map?.dispose();m.dispose()})}target?.dispose();renderer?.dispose();renderer?.forceContextLoss()},{once:true})
+</script></body></html>

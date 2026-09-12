@@ -4,6 +4,7 @@ import type {
   SpatialBounds,
   SpatialPoint,
 } from '../types'
+import { filterMeasuredVisibility, type MeasuredVisibilityDiagnostics } from './measuredVisibilityService'
 import {
   RETAINED_REALITY_CONFIG,
   type RetainedRealityMeasurementFrame,
@@ -68,6 +69,7 @@ export interface ConsolidatedMeasurementMap {
 }
 
 export interface CanonicalRealityFusionDiagnostics {
+  readonly visibility?: MeasuredVisibilityDiagnostics
   readonly inputFrames: number
   readonly inputObservations: number
   readonly consolidatedObservations: number
@@ -787,7 +789,8 @@ export class CanonicalRealityFusionService {
 
     onStage?.('applying-room-appearance')
     const finalPackingStartedAt = performance.now()
-    const retained = surfels.filter((surfel) => !surfel.removed && !surfel.provisional)
+    const visibility = filterMeasuredVisibility(surfels.filter((surfel) => !surfel.removed && !surfel.provisional), frames)
+    const retained = visibility.surfels
     const finalSurfels = retained.map((surfel, id): FinalizedRealitySurfel => {
       const denominator = Math.max(1, surfel.observationCount - 1)
       const geometryConfidence = clamp(.35 + Math.min(1, surfel.observationCount / 6) * .3 + Math.min(1, surfel.viewCount / 2) * .2 + surfel.trackingQualitySum / Math.max(1, surfel.observationCount) * .15, 0, 1)
@@ -814,10 +817,11 @@ export class CanonicalRealityFusionService {
       })
     })
     const thickness = retained.map((surfel) => Math.sqrt(surfel.depthResidualSquaredSum / Math.max(1, surfel.observationCount - 1)) * 2)
+    const visibilitySurvivors = new Set(retained)
     const dominantPlanarThickness: number[] = []
     for (let index = 0; index < surfels.length; index += 1) {
       const surfel = surfels[index]
-      if (surfel.removed || surfel.provisional || coherentSupport(index).coherent < 2) continue
+      if (!visibilitySurvivors.has(surfel) || coherentSupport(index).coherent < 2) continue
       dominantPlanarThickness.push(Math.sqrt(surfel.depthResidualSquaredSum / Math.max(1, surfel.observationCount - 1)) * 2)
     }
     const observations = retained.reduce((total, surfel) => total + surfel.observationCount, 0)
@@ -858,6 +862,7 @@ export class CanonicalRealityFusionService {
       .sort((left, right) => (right.expired + right.capacityRejected) - (left.expired + left.capacityRejected) || left.regionKey.localeCompare(right.regionKey))
       .slice(0, 24))
     const diagnostics: CanonicalRealityFusionDiagnostics = Object.freeze({
+      visibility: visibility.diagnostics,
       inputFrames: frames.length, inputObservations, consolidatedObservations, sameFrameConsolidated, matchedExisting,
       provisionalCreated, provisionalPromoted, provisionalExpired, canonicalMerges, falseParallelLayersCollapsed,
       trueSeparateLayersRetained, outliersRejected, layerCapacityRejected, globalCapacityRejected, localLayerCapacityRejected,

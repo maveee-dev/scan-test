@@ -28,6 +28,9 @@ export interface RetainedRealityMeasurementFrame {
   readonly trackingQuality: number
   readonly cameraPosition: Readonly<SpatialPoint>
   readonly cameraOrientation: Readonly<{ x: number; y: number; z: number; w: number }>
+  /** Calibration for same-frame depth visibility checks and exported replay. */
+  readonly projectionMatrix?: Float32Array
+  readonly inverseViewTransform?: Float32Array
   readonly denseFrame: DenseSpatialPointFrame
   readonly normals: Float32Array
   readonly normalValid: Uint8Array
@@ -73,6 +76,16 @@ export interface RetainedRealityMeasurementSnapshot {
   readonly diagnostics: RetainedRealityMeasurementDiagnostics
 }
 
+/** Transfer ownership in both directions without duplicating retained depth grids. */
+export function retainedMeasurementTransferBuffers(snapshot: RetainedRealityMeasurementSnapshot): ArrayBuffer[] {
+  return [...new Set(snapshot.frames.flatMap(frame => [
+    frame.denseFrame.valid, frame.denseFrame.normalizedX, frame.denseFrame.normalizedY,
+    frame.denseFrame.distancesMeters, frame.denseFrame.points, frame.normals,
+    frame.normalValid, frame.colorSourceIndices, frame.srgbColors,
+    frame.projectionMatrix, frame.inverseViewTransform,
+  ].flatMap(array => array ? [array.buffer as ArrayBuffer] : [])))]
+}
+
 function quaternionDifferenceDegrees(
   left: RetainedRealityMeasurementFrame['cameraOrientation'],
   right: RetainedRealityMeasurementFrame['cameraOrientation'],
@@ -85,7 +98,8 @@ function frameMemoryBytes(frame: RetainedRealityMeasurementFrame): number {
   const dense = frame.denseFrame
   return dense.valid.byteLength + dense.normalizedX.byteLength + dense.normalizedY.byteLength +
     dense.distancesMeters.byteLength + dense.points.byteLength + frame.normals.byteLength +
-    frame.normalValid.byteLength + frame.colorSourceIndices.byteLength + frame.srgbColors.byteLength
+    frame.normalValid.byteLength + frame.colorSourceIndices.byteLength + frame.srgbColors.byteLength +
+    (frame.projectionMatrix?.byteLength ?? 0) + (frame.inverseViewTransform?.byteLength ?? 0)
 }
 
 function createCoverageProxyKeys(frame: DenseSpatialPointFrame): readonly string[] {
@@ -174,6 +188,8 @@ export class RetainedRealityMeasurementService {
       trackingQuality,
       cameraPosition: packet.pose.position,
       cameraOrientation: packet.pose.orientation,
+      projectionMatrix: packet.projectionMatrix,
+      inverseViewTransform: packet.inverseViewTransform,
       denseFrame: packet.denseFrame,
       normals: packet.normals,
       normalValid: packet.normalValid,

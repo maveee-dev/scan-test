@@ -835,6 +835,8 @@ export interface FinalizedDenseRealityReconstruction {
   /** Deterministic post-scan worker output used by production Final Reality. */
   readonly canonicalSurfels?: readonly FinalizedRealitySurfel[]
   readonly retainedMeasurementDiagnostics?: import('./services/retainedRealityMeasurementService').RetainedRealityMeasurementDiagnostics
+  /** Bounded, owned input returned by the reconstruction worker for local replay. */
+  readonly retainedMeasurements?: import('./services/retainedRealityMeasurementService').RetainedRealityMeasurementSnapshot
   readonly canonicalFusionDiagnostics?: import('./services/canonicalRealityFusionService').CanonicalRealityFusionDiagnostics
   /** Isolated M8.10 worker result; baseline `surfels` remains authoritative. */
   readonly m810DepthKeyframePatchAtlas?: import('./services/m810DepthKeyframePatchAtlasService').M810DepthKeyframePatchAtlasResult

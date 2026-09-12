@@ -674,6 +674,8 @@ export function createRetainedRealityMeasurementSnapshotSignature(snapshot: Reta
     for (const value of [dense.columns, dense.rows, dense.validPointCount, dense.attemptedSampleCount, dense.rejectedPointCount]) hashNumber(hash, value)
     hashBytes(hash, dense.valid); hashBytes(hash, dense.normalizedX); hashBytes(hash, dense.normalizedY); hashBytes(hash, dense.distancesMeters); hashBytes(hash, dense.points)
     hashBytes(hash, frame.normals); hashBytes(hash, frame.normalValid); hashBytes(hash, frame.colorSourceIndices); hashBytes(hash, frame.srgbColors)
+    if (frame.projectionMatrix) { hashString(hash, 'projection'); hashBytes(hash, frame.projectionMatrix) }
+    if (frame.inverseViewTransform) { hashString(hash, 'inverse-view'); hashBytes(hash, frame.inverseViewTransform) }
   }
   hashString(hash, JSON.stringify(snapshot.diagnostics))
   return `m88-${hash.first.toString(16).padStart(8, '0')}-${hash.second.toString(16).padStart(8, '0')}`

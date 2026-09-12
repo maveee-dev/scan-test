@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "test:reality": "node --test tests/realityRendering.test.mjs tests/realityStructuralAssociation.test.mjs tests/realityQuality.test.mjs tests/m88LayeredField.test.mjs tests/m89DepthKeyframePatches.test.mjs tests/m810DepthKeyframePatchAtlas.test.mjs tests/m812SynchronizedRgbd.test.mjs tests/m813ViewDependentVisualReality.test.mjs tests/spatialCoveragePersistence.test.mjs tests/finishScalabilityInvestigation.test.mjs",
+    "test:reality": "node --test tests/realityRendering.test.mjs tests/realityStructuralAssociation.test.mjs tests/realityQuality.test.mjs tests/m88LayeredField.test.mjs tests/m89DepthKeyframePatches.test.mjs tests/m810DepthKeyframePatchAtlas.test.mjs tests/m812SynchronizedRgbd.test.mjs tests/m813ViewDependentVisualReality.test.mjs tests/spatialCoveragePersistence.test.mjs tests/finishScalabilityInvestigation.test.mjs tests/scanReplayCapture.test.mjs",
+    "replay:scan": "node scripts/replay-scan.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

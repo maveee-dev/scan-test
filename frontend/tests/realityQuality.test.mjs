@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import ts from 'typescript'
+import { RGBAFormat, SRGBColorSpace, UnsignedByteType } from 'three'
 const cache = new Map()
 function moduleUrl(url) {
   if (cache.has(url.href)) return cache.get(url.href)
@@ -17,7 +18,7 @@ const { RealityRgbKeyframeService } = await load('realityRgbKeyframeService')
 const { APPEARANCE_KEYFRAME_CAPACITY } = await load('appearanceCaptureConfig')
 const { getScanCaptureGuidance } = await load('scanCaptureGuidance')
 const { estimateMeasuredDepthNormals } = await load('measuredDepthNormalService')
-const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMeasuredCellFootprintAlpha, packRealitySurface } = await load('realitySurfaceRenderingService')
+const { appendRealityTextureBatches, createRealitySurfaceRenderResources, getMeasuredCellFootprintAlpha, packRealitySurface, restoreRealitySurface } = await load('realitySurfaceRenderingService')
 const { getFullFrameCopyDimensions } = await load('xrRawCameraService')
 const { XRDepthService } = await load('xrDepthService')
 const { SpatialPointService } = await load('spatialPointService')
@@ -264,6 +265,40 @@ test('dense hybrid keeps every measured disc beneath partial safe triangles',()=
   r.geometries.forEach((g)=>g.dispose());r.materials.forEach((m)=>m.dispose())
 })
 test('high-resolution appearance uses actual RGB and proven reprojection', () => { const source=plane(8), frame=keyframe(128), before=JSON.stringify(source);const r=refineRealityDisplay(source,[frame]);assert.ok(r.stats.refinedColors>0);assert.equal(r.appearance[30].colorRgb.r,210/255);assert.equal(r.textureBindings[30]?.keyframeId,1);assert.ok(r.textureBindings[30]?.u>0&&r.textureBindings[30]?.u<1);assert.equal(JSON.stringify(source),before) })
+
+test('asymmetric camera image keeps top and bottom on the correct measured vertices', () => {
+  const frame=keyframe(128),source=plane(18)
+  for(let y=0;y<128;y++) for(let x=0;x<128;x++) frame.rgb.set(y<64?[240,20,10]:[10,20,240],(y*128+x)*3)
+  const refined=refineRealityDisplay(source,[frame])
+  const resources=createRealitySurfaceRenderResources({surfels:refined.appearance},'dense')
+  appendRealityTextureBatches(resources,refined.appearance,refined.textureBindingCandidates,[frame])
+  const prepared=packRealitySurface(resources)
+  let top=0,bottom=0
+  for(const layer of prepared.layers.filter(v=>v.kind==='textured')){
+    const geometry=prepared.geometries[layer.geometry]
+    const p=geometry.attributes.find(a=>a.name==='position').array,uv=geometry.attributes.find(a=>a.name==='uv').array
+    const batch=prepared.textureBatches[layer.textureBatch]
+    for(let i=0;i<p.length/3;i++){
+      if(Math.abs(p[i*3+1])<.04)continue
+      const row=Math.min(127,Math.floor(uv[i*2+1]*128)),column=Math.min(127,Math.floor(uv[i*2]*128))
+      const k=(row*128+column)*3
+      if(p[i*3+1]>0){assert.ok(batch.rgb[k]>batch.rgb[k+2],'upper geometry must sample the red top of the camera image');top++}
+      else{assert.ok(batch.rgb[k+2]>batch.rgb[k],'lower geometry must sample the blue bottom of the camera image');bottom++}
+    }
+  }
+  assert.ok(top>0&&bottom>0)
+  const restored=restoreRealitySurface(prepared)
+  const texture=restored.materials.find(m=>m.map)?.map
+  assert.ok(texture,'restored surface must have a camera texture')
+  assert.equal(texture.format,RGBAFormat,'sRGB uploads require four channels in this Three.js version')
+  assert.equal(texture.type,UnsignedByteType)
+  assert.equal(texture.colorSpace,SRGBColorSpace)
+  assert.equal(texture.flipY,false)
+  assert.deepEqual([...texture.image.data.slice(0,4)],[240,20,10,255])
+  assert.deepEqual([...texture.image.data.slice(-4)],[10,20,240,255])
+  restored.geometries.forEach(g=>g.dispose());restored.materials.forEach(m=>{m.map?.dispose();m.dispose()})
+  resources.geometries.forEach(g=>g.dispose());resources.materials.forEach(m=>m.dispose())
+})
 test('occluded back layer rejects foreground keyframe color and texture ownership', () => {const front=[sample(0,0,0,-1)],back=[sample(1,0,0,-2)];const r=refineRealityDisplay([...front,...back],[keyframe()]);assert.equal(r.appearance[1].colorRgb.r,.5);assert.equal(r.textureBindings[1],null);assert.ok(r.stats.visibilityRejects>0)})
 test('textured stage is bounded real-keyframe triangles with base RGB fallback',()=>{
   const worker=readFileSync(new URL('../src/features/scanner/services/realityQuality.worker.ts',import.meta.url),'utf8')

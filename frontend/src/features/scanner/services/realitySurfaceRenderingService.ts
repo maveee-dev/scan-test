@@ -1139,10 +1139,19 @@ export function restoreRealitySurface(prepared: PreparedRealitySurface): Reality
   for (const layer of prepared.layers) {
     const batch = layer.textureBatch === undefined ? undefined : prepared.textureBatches?.[layer.textureBatch]
     const material = layer.kind === 'textured' && batch ? (() => {
-      const texture = new THREE.DataTexture(batch.rgb, batch.width, batch.height, THREE.RGBFormat, THREE.UnsignedByteType)
+      // Keep capture/worker transport compact RGB. Three.js requires RGBA8 for
+      // sRGB GPU uploads; RGBFormat produces an incomplete/black texture.
+      const rgba = new Uint8Array(batch.width * batch.height * 4)
+      for (let pixel = 0; pixel < batch.width * batch.height; pixel++) {
+        rgba[pixel * 4] = batch.rgb[pixel * 3]
+        rgba[pixel * 4 + 1] = batch.rgb[pixel * 3 + 1]
+        rgba[pixel * 4 + 2] = batch.rgb[pixel * 3 + 2]
+        rgba[pixel * 4 + 3] = 255
+      }
+      const texture = new THREE.DataTexture(rgba, batch.width, batch.height, THREE.RGBAFormat, THREE.UnsignedByteType)
       texture.colorSpace = THREE.SRGBColorSpace; texture.flipY = false; texture.wrapS = THREE.ClampToEdgeWrapping; texture.wrapT = THREE.ClampToEdgeWrapping
       texture.minFilter = THREE.LinearFilter; texture.magFilter = THREE.LinearFilter; texture.generateMipmaps = false; texture.needsUpdate = true
-      return new THREE.MeshBasicMaterial({ map: texture, color: 0xffffff, depthTest: true, depthWrite: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+      return new THREE.MeshBasicMaterial({ map: texture, color: 0xffffff, toneMapped: false, depthTest: true, depthWrite: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
     })() : layer.kind === 'points' ? createPointMaterial()
       : layer.kind === 'm810-triangles' ? new THREE.MeshBasicMaterial({ color: 0x26bfff, depthTest: true, depthWrite: true, side: THREE.DoubleSide, toneMapped: false, vertexColors: geometries[layer.geometry].getAttribute('color') !== undefined })
       : layer.kind === 'triangles' ? createSurfaceMaterial()
@@ -1209,7 +1218,9 @@ export function appendRealityTextureBatches(
       if (Number.isFinite(uv.projectedTexelsPerMeter)) texelDensities.push(uv.projectedTexelsPerMeter)
       if (Number.isFinite(uv.incidence)) incidences.push(uv.incidence)
       if (Number.isFinite(uv.distanceMeters)) distances.push(uv.distanceMeters)
-      bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, 1 - uv.v)
+      // RGB rows and bindings both start at the top. DataTexture uploads with
+      // flipY=false, so v must address that same row (no second vertical flip).
+      bucket.positions.push(point.x, point.y, point.z); bucket.uvs.push(uv.u, uv.v)
     }
     if (selectedRank === 0) commonPrimaryTriangleCount += 1
     else if (selectedRank === 1) commonSecondTriangleCount += 1
